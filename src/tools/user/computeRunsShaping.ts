@@ -47,7 +47,8 @@ const FALLBACK_STATUS = 'fallback (default parameters)';
 const MODEL_SPECIFIC_CONFIDENCE_LABEL = 'model-specific calibration quality score';
 const WITHIN_FAMILY_CONFIDENCE_LABEL = 'within-family model-selection score';
 const CALIBRATION_CONFIDENCE_SCALE = '0-100 points';
-export const CURRENT_COMPUTE_ENGINE_VERSION = '2.0.4';
+export const CURRENT_COMPUTE_ENGINE_VERSION = '2.0.5';
+const CURRENT_COMPUTE_INPUT_HASH_PATTERN = /^[0-9a-f]{64}$/;
 const TERMINAL_COMPUTE_STATUSES = new Set(['completed', 'cancelled', 'failed']);
 const CORE_COMPUTE_MODEL_IDS = new Set([
   'BlackScholes',
@@ -1263,7 +1264,7 @@ export function isCurrentComputeRunRecord(value: unknown): value is RawComputeRu
     || ownField(data, 'runSchemaVersion') !== 2
     || ownField(summary, 'engineVersion') !== CURRENT_COMPUTE_ENGINE_VERSION
     || typeof ownField(summary, 'inputHash') !== 'string'
-    || (ownField(summary, 'inputHash') as string).trim().length === 0
+    || !CURRENT_COMPUTE_INPUT_HASH_PATTERN.test(ownField(summary, 'inputHash') as string)
     || typeof ownField(record, 'run_key') !== 'string'
     || (ownField(record, 'run_key') as string).trim().length === 0
     || (scope !== 'core' && scope !== 'full')
@@ -1599,7 +1600,7 @@ function confidenceStrictness(record: Record<string, unknown>): ConfidenceStrict
       && ownField(data, 'runSchemaVersion') === 2
       && ownField(summary, 'engineVersion') === CURRENT_COMPUTE_ENGINE_VERSION
       && typeof ownField(summary, 'inputHash') === 'string'
-      && (ownField(summary, 'inputHash') as string).trim().length > 0,
+      && CURRENT_COMPUTE_INPUT_HASH_PATTERN.test(ownField(summary, 'inputHash') as string),
   };
 }
 

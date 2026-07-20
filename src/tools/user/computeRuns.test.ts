@@ -60,6 +60,10 @@ const FULL_CURRENT_MODEL_IDS = [
   'LocalVol-CEV',
 ] as const;
 
+function testInputHash(seed = 1): string {
+  return seed.toString(16).padStart(64, '0');
+}
+
 function makeUnavailableCurrentModel() {
   return {
     variantCount: 1,
@@ -149,8 +153,8 @@ function makeRun(index = 0) {
       key: `compute-data-${index}`,
       resultId: 900 + index,
       summary: {
-        engineVersion: '2.0.4',
-        inputHash: `sha256:input-${index}`,
+        engineVersion: '2.0.5',
+        inputHash: testInputHash(index + 1),
         completionState: 'complete',
         valuationTime: 1774771100000 - index * 1000,
         executionConfig: {
@@ -779,8 +783,8 @@ describe('get_compute_runs wire output', () => {
         syncSchemaVersion: 2,
         runSchemaVersion: 2,
         summary: {
-          engineVersion: '2.0.4',
-          inputHash: 'sha256:nested-current-input',
+          engineVersion: '2.0.5',
+          inputHash: testInputHash(99),
           totalPositions: 2,
           modelExclusionCount: 1,
           includedModelExclusionCount: 1,
@@ -951,9 +955,11 @@ describe('get_compute_runs wire output', () => {
       mutate(run);
       unsupported.push(run);
     };
-    addUnsupported(run => { run.data.summary.engineVersion = '2.0.3'; });
-    addUnsupported(run => { run.data.summary.engineVersion = '2.0.5'; });
-    addUnsupported(run => { run.data.summary.engineVersion = '2.0.4-rc.1'; });
+    addUnsupported(run => { run.data.summary.engineVersion = '2.0.4'; });
+    addUnsupported(run => { run.data.summary.engineVersion = '2.0.6'; });
+    addUnsupported(run => { run.data.summary.engineVersion = '2.0.5-rc.1'; });
+    addUnsupported(run => { run.data.summary.inputHash = 'abc123'; });
+    addUnsupported(run => { run.data.summary.inputHash = 'A'.repeat(64); });
     addUnsupported(run => { run.scope = 'core'; });
     addUnsupported(run => { delete run.positions[0].models.Heston; });
     addUnsupported(run => {
@@ -1403,7 +1409,7 @@ describe('get_compute_runs wire output', () => {
     expect(parsed.matchedCount).toBe(1);
     expect(parsed.hasMore).toBe(false);
     expect(parsed.data).toHaveLength(1);
-    expect(parsed.data[0].engineVersion).toBe('2.0.4');
+    expect(parsed.data[0].engineVersion).toBe('2.0.5');
     expect(parsed.data[0].underlyings).toEqual(['QQQ']);
     expect(parsed.data[0].startedAt).toBe(new Date(currentTarget.timestamp).toISOString());
   });
