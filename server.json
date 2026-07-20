@@ -1,0 +1,17 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "com.optionsanalysissuite/options-analysis-suite-mcp",
+  "title": "Options Analysis Suite",
+  "description": "Options analytics: 17 pricing models, 17 Greeks, GEX, IV, 23 screeners, unusual, dark pool, max pain",
+  "repository": {
+    "url": "https://github.com/Options-Analysis-Suite/options-analysis-suite-mcp",
+    "source": "github"
+  },
+  "version": "1.0.1",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.optionsanalysissuite.com/mcp"
+    }
+  ]
+}

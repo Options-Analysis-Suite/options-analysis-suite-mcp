@@ -1,0 +1,209 @@
+{
+  "manifest_version": "0.3",
+  "name": "options-analysis-suite",
+  "display_name": "Options Analysis Suite",
+  "version": "1.0.0",
+  "description": "Access your options analysis data, market research, and portfolio risk metrics directly in Claude.",
+  "author": {
+    "name": "Options Analysis Suite",
+    "url": "https://github.com/Options-Analysis-Suite"
+  },
+  "license": "MIT",
+  "icon": "icon-512.png",
+  "icons": [
+    {
+      "src": "icon-512.png",
+      "size": "512x512"
+    },
+    {
+      "src": "icon-180.png",
+      "size": "180x180"
+    },
+    {
+      "src": "icon-96.png",
+      "size": "96x96"
+    }
+  ],
+  "server": {
+    "type": "node",
+    "entry_point": "index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/index.js"
+      ],
+      "env": {
+        "OAS_EMAIL": "${user_config.email}",
+        "OAS_PASSWORD": "${user_config.password}",
+        "OAS_PROXY_URL": "${user_config.proxy_url}",
+        "OAS_AUTH_SERVER_URL": "${user_config.auth_server_url}"
+      }
+    }
+  },
+  "user_config": {
+    "email": {
+      "type": "string",
+      "title": "Account Email",
+      "description": "Your Options Analysis Suite account email",
+      "required": true
+    },
+    "password": {
+      "type": "string",
+      "title": "Account Password",
+      "description": "Your account password (stored in OS keychain)",
+      "sensitive": true,
+      "required": true
+    },
+    "proxy_url": {
+      "type": "string",
+      "title": "Proxy Server URL",
+      "description": "Platform proxy server URL",
+      "default": "https://proxy.optionsanalysissuite.com",
+      "required": false
+    },
+    "auth_server_url": {
+      "type": "string",
+      "title": "Auth Server URL",
+      "description": "Platform auth server URL",
+      "default": "https://api.optionsanalysissuite.com",
+      "required": false
+    }
+  },
+  "tools": [
+    {
+      "name": "get_iv_history",
+      "description": "Get historical implied/historical volatility for a symbol"
+    },
+    {
+      "name": "get_greeks_history",
+      "description": "Get historical options Greeks with recent/trend summaries, plus DTE and moneyness filters for narrower slices"
+    },
+    {
+      "name": "get_regime",
+      "description": "Get regime data at one of three scopes: market (composite stress regime across SPY/QQQ/IWM/DIA), symbol (per-symbol daily regime + authoritative Greek exposures — net gamma/delta/vega/vanna/charm/vomma, call wall, put wall, gamma flip, abs gamma anchor, top 10 gamma strikes), or intraday (5 scans/day with stress scoring + Greek snapshots). Pick via the scope enum; symbol and intraday require `symbol`"
+    },
+    {
+      "name": "get_earnings",
+      "description": "Get earnings history and estimates"
+    },
+    {
+      "name": "get_news",
+      "description": "Get recent stock-specific news, relevance-ranked by company profile, with full=true for the less-summarized feed"
+    },
+    {
+      "name": "get_short_data",
+      "description": "Get FINRA short-side data for a symbol: type='volume' for daily short-volume activity or type='interest' for biweekly short-interest settlement reports. Compact summary-first views by default; full=true returns the less-summarized payload"
+    },
+    {
+      "name": "get_fundamentals",
+      "description": "Get compact company fundamentals with metadata, key ratios, and summarized statements"
+    },
+    {
+      "name": "get_dividends",
+      "description": "Get per-symbol dividend history with ex-dates, cash amounts, and payment metadata"
+    },
+    {
+      "name": "get_rates",
+      "description": "Get Treasury rate data: view='benchmark' for the current platform risk-free rate (10Y-based) or view='curve' for the full yield curve with key maturities, inversion flags, and spreads. Use view='curve' for shorter maturities (1M, 3M, 6M, 2Y, 5Y)"
+    },
+    {
+      "name": "get_insider_trading",
+      "description": "Get insider trading with grouped open-market buy/sell events and summarized administrative activity"
+    },
+    {
+      "name": "get_options_analytics_history",
+      "description": "Get historical daily analytics snapshots (IV, skew, expected move, rates/dividend yield, GEX/DEX/VEX, net vanna/charm/vomma) — for walls and current Greek exposures use get_regime with scope='symbol'"
+    },
+    {
+      "name": "get_iv_surface",
+      "description": "Get IV surface/skew across strikes and expirations"
+    },
+    {
+      "name": "get_stock_prices",
+      "description": "Get historical OHLCV price data with a compact trend summary and the requested daily bars"
+    },
+    {
+      "name": "get_stock_splits",
+      "description": "Get per-symbol stock split history with ratios and labels"
+    },
+    {
+      "name": "get_analyst_data",
+      "description": "Get analyst ratings, price targets, nearest forward estimate periods, and compact rating-history summaries"
+    },
+    {
+      "name": "get_market_calendar",
+      "description": "Get market calendar events by type: type='economic' (macro events: FOMC, CPI, NFP, etc.), 'ipo' (upcoming/recent listings), 'dividend' (ex/record/payment dates), or 'split' (stock splits). Each type has its own default date window and per-type filters (country for economic; symbol for ipo/dividend/split)"
+    },
+    {
+      "name": "get_options_chain",
+      "description": "Get the latest available end-of-day options chain summary by default, with expirations, ATM term structure, skew, and representative near-money contracts across the curve; a specific date can also be requested"
+    },
+    {
+      "name": "get_sec_filings",
+      "description": "Get recent SEC EDGAR filings with form/category summaries by default and full=true for the less-summarized filing list"
+    },
+    {
+      "name": "get_fail_to_deliver",
+      "description": "Get SEC Failure-to-Deliver data with a compact recent/spike summary by default and full=true for less-summarized sanitized history; default window is 180 days because SEC publication lags about 21 days"
+    },
+    {
+      "name": "get_threshold_history",
+      "description": "Get SEC Reg SHO threshold-list history with a compact current/recent status summary by default and full=true for the less-summarized date list"
+    },
+    {
+      "name": "get_dark_pool_data",
+      "description": "Get FINRA OTC (non-ATS) and ATS (dark pool) weekly trading data. view='summary' (default) returns aggregate weekly volume/trade trends + compact summary; view='dealers' breaks OTC flow down to the top 15 dealer MPIDs per week; view='venues' breaks ATS flow down to the top 15 dark-pool venue MPIDs per week; view='all' returns summary+dealers+venues in one payload"
+    },
+    {
+      "name": "get_trading_halts",
+      "description": "Get active and recent trading halts with duplicate feed rows condensed and latest active halt states prioritized by default"
+    },
+    {
+      "name": "get_activist_filings",
+      "description": "Get Schedule 13D/13G beneficial-ownership filings with current above-threshold holder snapshots by default and below-threshold amendments summarized separately; full=true returns the less-summarized filing list"
+    },
+    {
+      "name": "get_platform_info",
+      "description": "Get platform background information"
+    },
+    {
+      "name": "get_analysis_history",
+      "description": "Get user's options pricing analysis history, with near-identical reruns collapsed in the default view and full=true for less-summarized sanitized history"
+    },
+    {
+      "name": "get_snapshot",
+      "description": "Get user synced snapshots by type: 'gex' (per-symbol Gamma Exposure — requires symbol; returns 3 most recent snapshots, no dedupe; includes raw vs in-wall visible combo counts when available), 'portfolio' (account-wide portfolio snapshots with market-scaled raw Greeks; default view collapses consecutive identical snapshots), or 'risk' (account-wide risk analysis with $-impact Greeks, VaR, stress tests; default view collapses consecutive identical snapshots)"
+    },
+    {
+      "name": "get_analysis_rollups",
+      "description": "Get user's analysis trend aggregates with compact rollup rows, cross-period summaries, and full=true for less-summarized sanitized synced rows"
+    },
+    {
+      "name": "get_fft_results",
+      "description": "Get user's FFT scanner results — mispricing signals and calibration data"
+    },
+    {
+      "name": "query_analysis",
+      "description": "Query analysis history with numeric filters (delta, volatility, DTE ranges), with near-identical reruns collapsed in the default view"
+    },
+    {
+      "name": "get_compute_runs",
+      "description": "Get user's AI Compute Suite run history with compact run summaries, exposure levels, and representative position/model consensus summaries; use view='detailed' for one matched run's per-model outputs, or full=true for less-summarized sanitized synced runs"
+    },
+    {
+      "name": "get_company_profile",
+      "description": "Get a compact normalized company profile with float metrics, identifiers, and a trimmed description; use full=true for the less-summarized synced row"
+    },
+    {
+      "name": "run_screener",
+      "description": "Run one of 16 options-market screeners (most-active, highest-oi, highest-iv, unusual, gex, model-divergence, regime-stress, term-backwardation, put-skew, delta-exposure, vega-exposure, pre-earnings-iv, dod-change, vrp, max-pain, unusual-directional) plus market-trends (time-series aggregates) and earnings-calendar (next-14-days upcoming earnings, widen with days up to 90). Pick via the screener enum; sub-params (view, index, metric, side, mode, direction, threshold, days, symbol) apply only to the screener that needs them. earnings-calendar returns a bare array of rows; every other screener returns a wrapped payload"
+    }
+  ],
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  }
+}
