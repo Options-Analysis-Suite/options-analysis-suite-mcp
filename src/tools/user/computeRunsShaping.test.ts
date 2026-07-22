@@ -25,8 +25,9 @@ function makeUnavailableCurrentModel() {
 function makeCurrentTerminalRecord() {
   const record: any = makeRecord();
   record.scope = 'core';
+  record.data.projection.exposureTruncated = true;
   Object.assign(record.data.summary, {
-    completionState: 'complete',
+    completionState: 'partial',
     valuationTime: 1774771100000,
     executionConfig: {
       calibrationPolicy: 'required',
@@ -36,12 +37,21 @@ function makeCurrentTerminalRecord() {
     errorCount: 0,
     includedErrorCount: 0,
     errorsTruncated: false,
+    noticeCount: 0,
+    includedNoticeCount: 0,
+    noticesTruncated: false,
     modelExclusionCount: 0,
     includedModelExclusionCount: 0,
     modelExclusionsTruncated: false,
+    calibrationOutcomeCount: 0,
+    includedCalibrationOutcomeCount: 0,
+    includedSuccessfulCalibrationCount: 0,
+    calibrationOutcomesTruncated: false,
   });
   record.data.errors = [];
+  record.data.notices = [];
   record.data.modelExclusions = [];
+  record.data.calibrationOutcomes = [];
   record.data.portfolioAggregates = {
     byModel: {},
     dispersion: {},
@@ -63,10 +73,267 @@ function makeCurrentTerminalRecord() {
       makeUnavailableCurrentModel(),
     ])),
   }));
+  setCalibrationOutcomes(record, requiredCoreCalibrationOutcomes(record));
+  return record;
+}
+
+function setCalibrationOutcomes(record: any, outcomes: any[]): void {
+  const successful = outcomes.filter(outcome => outcome.status === 'success').length;
+  record.data.calibrationOutcomes = outcomes;
+  for (const position of record.positions) {
+    for (const model of ['Heston', 'SABR', 'JumpDiffusion', 'VarianceGamma', 'MonteCarlo-JumpDiffusion']) {
+      if (position.models?.[model]) delete position.models[model].calibration;
+    }
+    if (position.models?.['MonteCarlo-Heston']) delete position.models['MonteCarlo-Heston'].calibration;
+    for (const outcome of outcomes) {
+      if (outcome.status !== 'success'
+        || outcome.detail == null
+        || outcome.underlying !== position.underlying
+        || outcome.expiration !== position.expiration) continue;
+      if (position.models?.[outcome.model]) {
+        position.models[outcome.model].calibration = structuredClone(outcome.detail);
+      }
+      if (outcome.model === 'Heston' && position.models?.['MonteCarlo-Heston']) {
+        position.models['MonteCarlo-Heston'].calibration = structuredClone(outcome.detail);
+      }
+    }
+  }
+  Object.assign(record.data.summary, {
+    completionState: outcomes.some(outcome => outcome.status !== 'success') ? 'partial' : 'complete',
+    totalCalibrations: successful,
+    calibrationOutcomeCount: outcomes.length,
+    includedCalibrationOutcomeCount: outcomes.length,
+    includedSuccessfulCalibrationCount: successful,
+    calibrationOutcomesTruncated: false,
+  });
+}
+
+function requiredCoreCalibrationOutcomes(record: any): any[] {
+  const groups = new Map<string, { underlying: string; expiration: string }>();
+  for (const position of record.positions) {
+    const group = { underlying: position.underlying, expiration: position.expiration };
+    groups.set(JSON.stringify([group.underlying, group.expiration]), group);
+  }
+  return [...groups.values()].flatMap(({ underlying, expiration }) => (
+    ['Heston', 'SABR', 'JumpDiffusion', 'VarianceGamma'].map(model => ({
+      model,
+      underlying,
+      expiration,
+      status: 'unavailable',
+      reason: 'No calibratable observations in test fixture',
+    }))
+  ));
+}
+
+function makeTwoExpiryCoreRecordWithTruncatedOutcomes(): any {
+  const record = makeCurrentTerminalRecord();
+  Object.assign(record.positions[1], {
+    symbol: 'SPY260430P00500000',
+    underlying: 'SPY',
+    expiration: '2026-04-30',
+  });
+  record.data.underlyings = ['SPY'];
+  record.data.calibrationOutcomes = [requiredCoreCalibrationOutcomes(record)[0]];
+  Object.assign(record.data.summary, {
+    totalCalibrations: 0,
+    calibrationOutcomeCount: 8,
+    includedCalibrationOutcomeCount: 1,
+    includedSuccessfulCalibrationCount: 0,
+    calibrationOutcomesTruncated: true,
+  });
+  return record;
+}
+
+function makeTwoExpiryCoreRecord(): any {
+  const record = makeCurrentTerminalRecord();
+  Object.assign(record.positions[1], {
+    symbol: 'SPY260430P00500000',
+    underlying: 'SPY',
+    expiration: '2026-04-30',
+  });
+  record.data.underlyings = ['SPY'];
+  setCalibrationOutcomes(record, requiredCoreCalibrationOutcomes(record));
+  return record;
+}
+
+function makeSummaryOnlyRecord(record: any): any {
+  record.positions = [];
+  Object.assign(record.data.projection, {
+    compactionLevel: 'summary-only',
+    includedPositionCount: 0,
+    positionsTruncated: true,
+    variantsTruncated: true,
+    calibrationTruncated: true,
+    portfolioAggregatesTruncated: true,
+  });
+  delete record.data.exposureSweep;
+  delete record.data.portfolioAggregates.coverage;
   return record;
 }
 
 describe('isCurrentComputeRunRecord terminal semantics', () => {
+  test('requires and returns truthful bounded notice evidence', () => {
+    const record: any = makeCurrentTerminalRecord();
+    record.data.notices = [
+      {
+        code: 'DIVIDEND_ZERO_ASSUMPTION',
+        level: 'warning',
+        underlying: 'SPY',
+        message: 'SPY dividend yield was unavailable; this run assumes zero.',
+        provenance: {
+          kind: 'assumption',
+          source: 'unknown-dividend-zero-assumption',
+          assumed: true,
+        },
+      },
+      {
+        code: 'EXPOSURE_SWEEP_FAILED',
+        level: 'warning',
+        underlying: 'SPY',
+        message: 'Exposure sweep failed for SPY: quote service unavailable',
+      },
+    ];
+    Object.assign(record.data.summary, {
+      noticeCount: 3,
+      includedNoticeCount: 2,
+      noticesTruncated: true,
+    });
+
+    expect(isCurrentComputeRunRecord(record)).toBe(true);
+    const shaped = shapeComputeRunRecord(record) as Record<string, any>;
+    expect(shaped.notices).toEqual([
+      {
+        code: 'DIVIDEND_ZERO_ASSUMPTION',
+        level: 'warning',
+        underlying: 'SPY',
+        message: 'SPY dividend yield was unavailable; this run assumes zero.',
+      },
+      {
+        code: 'EXPOSURE_SWEEP_FAILED',
+        level: 'warning',
+        underlying: 'SPY',
+        message: 'Exposure sweep failed for SPY: quote service unavailable',
+      },
+    ]);
+    expect(shaped.noticesNotShown).toBe(1);
+    expect(shaped.summary).toMatchObject({
+      noticeCount: 3,
+      includedNoticeCount: 2,
+      noticesTruncated: true,
+    });
+
+    const missing = makeCurrentTerminalRecord();
+    delete missing.data.notices;
+    expect(isCurrentComputeRunRecord(missing)).toBe(false);
+
+    const nullProvenance: any = makeCurrentTerminalRecord();
+    nullProvenance.data.notices = [{
+      code: 'DIVIDEND_ZERO_ASSUMPTION',
+      level: 'warning',
+      underlying: 'SPY',
+      message: 'SPY dividend yield was unavailable; this run assumes zero.',
+      provenance: null,
+    }];
+    Object.assign(nullProvenance.data.summary, {
+      noticeCount: 1,
+      includedNoticeCount: 1,
+      noticesTruncated: false,
+    });
+    expect(isCurrentComputeRunRecord(nullProvenance)).toBe(false);
+  });
+
+  test('keeps distinct actionable notice codes ahead of duplicate assumptions', () => {
+    const record: any = makeCurrentTerminalRecord();
+    record.data.notices = [
+      ...Array.from({ length: 6 }, (_, index) => ({
+        code: 'DIVIDEND_ZERO_ASSUMPTION',
+        level: 'warning',
+        underlying: 'SPY',
+        message: `Dividend assumption ${index}`,
+      })),
+      {
+        code: 'EXPOSURE_SWEEP_FAILED',
+        level: 'warning',
+        underlying: 'SPY',
+        message: 'Exposure sweep failed for SPY.',
+      },
+    ];
+    Object.assign(record.data.summary, {
+      noticeCount: 7,
+      includedNoticeCount: 7,
+      noticesTruncated: false,
+    });
+
+    expect(isCurrentComputeRunRecord(record)).toBe(true);
+    const shaped = shapeComputeRunRecord(record) as Record<string, any>;
+    expect(shaped.notices).toHaveLength(5);
+    expect(shaped.notices.map((notice: { code: string }) => notice.code)).toContain(
+      'EXPOSURE_SWEEP_FAILED',
+    );
+    expect(shaped.noticesNotShown).toBe(2);
+  });
+
+  test('rejects a current Kou calibration below the canonical etaUp domain', () => {
+    const makeKouRecord = (etaUp: number) => {
+      const record = makeCurrentTerminalRecord();
+      const detailFor = (expiration: string) => ({
+        params: {
+          selectedModel: 'kou',
+          baseVolatility: 0.2,
+          lambda: 0.2,
+          pUp: 0.4,
+          etaUp,
+          etaDown: 8,
+        },
+        rmse: null,
+        confidence: null,
+        isFallback: false,
+        warnings: [],
+        expirationDate: expiration,
+        status: 'success',
+      });
+      const outcomes = requiredCoreCalibrationOutcomes(record).map(outcome => (
+        outcome.model === 'JumpDiffusion'
+          ? {
+              model: outcome.model,
+              underlying: outcome.underlying,
+              expiration: outcome.expiration,
+              status: 'success',
+              detail: detailFor(outcome.expiration),
+            }
+          : outcome
+      ));
+      setCalibrationOutcomes(record, outcomes);
+      return record;
+    };
+
+    expect(isCurrentComputeRunRecord(makeKouRecord(1.999))).toBe(false);
+    expect(isCurrentComputeRunRecord(makeKouRecord(2))).toBe(true);
+
+    const conflictingEta = makeKouRecord(1.999);
+    const etaOutcome = conflictingEta.data.calibrationOutcomes.find((outcome: any) => (
+      outcome.model === 'JumpDiffusion'
+    ));
+    etaOutcome.detail.params.eta1 = 10;
+    expect(isCurrentComputeRunRecord(conflictingEta)).toBe(false);
+
+    const conflictingEtaDown = makeKouRecord(2);
+    const etaDownOutcome = conflictingEtaDown.data.calibrationOutcomes.find((outcome: any) => (
+      outcome.model === 'JumpDiffusion'
+    ));
+    etaDownOutcome.detail.params.etaDown = 1.499;
+    etaDownOutcome.detail.params.eta2 = 8;
+    expect(isCurrentComputeRunRecord(conflictingEtaDown)).toBe(false);
+
+    const conflictingProbability = makeKouRecord(2);
+    const probabilityOutcome = conflictingProbability.data.calibrationOutcomes.find((outcome: any) => (
+      outcome.model === 'JumpDiffusion'
+    ));
+    probabilityOutcome.detail.params.pUp = -1;
+    probabilityOutcome.detail.params.p = 0.4;
+    expect(isCurrentComputeRunRecord(conflictingProbability)).toBe(false);
+  });
+
   test('rejects failed rows that claim complete or have no recorded error', () => {
     const completeWithoutError: any = makeCurrentTerminalRecord();
     completeWithoutError.status = 'failed';
@@ -82,6 +349,52 @@ describe('isCurrentComputeRunRecord terminal semantics', () => {
   test('rejects cancelled rows that claim complete', () => {
     const record: any = makeCurrentTerminalRecord();
     record.status = 'cancelled';
+    record.data.summary.completionState = 'complete';
+
+    expect(isCurrentComputeRunRecord(record)).toBe(false);
+  });
+
+  test('required calibration failures are completion evidence in MCP records', () => {
+    const record: any = makeCurrentTerminalRecord();
+    expect(record.data.errors).toEqual([]);
+    expect(record.data.modelExclusions).toEqual([]);
+    expect(record.data.portfolioAggregates.exclusions).toEqual([]);
+    expect(record.data.calibrationOutcomes.some(
+      (outcome: any) => outcome.status !== 'success',
+    )).toBe(true);
+    expect(isCurrentComputeRunRecord(record)).toBe(true);
+
+    record.data.summary.completionState = 'complete';
+    expect(isCurrentComputeRunRecord(record)).toBe(false);
+  });
+
+  test.each(['none', 'variants', 'variants+exposure'])(
+    'rejects %s projections that falsely claim calibration details were truncated',
+    (compactionLevel) => {
+      const record: any = makeCurrentTerminalRecord();
+      Object.assign(record.data.projection, {
+        compactionLevel,
+        calibrationTruncated: true,
+      });
+
+      expect(isCurrentComputeRunRecord(record)).toBe(false);
+    },
+  );
+
+  test('rejects calibration-outcome omission outside summary-only compaction', () => {
+    const record = makeTwoExpiryCoreRecordWithTruncatedOutcomes();
+    expect(record.data.projection.compactionLevel).toBe('none');
+    expect(record.data.summary.calibrationOutcomesTruncated).toBe(true);
+
+    expect(isCurrentComputeRunRecord(record)).toBe(false);
+  });
+
+  test('rejects a summary-only projection that still retains positions', () => {
+    const record: any = makeCurrentTerminalRecord();
+    record.data.projection.compactionLevel = 'summary-only';
+    delete record.data.exposureSweep;
+    delete record.data.portfolioAggregates.coverage;
+    expect(record.positions.length).toBeGreaterThan(0);
 
     expect(isCurrentComputeRunRecord(record)).toBe(false);
   });
@@ -100,6 +413,609 @@ describe('isCurrentComputeRunRecord terminal semantics', () => {
 
     expect(isCurrentComputeRunRecord(failed)).toBe(true);
     expect(isCurrentComputeRunRecord(cancelled)).toBe(true);
+  });
+
+  test('rejects calibration outcomes for models that are never calibrated', () => {
+    const record: any = makeCurrentTerminalRecord();
+    setCalibrationOutcomes(record, [{
+      model: 'BlackScholes',
+      underlying: 'SPY',
+      expiration: '2026-03-30',
+      status: 'success',
+    }]);
+
+    expect(isCurrentComputeRunRecord(record)).toBe(false);
+  });
+
+  test('rejects contradictory outer and detail calibration statuses', () => {
+    const record: any = makeCurrentTerminalRecord();
+    setCalibrationOutcomes(record, [{
+      model: 'Heston',
+      underlying: 'SPY',
+      expiration: '2026-03-30',
+      status: 'success',
+      detail: {
+        params: { v0: 0.04, kappa: 2, theta: 0.04, xi: 0.3, rho: -0.5 },
+        rmse: null,
+        confidence: null,
+        isFallback: false,
+        warnings: [],
+        expirationDate: '2026-03-30',
+        status: 'failed',
+      },
+    }]);
+
+    expect(isCurrentComputeRunRecord(record)).toBe(false);
+  });
+
+  test('rejects a successful calibration outcome with fallback detail', () => {
+    const record: any = makeCurrentTerminalRecord();
+    setCalibrationOutcomes(record, [{
+      model: 'Heston',
+      underlying: 'SPY',
+      expiration: '2026-03-30',
+      status: 'success',
+      detail: {
+        params: { v0: 0.04, kappa: 2, theta: 0.04, xi: 0.3, rho: -0.5 },
+        rmse: null,
+        confidence: null,
+        isFallback: true,
+        warnings: [],
+        expirationDate: '2026-03-30',
+        status: 'success',
+      },
+    }]);
+
+    expect(isCurrentComputeRunRecord(record)).toBe(false);
+  });
+
+  test('accepts and preserves bounded current calibration warning outcomes', () => {
+    const record: any = makeCurrentTerminalRecord();
+    setCalibrationOutcomes(record, requiredCoreCalibrationOutcomes(record).map(outcome => (
+      outcome.model === 'Heston'
+        && outcome.underlying === 'SPY'
+        && outcome.expiration === '2026-03-30'
+        ? {
+            model: 'Heston',
+            underlying: 'SPY',
+            expiration: '2026-03-30',
+            status: 'success',
+            detail: {
+              params: { v0: 0.04, kappa: 2, theta: 0.04, xi: 0.3, rho: -0.5 },
+              rmse: null,
+              confidence: null,
+              isFallback: false,
+              warnings: ['Calibration warning survives sync compaction.'],
+              expirationDate: '2026-03-30',
+              status: 'success',
+            },
+          }
+        : outcome
+    )));
+
+    expect(isCurrentComputeRunRecord(record)).toBe(true);
+
+    const payload = { data: [record] };
+    sanitizeComputeRunsWireOutput(payload);
+    expect(payload.data[0].data.calibrationOutcomes.find(
+      (outcome: any) => outcome.model === 'Heston' && outcome.underlying === 'SPY',
+    ).detail.warnings).toEqual([
+      'Calibration warning survives sync compaction.',
+    ]);
+
+    const shaped = shapeComputeRunRecord(record) as Record<string, any>;
+    expect(shaped.calibrationOutcomes.find(
+      (outcome: any) => outcome.model === 'Heston' && outcome.underlying === 'SPY',
+    ).detail.warnings).toEqual([
+      'Calibration warning survives sync compaction.',
+    ]);
+
+    const summarized = summarizeComputeRunsResponse({ data: [record] }, 'detailed') as Record<string, any>;
+    expect(summarized.data[0].calibrationOutcomes.find(
+      (outcome: any) => outcome.model === 'Heston' && outcome.underlying === 'SPY',
+    ).detail.warnings).toEqual([
+      'Calibration warning survives sync compaction.',
+    ]);
+
+    const oversized = { data: [{ ...record, oversized: 'x'.repeat(900_000) }], count: 1 };
+    trimFullComputeRunsResponse(oversized);
+    expect(oversized.data[0].calibrationOutcomes.find(
+      (outcome: any) => outcome.model === 'Heston' && outcome.underlying === 'SPY',
+    ).detail.warnings).toEqual([
+      'Calibration warning survives sync compaction.',
+    ]);
+  });
+
+  test('rejects contradictory retained calibration bindings at the MCP trust boundary', () => {
+    const mismatch: any = makeCurrentTerminalRecord();
+    setCalibrationOutcomes(mismatch, requiredCoreCalibrationOutcomes(mismatch).map(outcome => (
+      outcome.model === 'Heston'
+        ? {
+            model: 'Heston',
+            underlying: outcome.underlying,
+            expiration: outcome.expiration,
+            status: 'success',
+            detail: {
+              params: { v0: 0.04, kappa: 2, theta: 0.04, xi: 0.3, rho: -0.5 },
+              rmse: null,
+              confidence: null,
+              isFallback: false,
+              warnings: [],
+              expirationDate: outcome.expiration,
+              status: 'success',
+            },
+          }
+        : outcome
+    )));
+    mismatch.positions[0].models.Heston.calibration.params.kappa = 3;
+    expect(isCurrentComputeRunRecord(mismatch)).toBe(false);
+
+    const missingOutcome: any = makeCurrentTerminalRecord();
+    missingOutcome.status = 'failed';
+    missingOutcome.data.errors = [{ positionId: 'pos-a', model: 'engine', error: 'stopped after pricing' }];
+    missingOutcome.data.summary.errorCount = 1;
+    missingOutcome.data.summary.includedErrorCount = 1;
+    setCalibrationOutcomes(
+      missingOutcome,
+      requiredCoreCalibrationOutcomes(missingOutcome).filter(
+        outcome => outcome.model !== 'VarianceGamma',
+      ),
+    );
+    missingOutcome.positions[0].models.VarianceGamma.variants[0].price = 10;
+    delete missingOutcome.positions[0].models.VarianceGamma.variants[0].error;
+    expect(isCurrentComputeRunRecord(missingOutcome)).toBe(false);
+  });
+
+  test('counts engine-omitted calibration warnings exactly through compact and budget shaping', () => {
+    const record: any = makeCurrentTerminalRecord();
+    const proseWarnings = Array.from(
+      { length: 19 },
+      (_, index) => `Heston calibration warning ${index + 1}.`,
+    );
+    const engineOmissionSentinel = '[engine omitted 3 additional calibration warnings]';
+    const recordedWarnings = [...proseWarnings, engineOmissionSentinel];
+    setCalibrationOutcomes(record, requiredCoreCalibrationOutcomes(record).map(outcome => (
+      outcome.model === 'Heston'
+        && outcome.underlying === 'SPY'
+        && outcome.expiration === '2026-03-30'
+        ? {
+            model: 'Heston',
+            underlying: 'SPY',
+            expiration: '2026-03-30',
+            status: 'success',
+            detail: {
+              params: { v0: 0.04, kappa: 2, theta: 0.04, xi: 0.3, rho: -0.5 },
+              rmse: null,
+              confidence: null,
+              isFallback: false,
+              warnings: recordedWarnings,
+              expirationDate: '2026-03-30',
+              status: 'success',
+            },
+          }
+        : outcome
+    )));
+
+    expect(isCurrentComputeRunRecord(record)).toBe(true);
+
+    const compact = shapeComputeRunRecord(structuredClone(record)) as Record<string, any>;
+    const compactDetail = compact.calibrationOutcomes.find(
+      (outcome: any) => outcome.model === 'Heston' && outcome.underlying === 'SPY',
+    ).detail;
+    expect(compactDetail.warnings).toEqual(proseWarnings.slice(0, 5));
+    expect(compactDetail.warningsNotShown).toBe(17);
+
+    const fullPayload: any = { data: [structuredClone(record)] };
+    sanitizeComputeRunsWireOutput(fullPayload);
+    const fullDetail = fullPayload.data[0].data.calibrationOutcomes.find(
+      (outcome: any) => outcome.model === 'Heston' && outcome.underlying === 'SPY',
+    ).detail;
+    expect(fullDetail.warnings).toEqual(recordedWarnings);
+
+    const budgetPayload: any = {
+      data: [{ ...compact, oversized: 'x'.repeat(900_000) }],
+      count: 1,
+    };
+    trimFullComputeRunsResponse(budgetPayload);
+    const budgetDetail = budgetPayload.data[0].calibrationOutcomes.find(
+      (outcome: any) => outcome.model === 'Heston' && outcome.underlying === 'SPY',
+    ).detail;
+    expect(budgetDetail.warnings).toEqual(proseWarnings.slice(0, 3));
+    expect(budgetDetail.warningsNotShown).toBe(19);
+
+    const saturatedRecord = structuredClone(record);
+    saturatedRecord.data.calibrationOutcomes.find(
+      (outcome: any) => outcome.model === 'Heston' && outcome.underlying === 'SPY',
+    ).detail.warnings[19] = `[engine omitted ${Number.MAX_SAFE_INTEGER} additional calibration warnings]`;
+    const saturatedCompact = shapeComputeRunRecord(saturatedRecord) as Record<string, any>;
+    const saturatedCompactDetail = saturatedCompact.calibrationOutcomes.find(
+      (outcome: any) => outcome.model === 'Heston' && outcome.underlying === 'SPY',
+    ).detail;
+    expect(saturatedCompactDetail.warningsNotShown).toBe(Number.MAX_SAFE_INTEGER);
+
+    const saturatedBudget: any = {
+      data: [{ ...saturatedCompact, oversized: 'x'.repeat(900_000) }],
+      count: 1,
+    };
+    trimFullComputeRunsResponse(saturatedBudget);
+    const saturatedBudgetCount = saturatedBudget.data[0].calibrationOutcomes.find(
+      (outcome: any) => outcome.model === 'Heston' && outcome.underlying === 'SPY',
+    ).detail.warningsNotShown;
+    expect(Number.isSafeInteger(saturatedBudgetCount)).toBe(true);
+    expect(saturatedBudgetCount).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  test('rejects duplicate calibration tuples and inconsistent outcome counts', () => {
+    const record: any = makeCurrentTerminalRecord();
+    const success = {
+      model: 'Heston', underlying: 'SPY', expiration: '2026-03-30', status: 'success',
+      detail: {
+        params: { v0: 0.04, kappa: 2, theta: 0.04, xi: 0.3, rho: -0.5 },
+        rmse: null, confidence: null, isFallback: false, warnings: [],
+        expirationDate: '2026-03-30', status: 'success',
+      },
+    };
+    setCalibrationOutcomes(record, [success, {
+      model: 'Heston', underlying: 'SPY', expiration: '2026-03-30', status: 'failed',
+      reason: 'contradictory duplicate',
+    }]);
+    expect(isCurrentComputeRunRecord(record)).toBe(false);
+
+    setCalibrationOutcomes(record, [success]);
+    record.data.summary.totalCalibrations = 0;
+    expect(isCurrentComputeRunRecord(record)).toBe(false);
+  });
+
+  test('rejects omitted, impossible, misattributed, or shadow-invalid completed calibration evidence', () => {
+    const zero: any = makeCurrentTerminalRecord();
+    setCalibrationOutcomes(zero, []);
+    expect(isCurrentComputeRunRecord(zero)).toBe(false);
+
+    const partial: any = makeCurrentTerminalRecord();
+    setCalibrationOutcomes(partial, requiredCoreCalibrationOutcomes(partial).slice(0, 3));
+    expect(isCurrentComputeRunRecord(partial)).toBe(false);
+
+    const impossibleSuccesses: any = makeCurrentTerminalRecord();
+    setCalibrationOutcomes(impossibleSuccesses, [requiredCoreCalibrationOutcomes(impossibleSuccesses)[0]]);
+    Object.assign(impossibleSuccesses.data.summary, {
+      totalCalibrations: 8,
+      calibrationOutcomeCount: 8,
+      includedCalibrationOutcomeCount: 1,
+      includedSuccessfulCalibrationCount: 0,
+      calibrationOutcomesTruncated: true,
+    });
+    expect(isCurrentComputeRunRecord(impossibleSuccesses)).toBe(false);
+
+    const wrongExpiration: any = makeCurrentTerminalRecord();
+    setCalibrationOutcomes(wrongExpiration, [{
+      ...requiredCoreCalibrationOutcomes(wrongExpiration)[0],
+      expiration: '2099-12-31',
+    }]);
+    Object.assign(wrongExpiration.data.summary, {
+      totalCalibrations: 0,
+      calibrationOutcomeCount: 8,
+      includedCalibrationOutcomeCount: 1,
+      includedSuccessfulCalibrationCount: 0,
+      calibrationOutcomesTruncated: true,
+    });
+    expect(isCurrentComputeRunRecord(wrongExpiration)).toBe(false);
+
+    const shadowInvalid: any = makeCurrentTerminalRecord();
+    setCalibrationOutcomes(shadowInvalid, requiredCoreCalibrationOutcomes(shadowInvalid).map(outcome => (
+      outcome.model === 'Heston'
+        && outcome.underlying === 'SPY'
+        && outcome.expiration === '2026-03-30'
+        ? {
+            model: 'Heston', underlying: 'SPY', expiration: '2026-03-30', status: 'success',
+            detail: {
+              params: { v0: 0.04, kappa: 2, theta: 0.04, xi: -1, volOfVol: 0.3, rho: -0.5 },
+              rmse: null, confidence: null, isFallback: false, warnings: [],
+              expirationDate: '2026-03-30', status: 'success',
+            },
+          }
+        : outcome
+    )));
+    expect(isCurrentComputeRunRecord(shadowInvalid)).toBe(false);
+
+    const visiblePositionWithoutOutcome: any = makeCurrentTerminalRecord();
+    visiblePositionWithoutOutcome.positions[0].expiration = '2099-12-31';
+    visiblePositionWithoutOutcome.data.summary.totalPositions = 3;
+    Object.assign(visiblePositionWithoutOutcome.data.projection, {
+      originalPositionCount: 3,
+      positionsTruncated: true,
+    });
+    expect(isCurrentComputeRunRecord(visiblePositionWithoutOutcome)).toBe(false);
+  });
+
+  test('rejects a false original calibration outcome count when every position is retained', () => {
+    const record = makeTwoExpiryCoreRecord();
+    expect(isCurrentComputeRunRecord(record)).toBe(true);
+
+    record.data.summary.calibrationOutcomeCount = 4;
+    expect(isCurrentComputeRunRecord(record)).toBe(false);
+  });
+
+  test('rejects a phantom authoritative underlying when every position is retained', () => {
+    const record = makeTwoExpiryCoreRecordWithTruncatedOutcomes();
+    record.data.underlyings = ['QQQ', 'SPY'];
+
+    expect(isCurrentComputeRunRecord(record)).toBe(false);
+  });
+
+  test('counts the union of retained position and calibration outcome groups', () => {
+    const record = makeTwoExpiryCoreRecord();
+    record.positions = record.positions.slice(0, 1);
+    Object.assign(record.data.projection, {
+      includedPositionCount: 1,
+      positionsTruncated: true,
+      variantsTruncated: true,
+    });
+    expect(isCurrentComputeRunRecord(record)).toBe(true);
+
+    record.data.summary.calibrationOutcomeCount = 4;
+    expect(isCurrentComputeRunRecord(record)).toBe(false);
+  });
+
+  test('preserves producer-side calibration outcome omissions in assistant shaping', () => {
+    const record: any = makeCurrentTerminalRecord();
+    setCalibrationOutcomes(record, [{
+      model: 'VarianceGamma', underlying: 'SPY', expiration: '2026-03-30', status: 'success',
+      detail: {
+        params: { sigma: 0.2, nu: 0.3, theta: -0.1 },
+        rmse: 2.25,
+        confidence: 35,
+        confidenceSemantics: {
+          label: 'model-specific calibration quality score',
+          method: 'variance-gamma-quality-v1',
+          scale: '0-100 points',
+          crossModelComparable: false,
+        },
+        isFallback: false,
+        warnings: ['Variance Gamma calibration quality is low.'],
+        expirationDate: '2026-03-30',
+        status: 'success',
+      },
+    }]);
+    Object.assign(record.data.summary, {
+      completionState: 'partial',
+      totalCalibrations: 5,
+      calibrationOutcomeCount: 8,
+      includedCalibrationOutcomeCount: 1,
+      includedSuccessfulCalibrationCount: 1,
+      calibrationOutcomesTruncated: true,
+    });
+    makeSummaryOnlyRecord(record);
+
+    expect(isCurrentComputeRunRecord(record)).toBe(true);
+    const shaped = shapeComputeRunRecord(record) as Record<string, any>;
+    expect(shaped.calibrationOutcomes).toHaveLength(1);
+    expect(shaped.calibrationOutcomesNotShown).toBe(7);
+    expect(shaped.summary).toMatchObject({
+      calibrationOutcomeCount: 8,
+      includedCalibrationOutcomeCount: 1,
+      includedSuccessfulCalibrationCount: 1,
+      calibrationOutcomesTruncated: true,
+    });
+  });
+
+  test('prioritizes a warning outcome over capped generic unavailable outcomes', () => {
+    const record: any = makeCurrentTerminalRecord();
+    const genericGroups = [
+      { underlying: 'QQQ', expiration: '2026-03-30' },
+      { underlying: 'SPY', expiration: '2026-04-30' },
+      { underlying: 'SPY', expiration: '2026-05-30' },
+      { underlying: 'SPY', expiration: '2026-06-30' },
+      { underlying: 'SPY', expiration: '2026-07-30' },
+    ];
+    setCalibrationOutcomes(record, [
+      ...genericGroups.flatMap(({ underlying, expiration }, groupIndex) => (
+        ['Heston', 'SABR', 'JumpDiffusion', 'VarianceGamma'].map(model => ({
+          model,
+          underlying,
+          expiration,
+          status: 'unavailable',
+          reason: `No calibration surface ${groupIndex}`,
+        }))
+      )),
+      {
+        model: 'VarianceGamma',
+        underlying: 'SPY',
+        expiration: '2026-03-30',
+        status: 'success',
+        detail: {
+          params: { sigma: 0.2, nu: 0.3, theta: -0.1 },
+          rmse: 2.25,
+          confidence: 35,
+          confidenceSemantics: {
+            label: 'model-specific calibration quality score',
+            method: 'variance-gamma-quality-v1',
+            scale: '0-100 points',
+            crossModelComparable: false,
+          },
+          isFallback: false,
+          warnings: ['Variance Gamma calibration quality is low.'],
+          expirationDate: '2026-03-30',
+          status: 'success',
+        },
+      },
+    ]);
+    Object.assign(record.data.summary, {
+      totalPositions: 6,
+      calibrationOutcomeCount: 24,
+      includedCalibrationOutcomeCount: 21,
+      includedSuccessfulCalibrationCount: 1,
+      calibrationOutcomesTruncated: true,
+    });
+    Object.assign(record.data.projection, {
+      originalPositionCount: 6,
+      includedPositionCount: 2,
+      positionsTruncated: true,
+    });
+    makeSummaryOnlyRecord(record);
+
+    expect(isCurrentComputeRunRecord(record)).toBe(true);
+    const shaped = shapeComputeRunRecord(record) as Record<string, any>;
+    expect(shaped.calibrationOutcomes[0].detail.warnings).toEqual([
+      'Variance Gamma calibration quality is low.',
+    ]);
+    expect(shaped.calibrationOutcomesNotShown).toBe(4);
+
+    const oversized: any = { data: [{ ...shaped, oversized: 'x'.repeat(900_000) }], count: 1 };
+    trimFullComputeRunsResponse(oversized);
+    expect(oversized.data[0].calibrationOutcomes[0].detail.warnings).toEqual([
+      'Variance Gamma calibration quality is low.',
+    ]);
+  });
+
+  test('keeps the emergency floor below its byte budget with worst-case evidence text', () => {
+    const record: any = makeCurrentTerminalRecord();
+    record.data.notices = Array.from({ length: 5 }, (_, index) => ({
+      code: index === 4 ? 'EXPOSURE_SWEEP_FAILED' : 'DIVIDEND_ZERO_ASSUMPTION',
+      level: 'warning',
+      message: `notice-${index}-${'漢'.repeat(1_900)}`,
+      positionId: '漢'.repeat(128),
+      underlying: 'SPY',
+      expiration: '漢'.repeat(64),
+    }));
+    Object.assign(record.data.summary, {
+      noticeCount: 7,
+      includedNoticeCount: 5,
+      noticesTruncated: true,
+    });
+    expect(isCurrentComputeRunRecord(record)).toBe(true);
+    const shaped = shapeComputeRunRecord(record) as Record<string, any>;
+    expect(shaped.noticesMeta.entriesWithTruncatedFields).toBe(5);
+    shaped.calibrationOutcomes = Array.from({ length: 10 }, (_, index) => ({
+      model: 'Variance Gamma',
+      underlying: 'SPY',
+      expiration: '2026-03-30',
+      status: 'success',
+      reason: `reason-${index}-${'漢'.repeat(2_000)}`,
+      detail: {
+        rmse: 2.25,
+        confidence: 35,
+        confidenceSemantics: {
+          label: 'model-specific calibration quality score',
+          method: 'variance-gamma-quality-v1',
+          scale: '0-100 points',
+          crossModelComparable: false,
+        },
+        expirationDate: '2026-03-30',
+        warnings: Array.from({ length: 10 }, (_, warningIndex) => (
+          `warning-${warningIndex}-${'漢'.repeat(500)}`
+        )),
+      },
+    }));
+    shaped.aggregateExclusions = Array.from({ length: 20 }, (_, index) => ({
+      model: 'PDE',
+      metric: `Metric${index}`,
+      reason: '漢'.repeat(500),
+    }));
+    shaped.modelExclusions = Array.from({ length: 20 }, (_, index) => ({
+      model: 'PDE',
+      underlying: 'SPY',
+      expiration: '2026-03-30',
+      reason: `model-${index}-${'漢'.repeat(500)}`,
+    }));
+    const payload: any = { data: [{ ...shaped, oversized: 'x'.repeat(900_000) }], count: 1 };
+    trimFullComputeRunsResponse(payload);
+
+    expect(new TextEncoder().encode(JSON.stringify(payload)).byteLength).toBeLessThanOrEqual(48 * 1024);
+    expect(payload.data[0].calibrationOutcomes[0].detail.warnings[0]).toContain('warning-0');
+    expect(payload.data[0].calibrationOutcomes[0].detail.warningsNotShown).toBe(9);
+    expect(payload.data[0].calibrationOutcomesNotShown).toBeGreaterThan(0);
+    expect(payload.data[0].noticesMeta).toMatchObject({
+      total: 7,
+      returned: payload.data[0].notices.length,
+      omitted: payload.data[0].noticesNotShown,
+      entriesWithTruncatedFields: payload.data[0].notices.length,
+    });
+    expect(payload.data[0].notices.length).toBeGreaterThan(0);
+    expect(payload.data[0].notices.map((notice: { code: string }) => notice.code)).toContain(
+      'EXPOSURE_SWEEP_FAILED',
+    );
+  });
+
+  test('preserves sanitized fallback calibration status through emergency trimming', () => {
+    const record: any = makeCurrentTerminalRecord();
+    setCalibrationOutcomes(record, requiredCoreCalibrationOutcomes(record).map(outcome => (
+      outcome.model === 'JumpDiffusion'
+        && outcome.underlying === 'SPY'
+        && outcome.expiration === '2026-03-30'
+        ? {
+            model: 'JumpDiffusion',
+            underlying: 'SPY',
+            expiration: '2026-03-30',
+            status: 'failed',
+            reason: 'fallback_calibration',
+            detail: {
+              params: {},
+              rmse: null,
+              confidence: null,
+              isFallback: true,
+              failureReason: 'fallback_calibration',
+              warnings: ['Fallback calibration used.'],
+              expirationDate: '2026-03-30',
+              status: 'failed',
+            },
+          }
+        : outcome
+    )));
+    expect(isCurrentComputeRunRecord(record)).toBe(true);
+
+    const compact = shapeComputeRunRecord(structuredClone(record)) as Record<string, any>;
+    const compactOutcome = compact.calibrationOutcomes.find(
+      (outcome: any) => outcome.model === 'Jump Diffusion',
+    );
+    expect(compactOutcome.reason).toBe('fallback calibration');
+    expect(compact.calibrationOutcomes.find(
+      (outcome: any) => outcome.model === 'SABR',
+    ).reason).toBe('No calibratable observations in test fixture');
+
+    const payload: any = { data: [record] };
+    sanitizeComputeRunsWireOutput(payload);
+    sanitizeComputeRunsWireOutput(payload);
+    const fullOutcome = payload.data[0].data.calibrationOutcomes.find(
+      (outcome: any) => outcome.model === 'Jump Diffusion',
+    );
+    expect(fullOutcome.reason).toBe('fallback calibration');
+    expect(payload.data[0].data.calibrationOutcomes.find(
+      (outcome: any) => outcome.model === 'SABR',
+    ).reason).toBe('No calibratable observations in test fixture');
+    payload.data[0].oversized = 'x'.repeat(900_000);
+    trimFullComputeRunsResponse(payload);
+
+    const trimmedOutcome = payload.data[0].calibrationOutcomes.find(
+      (outcome: any) => outcome.model === 'Jump Diffusion',
+    );
+    expect(trimmedOutcome.detail.status).toBe('fallback (default parameters)');
+    expect(trimmedOutcome.detail.statusReason).toBe('fallback calibration');
+  });
+
+  test('removes spoofed calibration omission counts before deriving trusted counts', () => {
+    const record: any = makeCurrentTerminalRecord();
+    record.data.calibrationOutcomesNotShown = 999;
+    record.data.calibrationOutcomes = [{
+      model: 'Heston',
+      underlying: 'SPY',
+      expiration: '2026-03-30',
+      status: 'success',
+      detail: {
+        params: {},
+        rmse: null,
+        confidence: null,
+        isFallback: false,
+        warnings: ['One recorded warning.'],
+        warningsNotShown: 999,
+        expirationDate: '2026-03-30',
+      },
+    }];
+    const payload: any = { data: [record] };
+
+    sanitizeComputeRunsWireOutput(payload);
+
+    expect(payload.data[0].data).not.toHaveProperty('calibrationOutcomesNotShown');
+    expect(payload.data[0].data.calibrationOutcomes[0].detail).not.toHaveProperty('warningsNotShown');
   });
 
   test.each(['abc123', 'A'.repeat(64)])(
@@ -133,18 +1049,23 @@ function makeRecord() {
         completedAt: 1774771560000,
         totalPositions: 2,
         totalModelRuns: 24,
-        totalCalibrations: 4,
+        totalCalibrations: 0,
         executionTimeMs: 358646.55,
         errorCount: 1,
-        engineVersion: '2.0.5',
+        engineVersion: '2.0.6',
         completionState: 'partial',
         modelExclusionCount: 0,
         includedModelExclusionCount: 0,
         modelExclusionsTruncated: false,
+        calibrationOutcomeCount: 0,
+        includedCalibrationOutcomeCount: 0,
+        includedSuccessfulCalibrationCount: 0,
+        calibrationOutcomesTruncated: false,
       },
       underlyings: ['QQQ', 'SPY'],
       errors: [{ positionId: 'pos-b', model: 'PDE', error: 'slow' }],
       modelExclusions: [],
+      calibrationOutcomes: [],
       projection: {
         schemaVersion: 2,
         compactionLevel: 'none',
@@ -311,7 +1232,7 @@ describe('shapeComputeRunRecord', () => {
 
     expect(shaped.runKey).toBeUndefined();
     expect(shaped.summary.totalModelRuns).toBe(24);
-    expect(shaped.engineVersion).toBe('2.0.5');
+    expect(shaped.engineVersion).toBe('2.0.6');
     expect(shaped.summary.engineVersion).toBeUndefined();
     expect(shaped.errors).toEqual([{ model: 'PDE', message: 'slow' }]);
     expect(JSON.stringify(shaped)).not.toContain('debug-worker');
@@ -468,10 +1389,10 @@ describe('shapeComputeRunRecord', () => {
     });
   });
 
-  test('preserves valid exact 2.0.5 JD/VG pairs and the MC-JD null in compact shaping', () => {
+  test('preserves valid exact 2.0.6 JD/VG pairs and the MC-JD null in compact shaping', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.5';
+    record.data.summary.engineVersion = '2.0.6';
     record.positions[0].models.JumpDiffusion = calibrationModel(
       72,
       exactCalibrationSemantics('unified-jump-selection-v1'),
@@ -497,10 +1418,10 @@ describe('shapeComputeRunRecord', () => {
     expect(models['Monte Carlo - Jump Diffusion'].calibrationSummary.confidenceSemantics).toBeUndefined();
   });
 
-  test('withholds every malformed strict 2.0.5 JD/VG/MC-JD confidence fact in compact shaping', () => {
+  test('withholds every malformed strict 2.0.6 JD/VG/MC-JD confidence fact in compact shaping', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.5';
+    record.data.summary.engineVersion = '2.0.6';
     record.positions[0].models.JumpDiffusion = calibrationModel(72);
     record.positions[0].models.VarianceGamma = calibrationModel(
       83,
@@ -531,7 +1452,7 @@ describe('shapeComputeRunRecord', () => {
     (_field, mutation) => {
       const record: any = makeRecord();
       record.data.runSchemaVersion = 2;
-      record.data.summary.engineVersion = '2.0.5';
+      record.data.summary.engineVersion = '2.0.6';
       const semantics = {
         ...exactCalibrationSemantics('unified-jump-selection-v1'),
         ...mutation,
@@ -572,11 +1493,11 @@ describe('shapeComputeRunRecord', () => {
     ['Variance Gamma', 83, exactCalibrationSemantics('variance-gamma-quality-v1')],
     ['Monte Carlo - Jump Diffusion', 64, undefined],
   ] as const)(
-    'withholds strict 2.0.5 confidence facts from raw exact display model id %s in compact shaping',
+    'withholds strict 2.0.6 confidence facts from raw exact display model id %s in compact shaping',
     (displayModelId, confidence, semantics) => {
       const record: any = makeRecord();
       record.data.runSchemaVersion = 2;
-      record.data.summary.engineVersion = '2.0.5';
+      record.data.summary.engineVersion = '2.0.6';
       record.positions[0].models = {
         [displayModelId]: calibrationModel(confidence, semantics),
       };
@@ -786,7 +1707,7 @@ describe('shapeComputeRunRecord', () => {
       syncSchemaVersion: 2,
       runSchemaVersion: 2,
       summary: {
-        engineVersion: '2.0.5',
+        engineVersion: '2.0.6',
         inputHash: 'a'.repeat(64),
       },
       portfolioAggregates: { exclusions: aggregate },
@@ -1048,7 +1969,7 @@ describe('shapeComputeRunRecord', () => {
       modelExclusionsTruncated: true,
     }), {
       totalPositions: 2,
-      engineVersion: '2.0.5',
+      engineVersion: '2.0.6',
       inputHash: 'b'.repeat(64),
     });
 
@@ -1284,7 +2205,7 @@ describe('shapeComputeRunRecord', () => {
         syncSchemaVersion: 2,
         runSchemaVersion: 2,
         summary: {
-          engineVersion: '2.0.5',
+          engineVersion: '2.0.6',
           inputHash: 'c'.repeat(64),
           totalPositions: 1,
           totalModelRuns: 2,
@@ -1596,10 +2517,10 @@ describe('sanitizeComputeRunsWireOutput', () => {
     });
   });
 
-  test('preserves valid exact 2.0.5 JD/VG pairs and MC-JD null in full-mode sanitization', () => {
+  test('preserves valid exact 2.0.6 JD/VG pairs and MC-JD null in full-mode sanitization', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.5';
+    record.data.summary.engineVersion = '2.0.6';
     record.positions[0].models.JumpDiffusion = calibrationModel(
       72,
       exactCalibrationSemantics('unified-jump-selection-v1'),
@@ -1650,10 +2571,10 @@ describe('sanitizeComputeRunsWireOutput', () => {
     },
   );
 
-  test('withholds malformed strict 2.0.5 JD/VG/MC-JD facts in full-mode sanitization', () => {
+  test('withholds malformed strict 2.0.6 JD/VG/MC-JD facts in full-mode sanitization', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.5';
+    record.data.summary.engineVersion = '2.0.6';
     record.positions[0].models.JumpDiffusion = calibrationModel(72);
     record.positions[0].models.VarianceGamma = calibrationModel(
       83,
@@ -1685,7 +2606,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
     (_field, mutation) => {
       const record: any = makeRecord();
       record.data.runSchemaVersion = 2;
-      record.data.summary.engineVersion = '2.0.5';
+      record.data.summary.engineVersion = '2.0.6';
       record.positions[0].models = {
         JumpDiffusion: calibrationModel(72, {
           ...exactCalibrationSemantics('unified-jump-selection-v1'),
@@ -1705,7 +2626,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
   test('withholds strict MC-JD null confidence when orphan semantics are present', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.5';
+    record.data.summary.engineVersion = '2.0.6';
     record.positions[0].models = {
       'MonteCarlo-JumpDiffusion': calibrationModel(
         null,
@@ -1727,11 +2648,11 @@ describe('sanitizeComputeRunsWireOutput', () => {
     ['Variance Gamma', 83, exactCalibrationSemantics('variance-gamma-quality-v1')],
     ['Monte Carlo - Jump Diffusion', 64, undefined],
   ] as const)(
-    'withholds strict 2.0.5 confidence facts from raw exact display model id %s in full mode',
+    'withholds strict 2.0.6 confidence facts from raw exact display model id %s in full mode',
     (displayModelId, confidence, semantics) => {
       const record: any = makeRecord();
       record.data.runSchemaVersion = 2;
-      record.data.summary.engineVersion = '2.0.5';
+      record.data.summary.engineVersion = '2.0.6';
       record.positions[0].models = {
         [displayModelId]: calibrationModel(confidence, semantics),
       };
@@ -1748,7 +2669,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
   test('preserves valid strict JD/VG facts when full-mode sanitization repeats on the same row', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.5';
+    record.data.summary.engineVersion = '2.0.6';
     record.positions[0].models = {
       JumpDiffusion: calibrationModel(
         72,
@@ -1778,7 +2699,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
   test('does not transfer display-id trust when a sanitized row receives a replacement models map', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.5';
+    record.data.summary.engineVersion = '2.0.6';
     record.positions[0].models = {
       JumpDiffusion: calibrationModel(
         72,
@@ -1818,7 +2739,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
   test('applies enclosing strictness to data.positions even when an empty top-level positions array shadows it', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.5';
+    record.data.summary.engineVersion = '2.0.6';
     record.positions = [];
     record.data.positions = [{
       models: {
@@ -1838,7 +2759,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
   test('propagates enclosing strictness to every nested models map in full output', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.5';
+    record.data.summary.engineVersion = '2.0.6';
     record.data.shadow = {
       nested: {
         models: {
@@ -1878,7 +2799,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
     (_shape, model, confidence, confidenceSemantics) => {
       const record: any = makeRecord();
       record.data.runSchemaVersion = 2;
-      record.data.summary.engineVersion = '2.0.5';
+      record.data.summary.engineVersion = '2.0.6';
       record.data.calibrationOutcomes = [{
         model,
         detail: calibrationModel(confidence, confidenceSemantics).calibration,
@@ -1896,7 +2817,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
   test('preserves a valid canonical strict calibrationOutcome pair across repeated full sanitization', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.5';
+    record.data.summary.engineVersion = '2.0.6';
     record.data.calibrationOutcomes = [{
       model: 'JumpDiffusion',
       detail: calibrationModel(
@@ -1918,7 +2839,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
   test('default-denies unbound calibration confidence and injected calibrationSummary confidence in strict rows', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.5';
+    record.data.summary.engineVersion = '2.0.6';
     record.data.shadow = {
       calibration: calibrationModel(
         72,
@@ -1948,7 +2869,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
   test('lets an invalid unbound alias win when it shares a calibration object with a valid model context', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.5';
+    record.data.summary.engineVersion = '2.0.6';
     const sharedCalibration = calibrationModel(
       72,
       exactCalibrationSemantics('unified-jump-selection-v1'),
@@ -2770,7 +3691,7 @@ describe('summarizeComputeRunsResponse', () => {
         errorCount: 12,
         includedErrorCount: 8,
         errorsTruncated: true,
-        engineVersion: '2.0.5',
+        engineVersion: '2.0.6',
         completionState: 'partial',
         valuationTime: 1774771100000,
         executionConfig: {
@@ -2811,7 +3732,7 @@ describe('summarizeComputeRunsResponse', () => {
     expect(shaped.summary.errorCount).toBe(12);
     expect(shaped.summary.includedErrorCount).toBe(8);
     expect(shaped.summary.errorsTruncated).toBe(true);
-    expect(shaped.engineVersion).toBe('2.0.5');
+    expect(shaped.engineVersion).toBe('2.0.6');
     expect(shaped.runSchemaVersion).toBe(2);
     expect(shaped.completionState).toBe('partial');
     expect(shaped.valuationTime).toBe(1774771100000);

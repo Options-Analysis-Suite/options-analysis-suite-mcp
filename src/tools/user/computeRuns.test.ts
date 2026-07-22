@@ -60,6 +60,161 @@ const FULL_CURRENT_MODEL_IDS = [
   'LocalVol-CEV',
 ] as const;
 
+const CORE_CALIBRATION_OUTCOME_MODEL_IDS = [
+  'Heston',
+  'SABR',
+  'JumpDiffusion',
+  'VarianceGamma',
+] as const;
+
+const FULL_CALIBRATION_OUTCOME_MODEL_IDS = [
+  ...CORE_CALIBRATION_OUTCOME_MODEL_IDS,
+  'MonteCarlo-JumpDiffusion',
+] as const;
+
+function setCompletedCalibrationOutcomeFixture(
+  run: any,
+  scope: 'core' | 'full' = run.scope,
+): void {
+  const groups = new Map<string, { underlying: string; expiration: string }>();
+  for (const position of run.positions) {
+    const group = { underlying: position.underlying, expiration: position.expiration };
+    groups.set(JSON.stringify([group.underlying, group.expiration]), group);
+  }
+  const modelIds = scope === 'core'
+    ? CORE_CALIBRATION_OUTCOME_MODEL_IDS
+    : FULL_CALIBRATION_OUTCOME_MODEL_IDS;
+  const outcomes = [...groups.values()].flatMap(({ underlying, expiration }) => (
+    modelIds.map(model => {
+      const targets = model === 'Heston'
+        ? ['Heston', 'MonteCarlo-Heston']
+        : [model];
+      const matchingPositions = run.positions.filter((position: any) => (
+        position.underlying === underlying && position.expiration === expiration
+      ));
+      const existing = matchingPositions
+        .map((position: any) => position.models[targets[0]]?.calibration)
+        .find((calibration: any) => calibration != null);
+      const detail = existing ?? makeSuccessfulCalibrationFixture(model, expiration);
+      for (const position of matchingPositions) {
+        for (const target of targets) {
+          if (position.models[target]) position.models[target].calibration = detail;
+        }
+      }
+      return {
+        model,
+        underlying,
+        expiration,
+        status: 'success',
+        detail,
+      };
+    })
+  ));
+  run.data.calibrationOutcomes = outcomes;
+  Object.assign(run.data.summary, {
+    totalCalibrations: outcomes.length,
+    calibrationOutcomeCount: outcomes.length,
+    includedCalibrationOutcomeCount: outcomes.length,
+    includedSuccessfulCalibrationCount: outcomes.length,
+    calibrationOutcomesTruncated: false,
+  });
+}
+
+function makeSuccessfulCalibrationFixture(model: string, expirationDate: string): Record<string, any> {
+  const common = {
+    key: `calibration-${model}`,
+    rmse: 0.01,
+    confidence: 80,
+    isFallback: false,
+    warnings: [],
+    expirationDate,
+    executionPath: 'worker',
+    status: 'success',
+    economicPenalty: 1.25,
+    seedRejections: [{ reason: 'bad_seed' }],
+  };
+  if (model === 'Heston') {
+    return {
+      ...common,
+      params: { v0: 0.04, kappa: 1.2, theta: 0.04, xi: 0.3, rho: -0.5 },
+      confidence: 0.9,
+      confidenceSemantics: {
+        label: 'model-specific calibration quality score',
+        method: 'heston-quality-v1',
+        scale: '0-100 points',
+        crossModelComparable: false,
+      },
+    };
+  }
+  if (model === 'SABR') {
+    return {
+      ...common,
+      params: { alpha: 0.2, beta: 0.5, rho: -0.2, nu: 0.4 },
+      confidenceSemantics: {
+        label: 'model-specific calibration quality score',
+        method: 'sabr-quality-v1',
+        scale: '0-100 points',
+        crossModelComparable: false,
+      },
+    };
+  }
+  if (model === 'JumpDiffusion') {
+    return {
+      ...common,
+      params: {
+        selectedModel: 'merton', baseVolatility: 0.2, lambda: 0.1, muJ: -0.05, sigmaJ: 0.2,
+      },
+      confidenceSemantics: {
+        label: 'within-family model-selection score',
+        method: 'unified-jump-selection-v1',
+        scale: '0-100 points',
+        crossModelComparable: false,
+      },
+    };
+  }
+  if (model === 'VarianceGamma') {
+    return {
+      ...common,
+      params: { sigma: 0.2, nu: 0.2, theta: -0.05 },
+      confidenceSemantics: {
+        label: 'model-specific calibration quality score',
+        method: 'variance-gamma-quality-v1',
+        scale: '0-100 points',
+        crossModelComparable: false,
+      },
+    };
+  }
+  return {
+    ...common,
+    params: { baseVolatility: 0.2, lambda: 0.1, muJ: -0.05, sigmaJ: 0.2 },
+    confidence: null,
+  };
+}
+
+function setFailedCalibrationOutcomeFixture(run: any, model: string, reason: string): void {
+  const outcome = run.data.calibrationOutcomes.find((candidate: any) => candidate.model === model);
+  if (!outcome) throw new Error(`Missing ${model} calibration outcome fixture`);
+  const targets = model === 'Heston' ? ['Heston', 'MonteCarlo-Heston'] : [model];
+  for (const position of run.positions) {
+    for (const target of targets) delete position.models[target]?.calibration;
+  }
+  Object.assign(outcome, {
+    status: 'failed',
+    reason,
+    detail: {
+      ...outcome.detail,
+      status: 'failed',
+      isFallback: true,
+      failureReason: reason,
+    },
+  });
+  Object.assign(run.data.summary, {
+    completionState: 'partial',
+    totalCalibrations: run.data.summary.totalCalibrations - 1,
+    includedSuccessfulCalibrationCount: run.data.summary.includedSuccessfulCalibrationCount - 1,
+  });
+}
+
 function testInputHash(seed = 1): string {
   return seed.toString(16).padStart(64, '0');
 }
@@ -114,27 +269,9 @@ function makeRun(index = 0) {
       },
     ]),
   ));
-  models.Heston.calibration = {
-    key: 'calibration-heston',
-    params: {},
-    rmse: 0.01,
-    confidence: 0.9,
-    confidenceSemantics: {
-      label: 'model-specific calibration quality score',
-      method: 'heston-quality-v1',
-      scale: '0-100 points',
-      crossModelComparable: false,
-    },
-    isFallback: true,
-    failureReason: 'insufficient_surface',
-    warnings: [],
-    expirationDate: '2026-05-15',
-    executionPath: 'worker',
-    economicPenalty: 1.25,
-    seedRejections: [{ reason: 'bad_seed' }],
-  };
+  models.Heston.calibration = makeSuccessfulCalibrationFixture('Heston', '2026-05-15');
 
-  return {
+  const run = {
     id: 100 + index,
     user_id: 1,
     created_at: '2026-04-01T00:00:00.000Z',
@@ -153,7 +290,7 @@ function makeRun(index = 0) {
       key: `compute-data-${index}`,
       resultId: 900 + index,
       summary: {
-        engineVersion: '2.0.5',
+        engineVersion: '2.0.6',
         inputHash: testInputHash(index + 1),
         completionState: 'complete',
         valuationTime: 1774771100000 - index * 1000,
@@ -164,19 +301,28 @@ function makeRun(index = 0) {
         },
         totalPositions: 4,
         totalModelRuns: 56,
-        totalCalibrations: 4,
+        totalCalibrations: 0,
         completedAt: 1774771500000,
         executionTimeMs: 300_000,
         errorCount: 0,
         includedErrorCount: 0,
         errorsTruncated: false,
+        noticeCount: 0,
+        includedNoticeCount: 0,
+        noticesTruncated: false,
         modelExclusionCount: 0,
         includedModelExclusionCount: 0,
         modelExclusionsTruncated: false,
+        calibrationOutcomeCount: 0,
+        includedCalibrationOutcomeCount: 0,
+        includedSuccessfulCalibrationCount: 0,
+        calibrationOutcomesTruncated: false,
       },
       underlyings: ['SPY'],
       errors: [],
+      notices: [],
       modelExclusions: [],
+      calibrationOutcomes: [],
       projection: {
         schemaVersion: 2,
         compactionLevel: 'none',
@@ -251,6 +397,55 @@ function makeRun(index = 0) {
       models,
     })),
   };
+  setCompletedCalibrationOutcomeFixture(run);
+  return run;
+}
+
+function expandCurrentRunForBudget(run: any, fill: string, positionCount = 20): void {
+  const template = run.positions[0];
+  run.positions = Array.from({ length: positionCount }, (_, positionIndex) => {
+    const expiration = `2026-${String(Math.floor(positionIndex / 28) + 1).padStart(2, '0')}-${String((positionIndex % 28) + 1).padStart(2, '0')}`;
+    const position = structuredClone(template);
+    Object.assign(position, {
+      positionId: `budget-position-${positionIndex}`,
+      symbol: `SPY BUDGET ${positionIndex}`,
+      expiration,
+    });
+    for (const model of Object.values(position.models) as any[]) {
+      if (model.calibration) model.calibration.expirationDate = expiration;
+    }
+    return position;
+  });
+  Object.assign(run.data.summary, { totalPositions: positionCount });
+  Object.assign(run.data.projection, {
+    originalPositionCount: positionCount,
+    includedPositionCount: positionCount,
+    positionsTruncated: false,
+  });
+  run.data.portfolioAggregates.coverage.BlackScholes.Price = {
+    included: positionCount,
+    expected: positionCount,
+    complete: true,
+  };
+  setCompletedCalibrationOutcomeFixture(run);
+  const warning = fill.repeat(Math.ceil(500 / fill.length)).slice(0, 500);
+  for (const outcome of run.data.calibrationOutcomes) {
+    outcome.detail.warnings = Array(20).fill(warning);
+  }
+}
+
+function setSummaryOnlyProjectionFixture(run: any): void {
+  run.positions = [];
+  Object.assign(run.data.projection, {
+    compactionLevel: 'summary-only',
+    includedPositionCount: 0,
+    positionsTruncated: true,
+    variantsTruncated: true,
+    calibrationTruncated: true,
+    portfolioAggregatesTruncated: true,
+  });
+  delete run.data.exposureSweep;
+  delete run.data.portfolioAggregates.coverage;
 }
 
 const CURRENT_COMPUTE_GREEK_NAMES = [
@@ -284,15 +479,6 @@ function makeCurrentExposureStrike() {
   };
 }
 
-function makeLargeCanonicalUnderlyingUniverse(fill: string): string[] {
-  return [
-    'SPY',
-    ...Array.from({ length: 1_200 }, (_, index) => (
-      `X${String(index).padStart(4, '0')}${fill.repeat(80)}`
-    )),
-  ];
-}
-
 describe('get_compute_runs wire output', () => {
   test('accepts exact core model ids and every current canonical Greek key', () => {
     const run: any = makeRun(0);
@@ -307,6 +493,7 @@ describe('get_compute_runs wire output', () => {
         BlackScholes: structuredClone(blackScholes),
       }),
     }));
+    setCompletedCalibrationOutcomeFixture(run, 'core');
     run.data.portfolioAggregates = {
       byModel: {
         BlackScholes: { Price: 10, Delta: 0.5 },
@@ -339,6 +526,7 @@ describe('get_compute_runs wire output', () => {
       ...position,
       models: makeExactCurrentModels('core', position.models),
     }));
+    setCompletedCalibrationOutcomeFixture(missingCoreModel, 'core');
     missingCoreModel.data.portfolioAggregates = {
       byModel: {
         BlackScholes: { Price: 10, Delta: 0.5 },
@@ -378,7 +566,7 @@ describe('get_compute_runs wire output', () => {
     }
   });
 
-  test('requires retained variant truncation in projection metadata without inferring it from positions', () => {
+  test('requires projection variant truncation for retained or dropped position variants', () => {
     const retainedVariantTruncation: any = makeRun(0);
     retainedVariantTruncation.positions[0].models.BlackScholes.variantCount = 2;
     retainedVariantTruncation.positions[0].models.BlackScholes.variantsTruncated = true;
@@ -392,7 +580,32 @@ describe('get_compute_runs wire output', () => {
       positionsTruncated: true,
       variantsTruncated: false,
     });
-    expect(isCurrentComputeRunRecord(positionOnlyTruncation)).toBe(true);
+    expect(isCurrentComputeRunRecord(positionOnlyTruncation)).toBe(false);
+  });
+
+  test.each([
+    ['duplicate retained position ids', (run: any) => {
+      run.positions[1].positionId = run.positions[0].positionId;
+    }],
+    ['a position valuation time outside the run snapshot', (run: any) => {
+      run.positions[0].valuationTime = run.data.summary.valuationTime + 1;
+    }],
+    ['retained exposure truncation hidden by the projection', (run: any) => {
+      Object.assign(run.data.exposureSweep[0], {
+        strikeCount: 1,
+        aggregateByStrike: [],
+        aggregateByStrikeTruncated: true,
+      });
+      run.data.projection.exposureTruncated = false;
+    }],
+    ['summary-only aggregate omission hidden by the projection', (run: any) => {
+      setSummaryOnlyProjectionFixture(run);
+      run.data.projection.portfolioAggregatesTruncated = false;
+    }],
+  ] as const)('rejects current compute records with %s', (_case, mutate) => {
+    const run: any = makeRun(0);
+    mutate(run);
+    expect(isCurrentComputeRunRecord(run)).toBe(false);
   });
 
   test('requires positive positions and nonempty underlyings for every terminal status', () => {
@@ -441,14 +654,13 @@ describe('get_compute_runs wire output', () => {
     expect(isCurrentComputeRunRecord(withVestigialExcluded)).toBe(false);
 
     const summaryOnly: any = makeRun(0);
-    summaryOnly.data.projection.compactionLevel = 'summary-only';
-    delete summaryOnly.data.exposureSweep;
-    delete summaryOnly.data.portfolioAggregates.coverage;
+    setSummaryOnlyProjectionFixture(summaryOnly);
     expect(isCurrentComputeRunRecord(summaryOnly)).toBe(true);
 
     const summaryOnlyWithCoverage: any = makeRun(0);
-    summaryOnlyWithCoverage.data.projection.compactionLevel = 'summary-only';
-    delete summaryOnlyWithCoverage.data.exposureSweep;
+    const coverage = summaryOnlyWithCoverage.data.portfolioAggregates.coverage;
+    setSummaryOnlyProjectionFixture(summaryOnlyWithCoverage);
+    summaryOnlyWithCoverage.data.portfolioAggregates.coverage = coverage;
     expect(isCurrentComputeRunRecord(summaryOnlyWithCoverage)).toBe(false);
   });
 
@@ -481,13 +693,17 @@ describe('get_compute_runs wire output', () => {
 
   test('accepts current model detail at its exact text and collection boundaries', () => {
     const run: any = makeRun(0);
+    const expiration = 'E'.repeat(100);
+    for (const position of run.positions) position.expiration = expiration;
+    for (const outcome of run.data.calibrationOutcomes) {
+      outcome.expiration = expiration;
+      outcome.detail.expirationDate = expiration;
+    }
     Object.assign(run.positions[0].models.Heston.calibration, {
-      warnings: Array(10).fill('W'.repeat(500)),
-      expirationDate: 'E'.repeat(100),
+      warnings: Array(20).fill('W'.repeat(500)),
       executionPath: 'P'.repeat(200),
-      status: 'failed',
-      failureReason: 'F'.repeat(2_000),
     });
+    setFailedCalibrationOutcomeFixture(run, 'MonteCarlo-JumpDiffusion', 'F'.repeat(2_000));
     Object.assign(run.positions[0].models.Heston.variants[0], {
       error: 'V'.repeat(2_000),
       diagnostics: { method: 'M'.repeat(200) },
@@ -524,11 +740,17 @@ describe('get_compute_runs wire output', () => {
       run => {
         run.positions[0].models.BlackScholes.variants[0].diagnostics = { method: 'M'.repeat(201) };
       },
-      run => { run.positions[0].models.Heston.calibration.warnings = Array(11).fill('warning'); },
+      run => { run.positions[0].models.Heston.calibration.warnings = Array(21).fill('warning'); },
       run => { run.positions[0].models.Heston.calibration.warnings = ['W'.repeat(501)]; },
       run => { run.positions[0].models.Heston.calibration.expirationDate = 'E'.repeat(101); },
       run => { run.positions[0].models.Heston.calibration.executionPath = 'P'.repeat(201); },
-      run => { run.positions[0].models.Heston.calibration.failureReason = 'F'.repeat(2_001); },
+      run => {
+        setFailedCalibrationOutcomeFixture(
+          run,
+          'MonteCarlo-JumpDiffusion',
+          'F'.repeat(2_001),
+        );
+      },
       run => {
         run.positions[0].models.BlackScholes.calibration = structuredClone(
           run.positions[0].models.Heston.calibration,
@@ -651,9 +873,9 @@ describe('get_compute_runs wire output', () => {
     expect(parsed.data[0].positions[0].modelsNotShown).toBeUndefined();
     expect(parsed.data[0].positions[0].modelSummary.modelCount).toBe(14);
     expect(parsed.data[0].positions[0].modelSummary.modelsPreview).toEqual([
-      'Black-Scholes',
-      'FFT',
-      'PDE',
+      'Heston',
+      'SABR',
+      'Jump Diffusion',
     ]);
     expect(text).not.toContain('runKey');
     expect(text).not.toContain('latestRunKey');
@@ -666,7 +888,9 @@ describe('get_compute_runs wire output', () => {
   });
 
   test('full view strips raw backend identifiers and calibration plumbing', async () => {
-    const { handler } = createHarness({ data: [makeRun(0)], count: 1 });
+    const run = makeRun(0);
+    setFailedCalibrationOutcomeFixture(run, 'Heston', 'insufficient_surface');
+    const { handler } = createHarness({ data: [run], count: 1 });
     const result = await handler({ limit: 1, full: true });
     const parsed = JSON.parse(result.content[0].text);
     const text = result.content[0].text;
@@ -691,6 +915,58 @@ describe('get_compute_runs wire output', () => {
     expect(text).not.toContain('byReason');
     expect(text).not.toContain('fallbackReason');
     expect(text).not.toContain('failureReason');
+  });
+
+  test('returns synced run notices in compact and full views without private provenance', async () => {
+    const run: any = makeRun(0);
+    run.data.notices = [{
+      code: 'DIVIDEND_ZERO_ASSUMPTION',
+      level: 'warning',
+      underlying: 'SPY',
+      message: 'SPY dividend yield was unavailable; this run assumes zero.',
+      provenance: {
+        kind: 'assumption',
+        source: 'unknown-dividend-zero-assumption',
+        assumed: true,
+      },
+    }];
+    Object.assign(run.data.summary, {
+      noticeCount: 1,
+      includedNoticeCount: 1,
+      noticesTruncated: false,
+    });
+    run.noticesNotShown = 999;
+    run.noticesMeta = { total: 999, returned: 0, omitted: 999 };
+    run.data.noticesNotShown = 998;
+    run.data.noticesMeta = { total: 998, returned: 0, omitted: 998 };
+
+    const compactHarness = createHarness({ data: [run], count: 1 });
+    const compact = JSON.parse((await compactHarness.handler({
+      limit: 1,
+      view: 'detailed',
+    })).content[0].text);
+    expect(compact.data[0].notices).toEqual([{
+      code: 'DIVIDEND_ZERO_ASSUMPTION',
+      level: 'warning',
+      underlying: 'SPY',
+      message: 'SPY dividend yield was unavailable; this run assumes zero.',
+    }]);
+    expect(compact.data[0].summary).toMatchObject({
+      noticeCount: 1,
+      includedNoticeCount: 1,
+      noticesTruncated: false,
+    });
+    expect(compact.data[0].noticesNotShown).toBeUndefined();
+    expect(compact.data[0].noticesMeta).toBeUndefined();
+
+    const fullHarness = createHarness({ data: [run], count: 1 });
+    const full = JSON.parse((await fullHarness.handler({ limit: 1, full: true })).content[0].text);
+    expect(full.data[0].data.notices).toEqual(compact.data[0].notices);
+    expect(full.data[0].noticesNotShown).toBeUndefined();
+    expect(full.data[0].noticesMeta).toBeUndefined();
+    expect(full.data[0].data.noticesNotShown).toBeUndefined();
+    expect(full.data[0].data.noticesMeta).toBeUndefined();
+    expect(JSON.stringify(full)).not.toContain('unknown-dividend-zero-assumption');
   });
 
   test('returns bounded canonical aggregate and model exclusions through the handler', async () => {
@@ -783,7 +1059,7 @@ describe('get_compute_runs wire output', () => {
         syncSchemaVersion: 2,
         runSchemaVersion: 2,
         summary: {
-          engineVersion: '2.0.5',
+          engineVersion: '2.0.6',
           inputHash: testInputHash(99),
           totalPositions: 2,
           modelExclusionCount: 1,
@@ -885,11 +1161,19 @@ describe('get_compute_runs wire output', () => {
         variants: [{ price: 2, greeks: { Delta: 0.51 }, dimensions: { exerciseStyle: 'european' } }],
         calibration: {
           isFallback: false,
-          params: { seed: 67890, lambda: 0.1 },
+          params: {
+            seed: 67890,
+            selectedModel: 'merton',
+            baseVolatility: 0.2,
+            lambda: 0.1,
+            muJ: -0.05,
+            sigmaJ: 0.2,
+          },
           rmse: null,
           confidence: null,
           warnings: [],
           expirationDate: '2026-05-15',
+          status: 'success',
         },
       },
       VarianceGamma: {
@@ -898,14 +1182,16 @@ describe('get_compute_runs wire output', () => {
         variants: [{ price: 3, greeks: { Delta: 0.52 }, dimensions: { exerciseStyle: 'european' } }],
         calibration: {
           isFallback: false,
-          params: { seed: 24680, theta: 0.2 },
+          params: { seed: 24680, sigma: 0.2, nu: 0.2, theta: -0.05 },
           rmse: null,
           confidence: null,
           warnings: [],
           expirationDate: '2026-05-15',
+          status: 'success',
         },
       },
     });
+    setCompletedCalibrationOutcomeFixture(run);
 
     const { handler } = createHarness({ data: [run], count: 1 });
     const result = await handler({ limit: 1 });
@@ -915,7 +1201,7 @@ describe('get_compute_runs wire output', () => {
     expect(parsed.data[0].portfolioDispersion.Price.models).toBeUndefined();
     const targetPosition = parsed.data[0].positions.find((position: any) => position.symbol === 'SPY C0');
     expect(targetPosition.models).toBeUndefined();
-    expect(targetPosition.modelSummary.modelsPreview).toEqual(['Jump Diffusion', 'Variance Gamma', 'Black-Scholes']);
+    expect(targetPosition.modelSummary.modelsPreview).toEqual(['Jump Diffusion', 'Variance Gamma', 'Heston']);
     expect(text).not.toContain('BlackScholes');
     expect(text).not.toContain('JumpDiffusion');
     expect(text).not.toContain('VarianceGamma');
@@ -931,6 +1217,7 @@ describe('get_compute_runs wire output', () => {
     }));
     (runs[120].data as any).underlyings = ['QQQ'];
     (runs[120].data as any).exposureSweep[0].underlying = 'QQQ';
+    setCompletedCalibrationOutcomeFixture(runs[120]);
 
     const { calls, handler } = createHarness((params?: Record<string, string>) => {
       const requested = Number(params?.limit ?? 0);
@@ -956,8 +1243,8 @@ describe('get_compute_runs wire output', () => {
       unsupported.push(run);
     };
     addUnsupported(run => { run.data.summary.engineVersion = '2.0.4'; });
-    addUnsupported(run => { run.data.summary.engineVersion = '2.0.6'; });
-    addUnsupported(run => { run.data.summary.engineVersion = '2.0.5-rc.1'; });
+    addUnsupported(run => { run.data.summary.engineVersion = '2.0.7'; });
+    addUnsupported(run => { run.data.summary.engineVersion = '2.0.6-rc.1'; });
     addUnsupported(run => { run.data.summary.inputHash = 'abc123'; });
     addUnsupported(run => { run.data.summary.inputHash = 'A'.repeat(64); });
     addUnsupported(run => { run.scope = 'core'; });
@@ -1397,6 +1684,7 @@ describe('get_compute_runs wire output', () => {
       symbol: position.symbol.replace('SPY', 'QQQ'),
       underlying: 'QQQ',
     }));
+    setCompletedCalibrationOutcomeFixture(currentTarget);
     const { handler } = createHarness({
       data: [...unsupported, currentTarget, makeRun(121)],
       count: unsupported.length + 2,
@@ -1409,7 +1697,7 @@ describe('get_compute_runs wire output', () => {
     expect(parsed.matchedCount).toBe(1);
     expect(parsed.hasMore).toBe(false);
     expect(parsed.data).toHaveLength(1);
-    expect(parsed.data[0].engineVersion).toBe('2.0.5');
+    expect(parsed.data[0].engineVersion).toBe('2.0.6');
     expect(parsed.data[0].underlyings).toEqual(['QQQ']);
     expect(parsed.data[0].startedAt).toBe(new Date(currentTarget.timestamp).toISOString());
   });
@@ -1564,12 +1852,12 @@ describe('get_compute_runs wire output', () => {
 
   test('keeps one pathological run useful and bounded in summary and full modes', async () => {
     const run = makeRun(0);
-    (run.data as Record<string, any>).underlyings = makeLargeCanonicalUnderlyingUniverse('X');
+    expandCurrentRunForBudget(run, '漢');
     run.positions = [];
     const projection = {
       schemaVersion: 2,
       compactionLevel: 'summary-only',
-      originalPositionCount: 300,
+      originalPositionCount: 20,
       includedPositionCount: 0,
       positionsTruncated: true,
       variantsTruncated: true,
@@ -1580,7 +1868,6 @@ describe('get_compute_runs wire output', () => {
     };
     (run.data as Record<string, any>).projection = projection;
     delete (run.data as Record<string, any>).exposureSweep;
-    (run.data as Record<string, any>).summary.totalPositions = 300;
     (run.data as Record<string, any>).portfolioAggregates = {
       byModel: {},
       dispersion: {},
@@ -1611,14 +1898,14 @@ describe('get_compute_runs wire output', () => {
 
   test('does not claim positions are included when the current single-run floor strips them', async () => {
     const run = makeRun(0);
-    (run.data as Record<string, any>).underlyings = makeLargeCanonicalUnderlyingUniverse('X');
+    expandCurrentRunForBudget(run, '漢');
     // A pristine write-time projection that says nothing was truncated. The emergency floor strips
     // all positions, so the wire must not echo this stale "everything included" claim.
     (run.data as Record<string, any>).projection = {
       schemaVersion: 2,
       compactionLevel: 'none',
-      originalPositionCount: 4,
-      includedPositionCount: 4,
+      originalPositionCount: 20,
+      includedPositionCount: 20,
       positionsTruncated: false,
       variantsTruncated: false,
       exposureTruncated: false,
@@ -1638,7 +1925,7 @@ describe('get_compute_runs wire output', () => {
       expect(parsed.data[0].projection.variantsTruncated).toBe(true);
       expect(parsed.data[0].projection.includedPositionCount).toBe(0);
       // The true original count is preserved (not fabricated to 0).
-      expect(parsed.data[0].projection.originalPositionCount).toBe(4);
+      expect(parsed.data[0].projection.originalPositionCount).toBe(20);
     }
   });
 
@@ -1652,10 +1939,10 @@ describe('get_compute_runs wire output', () => {
       'summary-only',
     ]) {
       const run = makeRun(0);
-      (run.data as Record<string, any>).projection.compactionLevel = compactionLevel;
       if (compactionLevel === 'summary-only') {
-        delete (run.data as Record<string, any>).exposureSweep;
-        delete (run.data as Record<string, any>).portfolioAggregates.coverage;
+        setSummaryOnlyProjectionFixture(run);
+      } else {
+        (run.data as Record<string, any>).projection.compactionLevel = compactionLevel;
       }
       expect(isCurrentComputeRunRecord(run), compactionLevel).toBe(true);
     }
@@ -1669,7 +1956,7 @@ describe('get_compute_runs wire output', () => {
 
   test('compacts multibyte single-run fields before the shared wire guard', async () => {
     const run = makeRun(0);
-    (run.data as Record<string, any>).underlyings = makeLargeCanonicalUnderlyingUniverse('漢');
+    expandCurrentRunForBudget(run, '漢');
     const { handler } = createHarness({ data: [run], count: 1 });
 
     for (const full of [false, true]) {

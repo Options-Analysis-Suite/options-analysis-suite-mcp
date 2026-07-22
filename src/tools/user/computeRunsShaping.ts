@@ -23,20 +23,27 @@ type ComputeRunFilters = {
 const MAX_DEFAULT_POSITIONS = 5;
 const MAX_MULTI_RUN_POSITIONS = 2;
 const MAX_DEFAULT_ERRORS = 5;
+const MAX_DEFAULT_NOTICES = 5;
+const MAX_DEFAULT_CALIBRATION_OUTCOMES = 20;
+const MAX_BUDGET_CALIBRATION_OUTCOMES = 10;
 const MAX_ERROR_MESSAGE_CHARS = 1_000;
 const MAX_ERROR_MODEL_CHARS = 128;
 const MAX_ERROR_CODE_CHARS = 128;
 const MAX_ERROR_UNDERLYING_CHARS = 64;
 const MAX_ERROR_EXPIRATION_CHARS = 64;
 const COMPUTE_SYNC_ERROR_LIMIT = 100;
+const COMPUTE_SYNC_NOTICE_LIMIT = 100;
 const CURRENT_COMPUTE_ERROR_TEXT_MAX_LENGTH = 2_000;
-const CURRENT_COMPUTE_CALIBRATION_WARNING_LIMIT = 10;
+const CURRENT_COMPUTE_NOTICE_IDENTIFIER_MAX_LENGTH = 200;
+const CURRENT_COMPUTE_CALIBRATION_WARNING_LIMIT = 20;
 const CURRENT_COMPUTE_CALIBRATION_WARNING_MAX_LENGTH = 500;
+const ENGINE_CALIBRATION_WARNING_OMISSION_PATTERN = /^\[engine omitted ([1-9]\d*) additional calibration warnings?\]$/;
 const CURRENT_COMPUTE_EXPIRATION_MAX_LENGTH = 100;
 const CURRENT_COMPUTE_EXECUTION_PATH_MAX_LENGTH = 200;
 const MAX_ASSISTANT_EXCLUSIONS = 20;
 const MAX_ASSISTANT_EXCLUSION_IDENTIFIER_CHARS = 128;
 const MAX_ASSISTANT_EXCLUSION_REASON_CHARS = 500;
+const TRUSTED_SHAPED_NOTICE_ENTRIES = new WeakSet<object>();
 const MAX_MULTI_RUN_MODELS = 3;
 const MAX_SINGLE_RUN_FALLBACK_POSITIONS = 3;
 const MAX_SINGLE_RUN_FALLBACK_MODELS = 5;
@@ -47,8 +54,10 @@ const FALLBACK_STATUS = 'fallback (default parameters)';
 const MODEL_SPECIFIC_CONFIDENCE_LABEL = 'model-specific calibration quality score';
 const WITHIN_FAMILY_CONFIDENCE_LABEL = 'within-family model-selection score';
 const CALIBRATION_CONFIDENCE_SCALE = '0-100 points';
-export const CURRENT_COMPUTE_ENGINE_VERSION = '2.0.5';
+export const CURRENT_COMPUTE_ENGINE_VERSION = '2.0.6';
 const CURRENT_COMPUTE_INPUT_HASH_PATTERN = /^[0-9a-f]{64}$/;
+const KOU_MIN_ETA_UP = 2;
+const KOU_MIN_ETA_DOWN = 1.5;
 const TERMINAL_COMPUTE_STATUSES = new Set(['completed', 'cancelled', 'failed']);
 const CORE_COMPUTE_MODEL_IDS = new Set([
   'BlackScholes',
@@ -77,6 +86,19 @@ const CALIBRATION_CARRYING_MODEL_IDS = new Set([
   'MonteCarlo-Heston',
   'MonteCarlo-JumpDiffusion',
 ]);
+const CALIBRATION_OUTCOME_MODEL_IDS = new Set([
+  'Heston',
+  'SABR',
+  'JumpDiffusion',
+  'VarianceGamma',
+  'MonteCarlo-JumpDiffusion',
+]);
+const CORE_CALIBRATION_OUTCOME_MODELS = [
+  'Heston', 'SABR', 'JumpDiffusion', 'VarianceGamma',
+] as const;
+const FULL_CALIBRATION_OUTCOME_MODELS = [
+  ...CORE_CALIBRATION_OUTCOME_MODELS, 'MonteCarlo-JumpDiffusion',
+] as const;
 const CURRENT_COMPUTE_COMPACTION_LEVELS = new Set([
   'none',
   'variants',
@@ -84,6 +106,11 @@ const CURRENT_COMPUTE_COMPACTION_LEVELS = new Set([
   'models-core',
   'positions',
   'summary-only',
+]);
+const CALIBRATION_DETAIL_PRESERVING_COMPACTION_LEVELS = new Set([
+  'none',
+  'variants',
+  'variants+exposure',
 ]);
 const CURRENT_COMPUTE_GREEK_NAMES = new Set([
   'Delta', 'Vega', 'Theta', 'Rho', 'Gamma', 'Vanna', 'Charm', 'Vomma', 'Veta',
@@ -223,6 +250,112 @@ function hasOwn(container: Record<string, unknown>, key: string): boolean {
 
 function ownField(container: Record<string, unknown> | null, key: string): unknown {
   return container && hasOwn(container, key) ? container[key] : undefined;
+}
+
+const CALIBRATION_OUTCOME_TARGETS: Readonly<Record<string, readonly string[]>> = {
+  Heston: ['Heston', 'MonteCarlo-Heston'],
+  SABR: ['SABR'],
+  JumpDiffusion: ['JumpDiffusion'],
+  VarianceGamma: ['VarianceGamma'],
+  'MonteCarlo-JumpDiffusion': ['MonteCarlo-JumpDiffusion'],
+};
+
+const CALIBRATION_TARGET_OUTCOME = new Map<string, string>(
+  Object.entries(CALIBRATION_OUTCOME_TARGETS).flatMap(([outcome, targets]) => (
+    targets.map(target => [target, outcome] as const)
+  )),
+);
+
+function equalCalibrationValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index += 1) {
+      if (!Object.prototype.hasOwnProperty.call(left, index)
+        || !Object.prototype.hasOwnProperty.call(right, index)
+        || !equalCalibrationValue(left[index], right[index])) return false;
+    }
+    return true;
+  }
+  const leftRecord = getObject(left);
+  const rightRecord = getObject(right);
+  if (!leftRecord || !rightRecord) return false;
+  const leftKeys = Object.keys(leftRecord).sort();
+  const rightKeys = Object.keys(rightRecord).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => (
+      key === rightKeys[index]
+      && equalCalibrationValue(leftRecord[key], rightRecord[key])
+    ));
+}
+
+function isFiniteMetric(value: unknown): boolean {
+  if (isFiniteNumber(value)) return true;
+  return isFiniteNumber(ownField(getObject(value), 'value'));
+}
+
+function hasObservedUsableVariant(model: Record<string, unknown>): boolean {
+  const variants = ownField(model, 'variants');
+  if (!Array.isArray(variants)) return false;
+  return variants.some((variantValue) => {
+    const variant = getObject(variantValue);
+    if (!variant) return false;
+    if (isFiniteMetric(ownField(variant, 'price'))) return true;
+    const greeks = getOwnObjectField(variant, 'greeks');
+    return greeks != null && Object.values(greeks).some(isFiniteMetric);
+  });
+}
+
+function hasConsistentCalibrationBindings(
+  positions: readonly unknown[],
+  outcomes: readonly unknown[],
+  calibrationOutcomesTruncated: boolean,
+  calibrationTruncated: boolean,
+): boolean {
+  const outcomeByTuple = new Map<string, Record<string, unknown>>();
+  for (const outcomeValue of outcomes) {
+    const outcome = getObject(outcomeValue);
+    if (!outcome) continue;
+    outcomeByTuple.set(JSON.stringify([
+      ownField(outcome, 'model'),
+      ownField(outcome, 'underlying'),
+      ownField(outcome, 'expiration'),
+    ]), outcome);
+  }
+  for (const positionValue of positions) {
+    const position = getObject(positionValue);
+    const models = getOwnObjectField(position, 'models');
+    if (!position || !models) continue;
+    for (const [targetModel, modelValue] of Object.entries(models)) {
+      const outcomeModel = CALIBRATION_TARGET_OUTCOME.get(targetModel);
+      const model = getObject(modelValue);
+      if (outcomeModel == null || !model) continue;
+      const outcome = outcomeByTuple.get(JSON.stringify([
+        outcomeModel,
+        ownField(position, 'underlying'),
+        ownField(position, 'expiration'),
+      ]));
+      const hasCalibration = hasOwn(model, 'calibration');
+      if (!outcome) {
+        if (!calibrationOutcomesTruncated
+          && (hasCalibration || hasObservedUsableVariant(model))) return false;
+        continue;
+      }
+      if (ownField(outcome, 'status') !== 'success') {
+        if (hasCalibration || hasObservedUsableVariant(model)) return false;
+        continue;
+      }
+      if (!hasCalibration) {
+        if (!calibrationTruncated) return false;
+        continue;
+      }
+      if (!equalCalibrationValue(
+        ownField(model, 'calibration'),
+        ownField(outcome, 'detail'),
+      )) return false;
+    }
+  }
+  return true;
 }
 
 function getOwnObjectField(container: Record<string, unknown> | null, key: string): Record<string, unknown> | null {
@@ -417,6 +550,17 @@ function humanizeAssistantReason(value: unknown, knownLabels?: Record<string, st
       : trimmed);
   return boundAssistantString(readable, MAX_ASSISTANT_EXCLUSION_REASON_CHARS).value
     ?? 'reason not recorded';
+}
+
+function humanizeCalibrationOutcomeReason(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.trim().length === 0) return undefined;
+  const trimmed = value.trim();
+  const isWholeSafeIdentifier = SAFE_ASSISTANT_IDENTIFIER.test(trimmed)
+    && (trimmed.includes('_') || trimmed.includes('-') || /[a-z][A-Z]/.test(trimmed));
+  const readable = isWholeSafeIdentifier
+    ? humanizeIdentifier(trimmed) ?? trimmed
+    : trimmed;
+  return boundString(readable, CURRENT_COMPUTE_ERROR_TEXT_MAX_LENGTH).value;
 }
 
 function isExactDuplicateSourceBookkeeping(
@@ -648,7 +792,7 @@ function hasCurrentCalibrationShape(value: unknown): boolean {
       && (typeof executionPath !== 'string'
         || executionPath.length > CURRENT_COMPUTE_EXECUTION_PATH_MAX_LENGTH))
     || (hasOwn(calibration, 'status')
-      && !['success', 'failed', 'unavailable', 'excluded'].includes(status as string))
+      && !['success', 'failed', 'unavailable'].includes(status as string))
     || (hasOwn(calibration, 'failureReason')
       && (typeof failureReason !== 'string'
         || failureReason.length > CURRENT_COMPUTE_ERROR_TEXT_MAX_LENGTH))) {
@@ -666,6 +810,66 @@ function hasCurrentCalibrationShape(value: unknown): boolean {
     }
   }
   return true;
+}
+
+function hasFiniteCalibrationParam(
+  params: Record<string, unknown>,
+  names: string[],
+  valid: (value: number) => boolean = () => true,
+): boolean {
+  for (const name of names) {
+    const value = ownField(params, name);
+    if (value == null) continue;
+    return isFiniteNumber(value) && valid(value);
+  }
+  return false;
+}
+
+function hasCurrentCalibrationParameters(model: string, detail: Record<string, unknown>): boolean {
+  const params = getOwnObjectField(detail, 'params');
+  if (!params || Object.keys(params).length === 0) return false;
+  const positive = (names: string[]) => hasFiniteCalibrationParam(params, names, value => value > 0);
+  const nonnegative = (names: string[]) => hasFiniteCalibrationParam(params, names, value => value >= 0);
+  const bounded = (names: string[], min: number, max: number) => (
+    hasFiniteCalibrationParam(params, names, value => value >= min && value <= max)
+  );
+  const finite = (names: string[]) => hasFiniteCalibrationParam(params, names);
+  if (model === 'Heston') {
+    return positive(['v0']) && positive(['kappa']) && positive(['theta'])
+      && positive(['xi', 'volOfVol', 'sigmaV']) && bounded(['rho'], -1, 1);
+  }
+  if (model === 'SABR') {
+    return positive(['alpha', 'sabrAlpha']) && bounded(['beta', 'sabrBeta'], 0, 1)
+      && bounded(['rho', 'sabrRho'], -1, 1) && positive(['nu', 'sabrNu']);
+  }
+  if (model === 'VarianceGamma') {
+    return positive(['sigma']) && positive(['nu']) && finite(['theta', 'vgTheta']);
+  }
+  if (model === 'MonteCarlo-JumpDiffusion') {
+    return positive(['baseVolatility']) && nonnegative(['lambda'])
+      && finite(['muJ']) && nonnegative(['sigmaJ']);
+  }
+  if (model !== 'JumpDiffusion') return false;
+  const selected = String(ownField(params, 'selectedModel') ?? 'merton').toLowerCase();
+  if (selected === 'kou') {
+    return positive(['baseVolatility', 'sigma']) && bounded(['lambda'], 0, 10)
+      && bounded(['pUp', 'p'], 0, 1)
+      && bounded(['etaUp', 'eta1'], KOU_MIN_ETA_UP, 500)
+      && bounded(['etaDown', 'eta2'], KOU_MIN_ETA_DOWN, 500);
+  }
+  if (selected === 'bates') {
+    return positive(['baseVolatility', 'sigma']) && nonnegative(['lambda'])
+      && finite(['muJ']) && nonnegative(['sigmaJ']) && positive(['v0'])
+      && positive(['kappa']) && positive(['theta'])
+      && positive(['sigmaV', 'xi']) && bounded(['rho'], -1, 1);
+  }
+  if (selected === 'vg' || selected === 'variancegamma') {
+    return positive(['baseVolatility', 'sigma']) && positive(['nu'])
+      && finite(['theta', 'vgTheta']);
+  }
+  if (selected !== 'merton') return false;
+  return positive(['baseVolatility', 'sigma']) && nonnegative(['lambda'])
+    && finite(['muJ']) && nonnegative(['sigmaJ']);
 }
 
 function hasCurrentConfidenceSemantics(
@@ -820,6 +1024,176 @@ function currentComputeAllowedModels(scope: unknown): Set<string> | null {
   return null;
 }
 
+function calibrationOutcomeModelsForScope(scope: unknown): readonly string[] | null {
+  if (scope === 'core') return CORE_CALIBRATION_OUTCOME_MODELS;
+  if (scope === 'full') return FULL_CALIBRATION_OUTCOME_MODELS;
+  return null;
+}
+
+function hasCompleteCalibrationOutcomeFamilies(
+  outcomes: readonly unknown[],
+  scope: unknown,
+  requiredUnderlyings: readonly unknown[],
+): boolean {
+  const expectedModels = calibrationOutcomeModelsForScope(scope);
+  if (expectedModels == null || outcomes.length === 0) return false;
+  const expectedSet = new Set<string>(expectedModels);
+  const modelsByGroup = new Map<string, Set<string>>();
+  const observedUnderlyings = new Set<string>();
+  for (const outcomeValue of outcomes) {
+    const outcome = getObject(outcomeValue);
+    const model = ownField(outcome, 'model');
+    const underlying = ownField(outcome, 'underlying');
+    const expiration = ownField(outcome, 'expiration');
+    if (!outcome
+      || typeof model !== 'string'
+      || typeof underlying !== 'string'
+      || typeof expiration !== 'string'
+      || !expectedSet.has(model)) return false;
+    const key = JSON.stringify([underlying, expiration]);
+    const models = modelsByGroup.get(key) ?? new Set<string>();
+    if (models.has(model)) return false;
+    models.add(model);
+    modelsByGroup.set(key, models);
+    observedUnderlyings.add(underlying);
+  }
+  if ([...modelsByGroup.values()].some(models => (
+    models.size !== expectedModels.length
+      || expectedModels.some(model => !models.has(model))
+  ))) return false;
+  const required = new Set(requiredUnderlyings.filter(
+    (underlying): underlying is string => typeof underlying === 'string',
+  ));
+  return required.size === requiredUnderlyings.length
+    && required.size === observedUnderlyings.size
+    && [...required].every(underlying => observedUnderlyings.has(underlying));
+}
+
+function hasExactCalibrationOutcomeGroupsForPositions(
+  outcomes: readonly unknown[],
+  scope: unknown,
+  positions: readonly unknown[],
+): boolean {
+  const expectedModels = calibrationOutcomeModelsForScope(scope);
+  if (expectedModels == null) return false;
+  const expected = new Set<string>();
+  for (const positionValue of positions) {
+    const position = getObject(positionValue);
+    const underlying = ownField(position, 'underlying');
+    const expiration = ownField(position, 'expiration');
+    if (!position || typeof underlying !== 'string' || typeof expiration !== 'string') return false;
+    for (const model of expectedModels) {
+      expected.add(JSON.stringify([model, underlying, expiration]));
+    }
+  }
+  const observed = new Set(outcomes.map(outcomeValue => {
+    const outcome = getObject(outcomeValue);
+    if (!outcome) return '';
+    return JSON.stringify([
+      ownField(outcome, 'model'),
+      ownField(outcome, 'underlying'),
+      ownField(outcome, 'expiration'),
+    ]);
+  }));
+  return !observed.has('')
+    && expected.size === observed.size
+    && [...expected].every(key => observed.has(key));
+}
+
+function hasCalibrationOutcomeGroupsWithinPositions(
+  outcomes: readonly unknown[],
+  positions: readonly unknown[],
+): boolean {
+  const positionGroups = new Set<string>();
+  for (const positionValue of positions) {
+    const position = getObject(positionValue);
+    const underlying = ownField(position, 'underlying');
+    const expiration = ownField(position, 'expiration');
+    if (!position || typeof underlying !== 'string' || typeof expiration !== 'string') return false;
+    positionGroups.add(JSON.stringify([underlying, expiration]));
+  }
+  return outcomes.every(outcomeValue => {
+    const outcome = getObject(outcomeValue);
+    return outcome != null && positionGroups.has(JSON.stringify([
+      ownField(outcome, 'underlying'),
+      ownField(outcome, 'expiration'),
+    ]));
+  });
+}
+
+function calibrationOutcomeGroupCountForPositions(
+  positions: readonly unknown[],
+): number | null {
+  const groups = new Set<string>();
+  for (const positionValue of positions) {
+    const position = getObject(positionValue);
+    const underlying = ownField(position, 'underlying');
+    const expiration = ownField(position, 'expiration');
+    if (!position || typeof underlying !== 'string' || typeof expiration !== 'string') return null;
+    groups.add(JSON.stringify([underlying, expiration]));
+  }
+  return groups.size;
+}
+
+function calibrationEvidenceGroupCount(
+  positions: readonly unknown[],
+  outcomes: readonly unknown[],
+): number | null {
+  const groups = new Set<string>();
+  for (const positionValue of positions) {
+    const position = getObject(positionValue);
+    const underlying = ownField(position, 'underlying');
+    const expiration = ownField(position, 'expiration');
+    if (!position || typeof underlying !== 'string' || typeof expiration !== 'string') return null;
+    groups.add(JSON.stringify([underlying, expiration]));
+  }
+  for (const outcomeValue of outcomes) {
+    const outcome = getObject(outcomeValue);
+    const underlying = ownField(outcome, 'underlying');
+    const expiration = ownField(outcome, 'expiration');
+    if (!outcome || typeof underlying !== 'string' || typeof expiration !== 'string') return null;
+    groups.add(JSON.stringify([underlying, expiration]));
+  }
+  return groups.size;
+}
+
+function hasExactUnderlyingUniverseForPositions(
+  underlyings: readonly unknown[],
+  positions: readonly unknown[],
+): boolean {
+  const observed = new Set<string>();
+  for (const positionValue of positions) {
+    const position = getObject(positionValue);
+    const underlying = ownField(position, 'underlying');
+    if (!position || typeof underlying !== 'string') return false;
+    observed.add(underlying);
+  }
+  return observed.size === underlyings.length
+    && underlyings.every(underlying => typeof underlying === 'string' && observed.has(underlying));
+}
+
+function hasPositionGroupsWithinCalibrationOutcomes(
+  positions: readonly unknown[],
+  outcomes: readonly unknown[],
+): boolean {
+  const outcomeGroups = new Set(outcomes.flatMap(outcomeValue => {
+    const outcome = getObject(outcomeValue);
+    return outcome
+      ? [JSON.stringify([
+          ownField(outcome, 'underlying'),
+          ownField(outcome, 'expiration'),
+        ])]
+      : [];
+  }));
+  return positions.every(positionValue => {
+    const position = getObject(positionValue);
+    return position != null && outcomeGroups.has(JSON.stringify([
+      ownField(position, 'underlying'),
+      ownField(position, 'expiration'),
+    ]));
+  });
+}
+
 function hasCurrentModelsShape(value: unknown, scope: unknown): boolean {
   const models = getObject(value);
   const allowedModels = currentComputeAllowedModels(scope);
@@ -949,6 +1323,97 @@ function hasCurrentErrorShape(value: unknown, authoritativeUnderlyings: Set<stri
     && (!hasOwn(error, 'underlying')
       || (hasCanonicalUnderlying(ownField(error, 'underlying'))
         && authoritativeUnderlyings.has(ownField(error, 'underlying') as string)));
+}
+
+function hasCurrentNoticeShape(value: unknown, authoritativeUnderlyings: Set<string>): boolean {
+  const notice = getObject(value);
+  const code = ownField(notice, 'code');
+  const level = ownField(notice, 'level');
+  const message = ownField(notice, 'message');
+  const positionId = ownField(notice, 'positionId');
+  const underlying = ownField(notice, 'underlying');
+  const expiration = ownField(notice, 'expiration');
+  const provenance = ownField(notice, 'provenance');
+  if (!notice
+    || !hasNonEmptyText(code)
+    || code.length > CURRENT_COMPUTE_NOTICE_IDENTIFIER_MAX_LENGTH
+    || !['info', 'warning', 'error'].includes(level as string)
+    || !hasNonEmptyText(message)
+    || message.length > CURRENT_COMPUTE_ERROR_TEXT_MAX_LENGTH
+    || (hasOwn(notice, 'positionId')
+      && (!hasNonEmptyText(positionId)
+        || positionId.length > CURRENT_COMPUTE_NOTICE_IDENTIFIER_MAX_LENGTH))
+    || (hasOwn(notice, 'underlying')
+      && (!hasCanonicalUnderlying(underlying)
+        || !authoritativeUnderlyings.has(underlying)))
+    || (hasOwn(notice, 'expiration')
+      && (!hasNonEmptyText(expiration)
+        || expiration.length > CURRENT_COMPUTE_EXPIRATION_MAX_LENGTH))
+    || (hasOwn(notice, 'provenance')
+      && (provenance === null || !hasCurrentProvenanceShape(provenance)))) {
+    return false;
+  }
+
+  if (!hasOwn(notice, 'provenance')) return true;
+  const provenanceObject = getObject(provenance)!;
+  const source = ownField(provenanceObject, 'source');
+  const family = ownField(provenanceObject, 'family');
+  const provider = ownField(provenanceObject, 'provider');
+  const observedAt = ownField(provenanceObject, 'observedAt');
+  return (source as string).length <= CURRENT_COMPUTE_NOTICE_IDENTIFIER_MAX_LENGTH
+    && (!hasOwn(provenanceObject, 'family')
+      || (family as string).length <= CURRENT_COMPUTE_NOTICE_IDENTIFIER_MAX_LENGTH)
+    && (!hasOwn(provenanceObject, 'provider')
+      || provider === null
+      || (provider as string).length <= CURRENT_COMPUTE_NOTICE_IDENTIFIER_MAX_LENGTH)
+    && (!hasOwn(provenanceObject, 'observedAt')
+      || observedAt === null
+      || typeof observedAt === 'number'
+      || (observedAt as string).length <= CURRENT_COMPUTE_NOTICE_IDENTIFIER_MAX_LENGTH)
+    && !hasOwn(provenanceObject, 'details');
+}
+
+function hasCurrentCalibrationOutcomeShape(
+  value: unknown,
+  allowedModels: Set<string>,
+  authoritativeUnderlyings: Set<string>,
+): boolean {
+  const outcome = getObject(value);
+  const model = ownField(outcome, 'model');
+  const underlying = ownField(outcome, 'underlying');
+  const expiration = ownField(outcome, 'expiration');
+  const status = ownField(outcome, 'status');
+  const reason = ownField(outcome, 'reason');
+  const detail = ownField(outcome, 'detail');
+  if (!outcome
+    || typeof model !== 'string'
+    || !allowedModels.has(model)
+    || !CALIBRATION_OUTCOME_MODEL_IDS.has(model as string)
+    || !hasCanonicalUnderlying(underlying)
+    || !authoritativeUnderlyings.has(underlying as string)
+    || !hasNonEmptyText(expiration)
+    || (expiration as string).length > CURRENT_COMPUTE_EXPIRATION_MAX_LENGTH
+    || !['success', 'failed', 'unavailable'].includes(status as string)
+    || (hasOwn(outcome, 'reason')
+      && (typeof reason !== 'string'
+        || reason.trim().length === 0
+        || reason.length > CURRENT_COMPUTE_ERROR_TEXT_MAX_LENGTH))) return false;
+  const hasReason = hasOwn(outcome, 'reason');
+  const hasDetail = hasOwn(outcome, 'detail');
+  if (status === 'unavailable') return hasReason && !hasDetail;
+  if (status === 'failed' && !hasReason) return false;
+  if (status === 'success' && (hasReason || !hasDetail)) return false;
+  if (!hasDetail) return status === 'failed';
+  const calibration = getObject(detail);
+  if (!calibration
+    || !hasCurrentCalibrationShape(calibration)
+    || ownField(calibration, 'expirationDate') !== expiration
+    || ownField(calibration, 'status') !== status
+    || !hasCurrentConfidenceSemantics(model, calibration)) return false;
+  if (status === 'failed') return ownField(calibration, 'failureReason') === reason;
+  return ownField(calibration, 'isFallback') === false
+    && !hasOwn(calibration, 'failureReason')
+    && hasCurrentCalibrationParameters(model, calibration);
 }
 
 function hasCurrentExecutionConfigShape(value: unknown): boolean {
@@ -1169,6 +1634,8 @@ function hasCurrentTerminalRunSemantics(
     .some(exclusion => ownField(exclusion, 'reason') !== 'duplicate_source');
   const hasEvidence = (errorCount as number) > 0
     || (ownField(summary, 'modelExclusionCount') as number) > 0
+    || (ownField(summary, 'totalCalibrations') as number)
+      < (ownField(summary, 'calibrationOutcomeCount') as number)
     || aggregateEvidence;
   return completionState === 'partial' ? hasEvidence : !hasEvidence;
 }
@@ -1231,6 +1698,14 @@ function hasCurrentProjectionShape(value: unknown, positions: unknown[]): boolea
     'portfolioAggregatesTruncated',
   ].every(key => typeof projection[key] === 'boolean');
   return hasBooleanFlags
+    && (!CALIBRATION_DETAIL_PRESERVING_COMPACTION_LEVELS.has(
+      ownField(projection, 'compactionLevel') as string,
+    ) || ownField(projection, 'calibrationTruncated') === false)
+    && (ownField(projection, 'compactionLevel') !== 'summary-only' || positionCount === 0)
+    && (ownField(projection, 'positionsTruncated') !== true
+      || ownField(projection, 'variantsTruncated') === true)
+    && (ownField(projection, 'compactionLevel') !== 'summary-only'
+      || ownField(projection, 'portfolioAggregatesTruncated') === true)
     && (!hasRetainedVariantTruncation(positions)
       || ownField(projection, 'variantsTruncated') === true);
 }
@@ -1243,7 +1718,9 @@ export function isCurrentComputeRunRecord(value: unknown): value is RawComputeRu
   const positions = ownField(record, 'positions');
   const underlyings = ownField(data, 'underlyings');
   const errors = ownField(data, 'errors');
+  const notices = ownField(data, 'notices');
   const modelExclusions = ownField(data, 'modelExclusions');
+  const calibrationOutcomes = ownField(data, 'calibrationOutcomes');
   const projection = ownField(data, 'projection');
   const portfolioAggregates = ownField(data, 'portfolioAggregates');
   const exposureSweep = ownField(data, 'exposureSweep');
@@ -1254,6 +1731,30 @@ export function isCurrentComputeRunRecord(value: unknown): value is RawComputeRu
     : null;
   const allowedModels = currentComputeAllowedModels(scope);
   const projectionObject = getObject(projection);
+  const calibrationOutcomeKeys = isDenseArray(calibrationOutcomes)
+    ? calibrationOutcomes.map(outcomeValue => {
+        const outcome = getObject(outcomeValue);
+        return outcome
+          ? JSON.stringify([
+              ownField(outcome, 'model'),
+              ownField(outcome, 'underlying'),
+              ownField(outcome, 'expiration'),
+            ])
+          : '';
+      })
+    : [];
+  const includedSuccessfulCalibrationCount = isDenseArray(calibrationOutcomes)
+    ? calibrationOutcomes.filter(outcomeValue => (
+        ownField(getObject(outcomeValue), 'status') === 'success'
+      )).length
+    : 0;
+  const requiredCalibrationModels = calibrationOutcomeModelsForScope(scope);
+  const includedPositionGroupCount = isDenseArray(positions)
+    ? calibrationOutcomeGroupCountForPositions(positions)
+    : null;
+  const evidencedCalibrationGroupCount = isDenseArray(positions) && isDenseArray(calibrationOutcomes)
+    ? calibrationEvidenceGroupCount(positions, calibrationOutcomes)
+    : null;
   if (!record
     || !data
     || !summary
@@ -1286,6 +1787,9 @@ export function isCurrentComputeRunRecord(value: unknown): value is RawComputeRu
     || !isNonNegativeSafeInteger(ownField(summary, 'errorCount'))
     || !isNonNegativeSafeInteger(ownField(summary, 'includedErrorCount'))
     || typeof ownField(summary, 'errorsTruncated') !== 'boolean'
+    || !isNonNegativeSafeInteger(ownField(summary, 'noticeCount'))
+    || !isNonNegativeSafeInteger(ownField(summary, 'includedNoticeCount'))
+    || typeof ownField(summary, 'noticesTruncated') !== 'boolean'
     || !isDenseArray(positions)
     || !positions.every(position => hasCurrentPositionShape(position, scope))
     || !isDenseArray(underlyings)
@@ -1299,6 +1803,12 @@ export function isCurrentComputeRunRecord(value: unknown): value is RawComputeRu
       const underlying = ownField(position, 'underlying');
       return typeof underlying !== 'string' || !authoritativeUnderlyings.has(underlying);
     })
+    || new Set(positions.map(positionValue => (
+      ownField(getObject(positionValue), 'positionId')
+    ))).size !== positions.length
+    || positions.some(positionValue => (
+      ownField(getObject(positionValue), 'valuationTime') !== ownField(summary, 'valuationTime')
+    ))
     || !isDenseArray(errors)
     || errors.length > COMPUTE_SYNC_ERROR_LIMIT
     || !errors.every(error => hasCurrentErrorShape(error, authoritativeUnderlyings))
@@ -1307,12 +1817,91 @@ export function isCurrentComputeRunRecord(value: unknown): value is RawComputeRu
     || ((ownField(summary, 'errorCount') as number) > 0 && errors.length === 0)
     || ownField(summary, 'errorsTruncated')
       !== ((ownField(summary, 'errorCount') as number) > errors.length)
+    || !isDenseArray(notices)
+    || notices.length > COMPUTE_SYNC_NOTICE_LIMIT
+    || !notices.every(notice => hasCurrentNoticeShape(notice, authoritativeUnderlyings))
+    || ownField(summary, 'includedNoticeCount') !== notices.length
+    || (ownField(summary, 'noticeCount') as number) < notices.length
+    || ((ownField(summary, 'noticeCount') as number) > 0 && notices.length === 0)
+    || ownField(summary, 'noticesTruncated')
+      !== ((ownField(summary, 'noticeCount') as number) > notices.length)
     || !isDenseArray(modelExclusions)
     || modelExclusions.length > 100
     || !modelExclusions.every(exclusion => (
       hasCurrentModelExclusionShape(exclusion, allowedModels, authoritativeUnderlyings)
     ))
     || getValidOriginalModelExclusionCount(data, modelExclusions.length) === undefined
+    || !isDenseArray(calibrationOutcomes)
+    || !calibrationOutcomes.every(outcome => (
+      hasCurrentCalibrationOutcomeShape(outcome, allowedModels, authoritativeUnderlyings)
+    ))
+    || new Set(calibrationOutcomeKeys).size !== calibrationOutcomeKeys.length
+    || !isNonNegativeSafeInteger(ownField(summary, 'calibrationOutcomeCount'))
+    || !isNonNegativeSafeInteger(ownField(summary, 'includedCalibrationOutcomeCount'))
+    || !isNonNegativeSafeInteger(ownField(summary, 'includedSuccessfulCalibrationCount'))
+    || ownField(summary, 'includedCalibrationOutcomeCount') !== calibrationOutcomes.length
+    || ownField(summary, 'includedSuccessfulCalibrationCount') !== includedSuccessfulCalibrationCount
+    || (ownField(summary, 'calibrationOutcomeCount') as number) < calibrationOutcomes.length
+    || ((ownField(summary, 'calibrationOutcomeCount') as number) > 0
+      && calibrationOutcomes.length === 0)
+    || (ownField(summary, 'totalCalibrations') as number) < includedSuccessfulCalibrationCount
+    || (ownField(summary, 'totalCalibrations') as number)
+      > (ownField(summary, 'calibrationOutcomeCount') as number)
+    || (ownField(summary, 'totalCalibrations') as number)
+      > includedSuccessfulCalibrationCount
+        + ((ownField(summary, 'calibrationOutcomeCount') as number)
+          - (ownField(summary, 'includedCalibrationOutcomeCount') as number))
+    || typeof ownField(summary, 'calibrationOutcomesTruncated') !== 'boolean'
+    || ownField(summary, 'calibrationOutcomesTruncated')
+      !== ((ownField(summary, 'calibrationOutcomeCount') as number) > calibrationOutcomes.length)
+    || (ownField(summary, 'calibrationOutcomesTruncated') === false
+      && ownField(summary, 'totalCalibrations') !== includedSuccessfulCalibrationCount)
+    || (ownField(summary, 'calibrationOutcomeCount') === 0
+      && ownField(summary, 'totalCalibrations') !== 0)
+    || (status === 'completed'
+      && (requiredCalibrationModels == null
+        || includedPositionGroupCount == null
+        || evidencedCalibrationGroupCount == null
+        || ownField(summary, 'calibrationOutcomeCount') === 0
+        || (ownField(summary, 'calibrationOutcomeCount') as number)
+          % requiredCalibrationModels.length !== 0
+        || (ownField(summary, 'calibrationOutcomeCount') as number)
+          < underlyings.length * requiredCalibrationModels.length
+        || (ownField(summary, 'calibrationOutcomeCount') as number)
+          < evidencedCalibrationGroupCount * requiredCalibrationModels.length
+        || (ownField(summary, 'calibrationOutcomeCount') as number)
+          > (ownField(summary, 'totalPositions') as number) * requiredCalibrationModels.length
+        || (ownField(projectionObject, 'positionsTruncated') === false
+          && !hasExactUnderlyingUniverseForPositions(underlyings, positions))
+        || (ownField(projectionObject, 'positionsTruncated') === false
+          && (ownField(summary, 'calibrationOutcomeCount') as number)
+            !== includedPositionGroupCount * requiredCalibrationModels.length)
+        || (ownField(projectionObject, 'positionsTruncated') === false
+          && !hasCalibrationOutcomeGroupsWithinPositions(calibrationOutcomes, positions))
+        || (ownField(summary, 'calibrationOutcomesTruncated') === false
+          && (!hasCompleteCalibrationOutcomeFamilies(
+              calibrationOutcomes,
+              scope,
+              underlyings,
+            )
+            || !hasPositionGroupsWithinCalibrationOutcomes(
+              positions,
+              calibrationOutcomes,
+            )
+            || (ownField(projectionObject, 'positionsTruncated') === false
+              && !hasExactCalibrationOutcomeGroupsForPositions(
+                calibrationOutcomes,
+                scope,
+                positions,
+              ))))))
+    || !hasConsistentCalibrationBindings(
+      positions,
+      calibrationOutcomes,
+      ownField(summary, 'calibrationOutcomesTruncated') as boolean,
+      ownField(projectionObject, 'calibrationTruncated') as boolean,
+    )
+    || (ownField(projectionObject, 'compactionLevel') !== 'summary-only'
+      && ownField(summary, 'calibrationOutcomesTruncated') !== false)
     || !hasCurrentPortfolioAggregateShape(
       portfolioAggregates,
       scope,
@@ -1324,6 +1913,11 @@ export function isCurrentComputeRunRecord(value: unknown): value is RawComputeRu
       ? hasOwn(data, 'exposureSweep')
       : (!hasOwn(data, 'exposureSweep')
         || !hasCurrentExposureSweepShape(exposureSweep, underlyings)))
+    || (ownField(projectionObject, 'exposureTruncated') === false
+      && isDenseArray(exposureSweep)
+      && exposureSweep.some(entryValue => (
+        ownField(getObject(entryValue), 'aggregateByStrikeTruncated') === true
+      )))
     || ownField(summary, 'totalPositions') !== ownField(projectionObject, 'originalPositionCount')
     || !hasCurrentTerminalRunSemantics(status, scope, data, summary)) {
     return false;
@@ -1879,7 +2473,8 @@ function strictConfidenceDecision(
   const requiresExactPair = exactConfidenceRequired(protectedModelId, context.strictness);
   if (!independentMerton && !requiresExactPair) return { kind: 'skip' };
 
-  const allowDisplayId = binding.kind === 'model-map' && context.allowSanitizedDisplayIds;
+  const allowDisplayId = (binding.kind === 'model-map' || binding.kind === 'outcome-detail')
+    && context.allowSanitizedDisplayIds;
   const canonicalModelId = protectedModelId != null && (
     modelName === protectedModelId
     || (allowDisplayId && modelName === modelDisplayName(protectedModelId))
@@ -1944,13 +2539,17 @@ function shapeCalibrationSummary(
   value: unknown,
   modelName: string,
   strictness: ConfidenceStrictness,
+  trustUpstreamWarningOmissions = false,
 ): Record<string, unknown> | undefined {
   const calibration = getObject(value);
   if (!calibration) return undefined;
 
   // The current producer emits only `failureReason`; obsolete aliases are denylisted below and must
   // never be interpreted into assistant-facing semantics.
-  const statusReason = humanizeIdentifier(calibration.failureReason);
+  const isFallback = calibration.isFallback === true || calibration.status === FALLBACK_STATUS;
+  const statusReason = humanizeIdentifier(
+    calibration.failureReason ?? (isFallback ? calibration.statusReason : undefined),
+  );
   const confidenceSemantics = shapeCalibrationConfidenceSemantics(
     calibration.confidenceSemantics,
     calibration.confidence,
@@ -1964,15 +2563,117 @@ function shapeCalibrationSummary(
     || (exactConfidenceRequired(protectedModelId, strictness) && !confidenceSemantics)
     ? undefined
     : round(calibration.confidence, 4);
+  let producerWarningsNotShown = trustUpstreamWarningOmissions
+    && typeof calibration.warningsNotShown === 'number'
+    && Number.isSafeInteger(calibration.warningsNotShown)
+    && calibration.warningsNotShown > 0
+    ? calibration.warningsNotShown
+    : 0;
+  const sourceWarnings: string[] = [];
+  for (const warning of getArray<unknown>(calibration.warnings)) {
+    if (typeof warning !== 'string') continue;
+    const omission = ENGINE_CALIBRATION_WARNING_OMISSION_PATTERN.exec(warning);
+    if (omission) {
+      const count = Number(omission[1]);
+      if (Number.isSafeInteger(count) && count > 0) {
+        producerWarningsNotShown = Math.min(
+          Number.MAX_SAFE_INTEGER,
+          producerWarningsNotShown + count,
+        );
+        continue;
+      }
+    }
+    sourceWarnings.push(warning);
+  }
+  const warnings = sourceWarnings.slice(0, 5);
+  const warningsNotShown = Math.min(
+    Number.MAX_SAFE_INTEGER,
+    producerWarningsNotShown + sourceWarnings.length - warnings.length,
+  );
   return {
     rmse: round(calibration.rmse, 6),
     confidence,
     ...(!isIndependentMerton && confidenceSemantics ? { confidenceSemantics } : {}),
-    ...(calibration.isFallback === true ? { status: FALLBACK_STATUS } : {}),
-    ...(calibration.isFallback === true && statusReason ? { statusReason } : {}),
+    ...(isFallback ? { status: FALLBACK_STATUS } : {}),
+    ...(isFallback && statusReason ? { statusReason } : {}),
     expirationDate: typeof calibration.expirationDate === 'string' ? calibration.expirationDate : undefined,
     params: compactCalibrationParams(calibration.params),
-    warnings: getArray<string>(calibration.warnings).filter((warning) => typeof warning === 'string').slice(0, 5),
+    warnings,
+    ...(warningsNotShown > 0
+      ? { warningsNotShown }
+      : {}),
+  };
+}
+
+function shapeCalibrationOutcomeFields(
+  value: unknown,
+  strictness: ConfidenceStrictness,
+  maxOutcomes = MAX_DEFAULT_CALIBRATION_OUTCOMES,
+  compactForBudget = false,
+  upstreamNotShown = 0,
+  trustUpstreamWarningOmissions = false,
+): Record<string, unknown> {
+  const candidates = getArray<unknown>(value)
+    .map((candidate, index) => ({ candidate: getObject(candidate), index }))
+    .filter((entry): entry is { candidate: Record<string, unknown>; index: number } => entry.candidate != null);
+  const ordered = candidates.sort((left, right) => {
+    const importance = (entry: { candidate: Record<string, unknown> }) => {
+      const detail = getObject(entry.candidate.detail);
+      const hasWarning = getArray(detail?.warnings).some(warning => typeof warning === 'string' && warning.length > 0);
+      if (entry.candidate.status === 'failed') return 3;
+      if (hasWarning) return 2;
+      if (entry.candidate.status !== 'success') return 1;
+      return 0;
+    };
+    return importance(right) - importance(left) || left.index - right.index;
+  });
+  const shown = ordered.slice(0, maxOutcomes).map(({ candidate }) => {
+    const model = typeof candidate.model === 'string' ? candidate.model : '';
+    const shapedDetail = shapeCalibrationSummary(
+      candidate.detail,
+      model,
+      strictness,
+      trustUpstreamWarningOmissions,
+    );
+    const shapedWarnings = getArray<unknown>(shapedDetail?.warnings)
+      .filter((warning): warning is string => typeof warning === 'string');
+    const compactWarnings = shapedWarnings
+      .slice(0, 3)
+      .map(warning => boundString(warning, CURRENT_COMPUTE_CALIBRATION_WARNING_MAX_LENGTH).value);
+    const upstreamWarningsNotShown = typeof shapedDetail?.warningsNotShown === 'number'
+      && Number.isSafeInteger(shapedDetail.warningsNotShown)
+      && shapedDetail.warningsNotShown > 0
+      ? shapedDetail.warningsNotShown
+      : 0;
+    const compactWarningsNotShown = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      upstreamWarningsNotShown + shapedWarnings.length - compactWarnings.length,
+    );
+    const detail = !shapedDetail || !compactForBudget
+      ? shapedDetail
+      : Object.fromEntries(Object.entries({
+          rmse: shapedDetail.rmse,
+          confidence: shapedDetail.confidence,
+          confidenceSemantics: shapedDetail.confidenceSemantics,
+          status: shapedDetail.status,
+          statusReason: shapedDetail.statusReason,
+          expirationDate: shapedDetail.expirationDate,
+          warnings: compactWarnings,
+          ...(compactWarningsNotShown > 0 ? { warningsNotShown: compactWarningsNotShown } : {}),
+        }).filter(([, fieldValue]) => fieldValue !== undefined));
+    return Object.fromEntries(Object.entries({
+      model: model ? modelDisplayName(model) : undefined,
+      underlying: typeof candidate.underlying === 'string' ? candidate.underlying : undefined,
+      expiration: typeof candidate.expiration === 'string' ? candidate.expiration : undefined,
+      status: typeof candidate.status === 'string' ? humanizeIdentifier(candidate.status) : undefined,
+      reason: humanizeCalibrationOutcomeReason(candidate.reason),
+      detail,
+    }).filter(([, fieldValue]) => fieldValue !== undefined));
+  });
+  const notShown = Math.max(0, candidates.length - shown.length) + Math.max(0, upstreamNotShown);
+  return {
+    calibrationOutcomes: shown,
+    ...(notShown > 0 ? { calibrationOutcomesNotShown: notShown } : {}),
   };
 }
 
@@ -2009,12 +2710,27 @@ function sanitizeComputeRunsWireObject(
   // separate dispersion diagnostic and never feeds aggregateExclusions.
   liftAssistantExclusionFields(obj, trustedFieldsByRecord);
 
+  delete obj.noticesNotShown;
+  delete obj.noticesMeta;
+
   if (Array.isArray(obj.errors)) {
     const shapedErrors = shapeRunErrors(obj.errors);
     if (shapedErrors.errors) obj.errors = shapedErrors.errors;
     else delete obj.errors;
     if (shapedErrors.errorsNotShown !== undefined) obj.errorsNotShown = shapedErrors.errorsNotShown;
     if (shapedErrors.errorsMeta !== undefined) obj.errorsMeta = shapedErrors.errorsMeta;
+  }
+  if (Array.isArray(obj.notices)) {
+    const summary = getOwnObjectField(obj, 'summary');
+    const shapedNotices = shapeRunNotices(obj.notices, ownField(summary, 'noticeCount'));
+    obj.notices = shapedNotices.notices;
+    if (shapedNotices.noticesNotShown !== undefined) {
+      obj.noticesNotShown = shapedNotices.noticesNotShown;
+    } else {
+      delete obj.noticesNotShown;
+    }
+    if (shapedNotices.noticesMeta !== undefined) obj.noticesMeta = shapedNotices.noticesMeta;
+    else delete obj.noticesMeta;
   }
   const DROP_KEYS = new Set([
     'portfolioAggregates',
@@ -2029,6 +2745,8 @@ function sanitizeComputeRunsWireObject(
     'key',
     'representative',
     'alternates',
+    'calibrationOutcomesNotShown',
+    'warningsNotShown',
   ]);
 
   delete obj.run_key;
@@ -2065,6 +2783,16 @@ function sanitizeComputeRunsWireObject(
       }
       const shaped = displayNameModelMap(obj.models);
       if (shaped) obj.models = shaped;
+    }
+  }
+  if (Array.isArray(obj.calibrationOutcomes)) {
+    for (const value of obj.calibrationOutcomes) {
+      const outcome = getObject(value);
+      if (!outcome) continue;
+      if (typeof outcome.model === 'string') outcome.model = modelDisplayName(outcome.model);
+      const reason = humanizeCalibrationOutcomeReason(outcome.reason);
+      if (reason) outcome.reason = reason;
+      else delete outcome.reason;
     }
   }
   // Idempotent: also recognize the already-sanitized FALLBACK_STATUS so a
@@ -2524,6 +3252,114 @@ function shapeRunErrors(value: unknown): {
   };
 }
 
+function noticeEvidencePriority(notice: Record<string, unknown>): number {
+  if (notice.level === 'error') return 0;
+  if (notice.code === 'EXPOSURE_SWEEP_FAILED') return 1;
+  if (notice.level === 'warning') return 2;
+  return 3;
+}
+
+function selectNoticeEvidence(
+  notices: Array<Record<string, unknown>>,
+  limit: number,
+): Array<Record<string, unknown>> {
+  if (notices.length <= limit) return notices;
+  const prioritized = notices.map((notice, index) => ({ notice, index }))
+    .sort((left, right) => noticeEvidencePriority(left.notice) - noticeEvidencePriority(right.notice)
+      || left.index - right.index);
+  const selectedIndexes = new Set<number>();
+  const selectedCodes = new Set<string>();
+  for (const { notice, index } of prioritized) {
+    if (selectedIndexes.size >= limit) break;
+    const code = notice.code as string;
+    if (selectedCodes.has(code)) continue;
+    selectedCodes.add(code);
+    selectedIndexes.add(index);
+  }
+  for (const { index } of prioritized) {
+    if (selectedIndexes.size >= limit) break;
+    selectedIndexes.add(index);
+  }
+  return notices.filter((_, index) => selectedIndexes.has(index));
+}
+
+function shapeRunNotices(value: unknown, originalCountValue?: unknown): {
+  notices: Array<Record<string, unknown>>;
+  noticesNotShown?: number;
+  noticesMeta?: Record<string, number>;
+} {
+  const allNotices = getArray(value)
+    .map((item): Record<string, unknown> | undefined => {
+      const notice = getObject(item);
+      if (!notice) return undefined;
+      const trustedExistingFields = TRUSTED_SHAPED_NOTICE_ENTRIES.has(notice)
+        && Array.isArray(notice.truncatedFields)
+        ? notice.truncatedFields.filter((field): field is string => (
+            typeof field === 'string'
+            && ['code', 'message', 'positionId', 'underlying', 'expiration'].includes(field)
+          ))
+        : [];
+      const code = boundString(notice.code, MAX_ERROR_CODE_CHARS);
+      const message = boundString(notice.message, MAX_ERROR_MESSAGE_CHARS);
+      const positionId = boundString(notice.positionId, MAX_ERROR_MODEL_CHARS);
+      const underlying = boundString(
+        normalizeUnderlying(notice.underlying),
+        MAX_ERROR_UNDERLYING_CHARS,
+      );
+      const expiration = boundString(notice.expiration, MAX_ERROR_EXPIRATION_CHARS);
+      if (!code.value
+        || !message.value
+        || !['info', 'warning', 'error'].includes(notice.level as string)) return undefined;
+      const newlyTruncatedFields = [
+        ['code', code.truncated],
+        ['message', message.truncated],
+        ['positionId', positionId.truncated],
+        ['underlying', underlying.truncated],
+        ['expiration', expiration.truncated],
+      ].filter((entry): entry is [string, boolean] => Array.isArray(entry) && entry[1] === true)
+        .map((entry) => entry[0]);
+      const truncatedFields = Array.from(new Set([
+        ...trustedExistingFields,
+        ...newlyTruncatedFields,
+      ]));
+      const shaped = Object.fromEntries(Object.entries({
+        code: code.value,
+        level: notice.level,
+        message: message.value,
+        positionId: positionId.value,
+        underlying: underlying.value,
+        expiration: expiration.value,
+        truncatedFields: truncatedFields.length > 0 ? truncatedFields : undefined,
+      }).filter(([, fieldValue]) => fieldValue !== undefined));
+      TRUSTED_SHAPED_NOTICE_ENTRIES.add(shaped);
+      return shaped;
+    })
+    .filter((notice): notice is Record<string, unknown> => notice !== undefined);
+
+  const notices = selectNoticeEvidence(allNotices, MAX_DEFAULT_NOTICES);
+  const originalCount = typeof originalCountValue === 'number'
+    && Number.isSafeInteger(originalCountValue)
+    && originalCountValue >= allNotices.length
+    ? originalCountValue
+    : allNotices.length;
+  const omitted = originalCount - notices.length;
+  const entriesWithTruncatedFields = notices.filter(notice => (
+    Array.isArray(notice.truncatedFields)
+  )).length;
+  return {
+    notices,
+    ...(omitted > 0 ? { noticesNotShown: omitted } : {}),
+    ...(omitted > 0 || entriesWithTruncatedFields > 0 ? {
+      noticesMeta: {
+        total: originalCount,
+        returned: notices.length,
+        omitted,
+        entriesWithTruncatedFields,
+      },
+    } : {}),
+  };
+}
+
 function shapeProjection(value: unknown): Record<string, unknown> | undefined {
   const projection = getObject(value);
   if (!projection) return undefined;
@@ -2694,6 +3530,9 @@ function compactSingleRunForBudget(value: unknown): Record<string, unknown> {
       'errorCount',
       'includedErrorCount',
       'errorsTruncated',
+      'noticeCount',
+      'includedNoticeCount',
+      'noticesTruncated',
     ]
       .map((key) => [key, runSummary[key]])
       .filter(([, fieldValue]) => (
@@ -2717,6 +3556,33 @@ function compactSingleRunForBudget(value: unknown): Record<string, unknown> {
     && run.modelExclusionsNotShown > 0
     ? run.modelExclusionsNotShown
     : undefined;
+  const calibrationOutcomeSource = Array.isArray(run.calibrationOutcomes)
+    ? run.calibrationOutcomes
+    : nested?.calibrationOutcomes;
+  const calibrationOutcomesAlreadyShaped = nested == null && Array.isArray(run.calibrationOutcomes);
+  const upstreamCalibrationOutcomesNotShown = typeof run.calibrationOutcomesNotShown === 'number'
+    && Number.isSafeInteger(run.calibrationOutcomesNotShown)
+    && run.calibrationOutcomesNotShown > 0
+    ? run.calibrationOutcomesNotShown
+    : (() => {
+        const original = runSummary.calibrationOutcomeCount;
+        const included = runSummary.includedCalibrationOutcomeCount;
+        return typeof original === 'number' && Number.isSafeInteger(original)
+          && typeof included === 'number' && Number.isSafeInteger(included)
+          && original >= included
+          ? original - included
+          : 0;
+      })();
+  const calibrationOutcomeFields = shapeCalibrationOutcomeFields(
+    calibrationOutcomeSource,
+    confidenceStrictness(run),
+    MAX_BUDGET_CALIBRATION_OUTCOMES,
+    true,
+    upstreamCalibrationOutcomesNotShown,
+    calibrationOutcomesAlreadyShaped,
+  );
+  const noticeSource = Array.isArray(run.notices) ? run.notices : nested?.notices;
+  const noticeFields = shapeRunNotices(noticeSource, runSummary.noticeCount);
   // The emergency floor emits zero positions, so its current projection must
   // not retain a stale write-time included count.
   const projection = shapedProjection
@@ -2747,8 +3613,115 @@ function compactSingleRunForBudget(value: unknown): Record<string, unknown> {
     aggregateExclusionsNotShown,
     modelExclusions,
     modelExclusionsNotShown,
+    ...noticeFields,
+    ...calibrationOutcomeFields,
     projection,
   }).filter(([, fieldValue]) => fieldValue !== undefined));
+}
+
+function trimBudgetFloorArray(
+  run: Record<string, unknown>,
+  field: string,
+  notShownField: string,
+  limit: number,
+): void {
+  const source = getArray<unknown>(run[field]);
+  if (source.length <= limit) return;
+  const priorNotShown = typeof run[notShownField] === 'number'
+    && Number.isSafeInteger(run[notShownField])
+    && (run[notShownField] as number) > 0
+    ? run[notShownField] as number
+    : 0;
+  const retained = field === 'notices'
+    ? selectNoticeEvidence(
+        source.filter((entry): entry is Record<string, unknown> => getObject(entry) != null),
+        limit,
+      )
+    : source.slice(0, limit);
+  run[field] = retained;
+  run[notShownField] = priorNotShown + source.length - limit;
+  if (field === 'notices') {
+    const omitted = run[notShownField] as number;
+    run.noticesMeta = {
+      total: retained.length + omitted,
+      returned: retained.length,
+      omitted,
+      entriesWithTruncatedFields: retained.filter((notice) => (
+        Array.isArray(getObject(notice)?.truncatedFields)
+      )).length,
+    };
+  }
+}
+
+function compactBudgetFloorCalibrationText(
+  run: Record<string, unknown>,
+  maxWarningBytes: number,
+  maxReasonBytes: number,
+): void {
+  for (const outcomeValue of getArray<unknown>(run.calibrationOutcomes)) {
+    const outcome = getObject(outcomeValue);
+    if (!outcome) continue;
+    if (typeof outcome.reason === 'string') {
+      outcome.reason = boundString(outcome.reason, maxReasonBytes).value;
+    }
+    const detail = getObject(outcome.detail);
+    if (!detail) continue;
+    const warnings = getArray<unknown>(detail.warnings)
+      .filter((warning): warning is string => typeof warning === 'string');
+    if (warnings.length === 0) continue;
+    const existingNotShown = typeof detail.warningsNotShown === 'number'
+      && Number.isSafeInteger(detail.warningsNotShown)
+      && detail.warningsNotShown > 0
+      ? detail.warningsNotShown
+      : 0;
+    detail.warnings = [boundString(warnings[0], maxWarningBytes).value];
+    const notShown = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      existingNotShown + warnings.length - 1,
+    );
+    if (notShown > 0) detail.warningsNotShown = notShown;
+  }
+}
+
+function boundBudgetFloorExclusionReasons(run: Record<string, unknown>, maxBytes: number): void {
+  for (const field of ['aggregateExclusions', 'modelExclusions']) {
+    for (const exclusionValue of getArray<unknown>(run[field])) {
+      const exclusion = getObject(exclusionValue);
+      if (exclusion && typeof exclusion.reason === 'string') {
+        exclusion.reason = boundString(exclusion.reason, maxBytes).value;
+      }
+    }
+  }
+}
+
+/** Keep the emergency floor below the shared wire guard under worst-case text.
+ * Warning-bearing calibration outcomes are already ordered first, so every
+ * reduction preserves the most actionable calibration evidence. */
+function fitSingleRunBudgetFloor(response: Record<string, unknown>): void {
+  const run = getObject(getArray<unknown>(response.data)[0]);
+  if (!run || jsonUtf8ByteLength(response) <= COMPUTE_RUNS_SAFE_SIZE_BUDGET) return;
+
+  compactBudgetFloorCalibrationText(run, 256, 256);
+  boundBudgetFloorExclusionReasons(run, 256);
+  for (const limit of [10, 5, 2, 1]) {
+    trimBudgetFloorArray(run, 'aggregateExclusions', 'aggregateExclusionsNotShown', limit);
+    trimBudgetFloorArray(run, 'modelExclusions', 'modelExclusionsNotShown', limit);
+    trimBudgetFloorArray(run, 'calibrationOutcomes', 'calibrationOutcomesNotShown', Math.min(limit, 5));
+    trimBudgetFloorArray(run, 'notices', 'noticesNotShown', Math.min(limit, MAX_DEFAULT_NOTICES));
+    if (jsonUtf8ByteLength(response) <= COMPUTE_RUNS_SAFE_SIZE_BUDGET) return;
+  }
+
+  compactBudgetFloorCalibrationText(run, 128, 128);
+  boundBudgetFloorExclusionReasons(run, 128);
+  if (jsonUtf8ByteLength(response) <= COMPUTE_RUNS_SAFE_SIZE_BUDGET) return;
+
+  // A structurally hostile row may still carry large non-actionable exclusion
+  // objects. Preserve their omission counts and the first warning outcome,
+  // but drop the verbose exclusion bodies before the generic guard can replace
+  // the entire response with an opaque size error.
+  trimBudgetFloorArray(run, 'aggregateExclusions', 'aggregateExclusionsNotShown', 0);
+  trimBudgetFloorArray(run, 'modelExclusions', 'modelExclusionsNotShown', 0);
+  trimBudgetFloorArray(run, 'notices', 'noticesNotShown', 0);
 }
 
 function resetToSingleRunBudgetFloor(
@@ -2779,6 +3752,7 @@ function resetToSingleRunBudgetFloor(
     reason: 'size budget',
     singleRunCompacted: true,
   };
+  fitSingleRunBudgetFloor(response);
 }
 
 function trimComputeRunsToBudget(out: Record<string, unknown>): Record<string, unknown> {
@@ -2877,11 +3851,26 @@ export function shapeComputeRunRecord(
   const shownPositions = sortedPositions.slice(0, maxPositions);
   const underlyings = getRunUnderlyings(raw);
   const runErrors = shapeRunErrors(data.errors);
+  const runNotices = shapeRunNotices(data.notices, summary.noticeCount);
   const projection = shapeProjectionFromRecord(raw);
   const runSchemaVersion = finiteNumberOrNull(data.runSchemaVersion);
   const strictness = confidenceStrictness(raw);
   const executionConfig = shapeExecutionConfig(summary.executionConfig ?? data.executionConfig);
   const assistantExclusions = shapeAssistantExclusionFields(raw);
+  const originalCalibrationOutcomeCount = finiteNumberOrNull(summary.calibrationOutcomeCount);
+  const includedCalibrationOutcomeCount = finiteNumberOrNull(summary.includedCalibrationOutcomeCount);
+  const upstreamCalibrationOutcomesNotShown = originalCalibrationOutcomeCount != null
+    && includedCalibrationOutcomeCount != null
+    && originalCalibrationOutcomeCount >= includedCalibrationOutcomeCount
+    ? originalCalibrationOutcomeCount - includedCalibrationOutcomeCount
+    : 0;
+  const calibrationOutcomeFields = shapeCalibrationOutcomeFields(
+    data.calibrationOutcomes,
+    strictness,
+    MAX_DEFAULT_CALIBRATION_OUTCOMES,
+    false,
+    upstreamCalibrationOutcomesNotShown,
+  );
 
   return {
     status: typeof raw.status === 'string' ? raw.status : undefined,
@@ -2899,14 +3888,23 @@ export function shapeComputeRunRecord(
       totalPositions: finiteNumberOrNull(summary.totalPositions),
       totalModelRuns: finiteNumberOrNull(summary.totalModelRuns),
       totalCalibrations: finiteNumberOrNull(summary.totalCalibrations),
+      calibrationOutcomeCount: originalCalibrationOutcomeCount,
+      includedCalibrationOutcomeCount,
+      includedSuccessfulCalibrationCount: finiteNumberOrNull(summary.includedSuccessfulCalibrationCount),
+      calibrationOutcomesTruncated: booleanOrNull(summary.calibrationOutcomesTruncated),
       executionTimeMs: finiteNumberOrNull(summary.executionTimeMs, 2),
       errorCount: finiteNumberOrNull(summary.errorCount),
       includedErrorCount: finiteNumberOrNull(summary.includedErrorCount),
       errorsTruncated: booleanOrNull(summary.errorsTruncated),
+      noticeCount: finiteNumberOrNull(summary.noticeCount),
+      includedNoticeCount: finiteNumberOrNull(summary.includedNoticeCount),
+      noticesTruncated: booleanOrNull(summary.noticesTruncated),
     },
     underlyings,
     ...runErrors,
+    ...runNotices,
     ...assistantExclusions,
+    ...calibrationOutcomeFields,
     ...(projection ? { projection } : {}),
     portfolioDispersion: shapeDispersion(getDispersion(raw)),
     exposureSweep: shapeExposureSweep(data.exposureSweep),
