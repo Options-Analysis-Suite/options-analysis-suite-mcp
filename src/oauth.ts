@@ -13,7 +13,7 @@
  * token itself using AES-256-GCM with OAS_TOKEN_SECRET. This means tokens
  * survive server restarts and deploys without requiring persistent storage.
  */
-import { createHash, createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { createHash, createCipheriv, createDecipheriv, randomBytes, timingSafeEqual } from 'node:crypto';
 import { loginForOAuth, getProfile, refreshAccessToken } from './auth/authClient.js';
 import { AuthError } from './types.js';
 import type { AuthTokens } from './types.js';
@@ -49,14 +49,22 @@ const ALLOWED_REDIRECTS = [
   // Smithery gateway. INTENTIONAL — DO NOT REMOVE.
   // Smithery (smithery.ai) is a curated MCP marketplace whose gateway uses a
   // single shared callback URL for every server it hosts. Removing this entry
-  // breaks the live Smithery listing for this MCP. Auditors flag this as a
-  // "multi-tenant shared callback" widening the trust boundary; that is true
-  // in the abstract, but the risk is bounded by (a) PKCE binding the code to
-  // the originating browser session and (b) any leaked code only granting the
-  // attacker the *victim's* MCP entitlements via Smithery (it does not expose
-  // the auth server's master credentials). This is the standard tradeoff every
-  // Smithery-listed MCP accepts; the hardening path is per-client_id redirect
-  // binding in DCR, not removing the URL. See closed PR #141 / mcp PR #8.
+  // breaks the live Smithery listing for this MCP.
+  //
+  // CORRECTED. PR #141 / mcp PR #8 argued the shared-callback risk was bounded
+  // by "PKCE binding the code to the originating browser session". That is
+  // WRONG: PKCE binds a code to whoever holds the verifier, and in the lure that
+  // matters the attacker chose the challenge and holds it. Per-client_id
+  // redirect binding in DCR does not help either - attacker and victim would use
+  // the same gateway client and the same callback. The real property is that a
+  // callback shared across a gateway's tenants may resolve a pending connection
+  // from `state` alone, so the party that RECEIVES a code need not be the party
+  // that started the flow.
+  //
+  // That is why this entry, and any future shared gateway callback, must also
+  // appear in SHARED_GATEWAY_REDIRECTS: those targets require an explicit
+  // connection confirmation before a code is issued. Keeping the URL listed is
+  // now a decision about UX cost, not an unmitigated risk.
   'https://smithery.run/oauth/callback',
   // Cursor MCP
   'https://www.cursor.com/agents/mcp/oauth/callback',
@@ -243,11 +251,32 @@ interface ProviderFlow {
   codeChallengeMethod: string;
   scope: string;
   expiresAt: number;
+  /**
+   * SHA-256 of the browser-binding secret minted alongside this flow id and set
+   * as an HttpOnly cookie at provider-start. Only the hash is kept, so a heap
+   * dump or a log of this map cannot yield the secret. See the flow-fixation
+   * note above handleProviderStart.
+   */
+  bindingHash: string;
+}
+
+/**
+ * An authorization that has been EARNED (the user authenticated) but not yet
+ * ISSUED, because its redirect target requires an explicit connection consent.
+ * The grant is held here rather than minted as a code: an abandoned consent must
+ * leave nothing spendable behind.
+ */
+interface PendingConsent {
+  grant: AuthorizationGrant;
+  bindingHash: string;
+  expiresAt: number;
 }
 
 const authCodes = new Map<string, AuthCode>();
 const mfaFlows = new Map<string, MfaFlow>();
 const providerFlows = new Map<string, ProviderFlow>();
+const pendingConsents = new Map<string, PendingConsent>();
+const CONSENT_TTL_MS = 5 * 60 * 1000;
 const PROVIDER_FLOW_TTL_MS = 10 * 60 * 1000; // matches the auth server's flow-cookie TTL
 // provider-start is unauthenticated, so bound the map: age is bounded by the
 // TTL, cardinality by this cap (with opportunistic pruning at the limit).
@@ -264,6 +293,9 @@ setInterval(() => {
   }
   for (const [id, data] of providerFlows) {
     if (now > data.expiresAt) providerFlows.delete(id);
+  }
+  for (const [id, data] of pendingConsents) {
+    if (now > data.expiresAt) pendingConsents.delete(id);
   }
 }, 60_000);
 
@@ -439,7 +471,34 @@ function hasActiveSubscription(accessToken: string): Promise<boolean> {
   });
 }
 
-function issueAuthorizationRedirect(input: {
+/**
+ * Headers every OAuth HTML page carries. These pages ARE the security boundary -
+ * the consent click is what stands between a crafted authorization link and a
+ * connected account, and the login and MFA forms take credentials - so none of
+ * them may be framed, none may post anywhere but back here, and none may be
+ * cached. RFC 9700 requires an authorization server to prevent clickjacking;
+ * X-Frame-Options rides along for anything that does not honour frame-ancestors.
+ *
+ * `style-src 'unsafe-inline'` is required by the inline <style> blocks and style
+ * attributes these pages use. Nothing else loads: no scripts, no images, no
+ * fonts, no network calls - hence `default-src 'none'`.
+ *
+ * Referrer-Policy is not incidental here. Flow ids and consent ids ride in URLs
+ * and form targets, and a leaked flow id is the premise of the attack this file
+ * exists to stop; no-referrer keeps them out of other origins' logs.
+ */
+function htmlPageHeaders(): Record<string, string> {
+  return {
+    'Content-Type': 'text/html',
+    'Content-Security-Policy':
+      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'no-referrer',
+    'Cache-Control': 'no-store',
+  };
+}
+
+interface AuthorizationGrant {
   apiKey: string;
   refreshCredential?: string;
   codeChallenge: string;
@@ -447,7 +506,9 @@ function issueAuthorizationRedirect(input: {
   redirectUri: string;
   clientId: string;
   state: string;
-}): { status: number; headers: Record<string, string>; body: string } {
+}
+
+function issueAuthorizationRedirect(input: AuthorizationGrant): { status: number; headers: Record<string, string>; body: string } {
   const code = randomBytes(32).toString('hex');
   authCodes.set(code, {
     apiKey: input.apiKey,
@@ -469,6 +530,254 @@ function issueAuthorizationRedirect(input: {
     headers: { Location: redirectUrl.toString() },
     body: '',
   };
+}
+
+// ── Connection consent for shared-gateway redirect targets ──────────────────
+//
+// Browser-binding the provider flow stops an attacker from having someone else's
+// sign-in delivered into an authorization they parked. It cannot stop the sibling
+// lure: the attacker copies their OWN /oauth/authorize URL - their client_id,
+// redirect_uri, state and code_challenge - and sends it to a victim. The victim's
+// own browser starts that flow, so every binding in the chain is satisfied by
+// construction, and the code is issued to the attacker's pending authorization.
+//
+// For most redirect targets the code still cannot be collected: it lands in the
+// VICTIM's browser at the client, whose `state` was minted for the attacker's own
+// session there, so the client rejects it (RFC 6749 Section 10.12 puts that
+// binding on the client). The exception is a callback shared by every tenant of a
+// gateway, where a pending connection may be resolved from `state` alone and the
+// recipient need not be the initiator. There the lure completes.
+//
+// EXTERNAL ASSUMPTION, STATED PLAINLY: that the non-gateway clients here -
+// chatgpt.com, claude.ai, cursor.com, perplexity.ai, grok.com - bind `state` to
+// the browser session that started the authorization. It is what the RFC
+// requires of them and it is not something tests in this repository can prove.
+// Any client whose behaviour is unverified, or any future callback shared across
+// tenants, belongs in SHARED_GATEWAY_REDIRECTS below. Loopback/native callbacks
+// (localhost:6274) need no gate: the code is delivered to the victim's own
+// machine, where the attacker is not listening.
+//
+// PKCE is not a defence here, and the earlier note on the Smithery entry in
+// ALLOWED_REDIRECTS was wrong to imply it is: PKCE binds the code to whoever
+// holds the verifier, and in this attack that is the attacker.
+//
+// So those targets - and ONLY those, to leave the common path a click lighter -
+// get an explicit confirmation naming the destination, after authentication and
+// before any code exists. A lured victim is asked whether they meant to connect
+// their account to a service they have never used.
+const CONSENT_COOKIE = 'oas_mcp_consent';
+
+/**
+ * Redirect targets whose recipient need not be the party that started the flow.
+ * Keyed on origin+path, matching isRedirectAllowed's own comparison. Any future
+ * marketplace or gateway callback shared across tenants belongs here.
+ */
+const SHARED_GATEWAY_REDIRECTS = new Set([
+  'https://smithery.run/oauth/callback',
+]);
+
+/**
+ * One budget for every state an authorization can be waiting in: a challenge
+ * awaiting a second factor, a grant parked behind a consent, and a minted code
+ * not yet exchanged. They are stages of the same object, so capping them
+ * separately would let any one of them starve the box on its own.
+ *
+ * MFA flows count for the sharpest reason: reaching one needs only a valid
+ * PASSWORD - the subscription check has not run yet - and the auth server's login
+ * limiter does not count successful sign-ins. Neither does authenticating bound
+ * cardinality anywhere else here: one legitimate subscriber can open these
+ * five-minute reservations as fast as they can post.
+ *
+ * Prune first, refuse second, and refuse retryably. What a 503 costs depends on
+ * where it lands, and the difference is worth stating rather than glossing:
+ *
+ *   - Spending a provider handoff refuses with the flow INTACT (the reservation
+ *     runs before the flow is consumed), so the same attempt succeeds once there
+ *     is room.
+ *   - Parking an MFA challenge at capacity DOES discard the first factor the
+ *     user just passed: there is nothing to hold it in, since holding it is the
+ *     allocation being refused. They sign in again. No failure counter, lockout,
+ *     or account state is touched - this is overload behaviour, not a lockout.
+ *   - Completing a second factor and approving a consent are net-zero and are
+ *     never refused at all.
+ */
+export const MAX_OUTSTANDING_AUTHORIZATIONS = 5000;
+
+function outstandingAuthorizations(): number {
+  return authCodes.size + pendingConsents.size + mfaFlows.size;
+}
+
+function reserveOutstandingAuthorization(): boolean {
+  if (outstandingAuthorizations() < MAX_OUTSTANDING_AUTHORIZATIONS) return true;
+  const now = Date.now();
+  for (const [code, data] of authCodes) {
+    if (now > data.expiresAt) authCodes.delete(code);
+  }
+  for (const [id, data] of pendingConsents) {
+    if (now > data.expiresAt) pendingConsents.delete(id);
+  }
+  for (const [id, data] of mfaFlows) {
+    if (now > data.expiresAt) mfaFlows.delete(id);
+  }
+  return outstandingAuthorizations() < MAX_OUTSTANDING_AUTHORIZATIONS;
+}
+
+/**
+ * The 503 every full-budget refusal renders. Retryable on purpose: the caller
+ * has already proved who they are, so nothing about the refusal should cost them
+ * their sign-in.
+ */
+function budgetExhaustedPage(): { status: number; headers: Record<string, string>; body: string } {
+  return {
+    ...noticePage(
+      'Too many sign-ins in progress',
+      'Too many connections are being set up right now. Wait a minute and start the connection again from your AI client.',
+      503,
+    ),
+    headers: { ...htmlPageHeaders(), 'Retry-After': '60' },
+  };
+}
+
+function requiresConnectionConsent(redirectUri: string): boolean {
+  try {
+    const parsed = new URL(redirectUri);
+    return SHARED_GATEWAY_REDIRECTS.has(`${parsed.origin}${parsed.pathname}`);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The consent bindings this request presents that authenticate against a live
+ * pending consent. Same jar discipline as the flow bindings, and for the same
+ * reason: a single-valued cookie would let a second confirmation page evict the
+ * first, so a user holding two connections open would find the older tab
+ * unapprovable. Authenticating before re-serializing also drops answered and
+ * expired consents, and keeps forged entries from evicting real ones.
+ */
+function liveConsentsFrom(cookieHeader: string | undefined): CookieBinding[] {
+  const now = Date.now();
+  return parseBindingJar(readCookieValues(cookieHeader, CONSENT_COOKIE)).filter((entry) => {
+    const pending = pendingConsents.get(entry.id);
+    if (!pending || now > pending.expiresAt) return false;
+    return digestsEqual(sha256Hex(entry.secret), pending.bindingHash);
+  });
+}
+
+function consentCookieHeader(jar: CookieBinding[]): string {
+  return jarCookieHeader(CONSENT_COOKIE, jar, 'Lax', CONSENT_TTL_MS);
+}
+
+/**
+ * Issue the authorization, or park it behind a confirmation when the redirect
+ * target is a shared gateway.
+ *
+ * `onIssueCookie` is applied ONLY when a code is issued right now. The provider
+ * path uses it to refresh its binding jar; on the consent path that refresh is
+ * skipped so the consent cookie can take the single Set-Cookie slot, which costs
+ * nothing because a spent flow's binding no longer authenticates and is dropped
+ * from the jar on the next request that touches it.
+ */
+function issueAuthorizationOrConsent(
+  grant: AuthorizationGrant,
+  cookieHeader?: string,
+  onIssueCookie?: string,
+): { status: number; headers: Record<string, string>; body: string } {
+  if (!reserveOutstandingAuthorization()) return budgetExhaustedPage();
+  if (!requiresConnectionConsent(grant.redirectUri)) {
+    const redirect = issueAuthorizationRedirect(grant);
+    if (!onIssueCookie) return redirect;
+    return { ...redirect, headers: { ...redirect.headers, 'Set-Cookie': onIssueCookie } };
+  }
+
+  const consentId = randomBytes(16).toString('hex');
+  const secret = randomBytes(32).toString('hex');
+  pendingConsents.set(consentId, {
+    grant,
+    bindingHash: sha256Hex(secret),
+    expiresAt: Date.now() + CONSENT_TTL_MS,
+  });
+  const page = consentPage(consentId, new URL(grant.redirectUri).host);
+  return {
+    ...page,
+    headers: {
+      ...page.headers,
+      'Set-Cookie': consentCookieHeader([{ id: consentId, secret }, ...liveConsentsFrom(cookieHeader)]),
+    },
+  };
+}
+
+/** POST /oauth/consent — the user's answer to the confirmation above. */
+export function handleConsentPost(
+  body: string,
+  cookieHeader?: string,
+): { status: number; headers: Record<string, string>; body: string } {
+  const params = new URLSearchParams(body);
+  const consentId = params.get('consent_id') || '';
+  const pending = pendingConsents.get(consentId);
+  if (!pending || Date.now() > pending.expiresAt) {
+    pendingConsents.delete(consentId);
+    return expiredFlowPage();
+  }
+  // Same browser as the one that authenticated. Without this the consent id -
+  // which the page carries in a form field - would be the whole authority.
+  const authenticated = liveConsentsFrom(cookieHeader).some((entry) => entry.id === consentId);
+  if (!authenticated) return unboundFlowPage();
+
+  pendingConsents.delete(consentId);
+  if (params.get('decision') !== 'approve') {
+    const cancelled = noticePage(
+      'Connection cancelled',
+      'Your account was not connected. You can close this window.',
+    );
+    return { ...cancelled, headers: { ...cancelled.headers, 'Set-Cookie': consentCookieHeader(liveConsentsFrom(cookieHeader)) } };
+  }
+  const redirect = issueAuthorizationRedirect(pending.grant);
+  return { ...redirect, headers: { ...redirect.headers, 'Set-Cookie': consentCookieHeader(liveConsentsFrom(cookieHeader)) } };
+}
+
+/** The confirmation page. Names the DESTINATION HOST, never the client-supplied
+ * client_id: the host is allowlist-constrained, a client_id is not, and a
+ * free-text name rendered here would be a phishing surface of its own. */
+function consentPage(consentId: string, destinationHost: string): { status: number; headers: Record<string, string>; body: string } {
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Options Analysis Suite — Confirm connection</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+    .card { background: #1e293b; border-radius: 12px; padding: 40px; max-width: 420px; width: 100%; box-shadow: 0 4px 24px rgba(0,0,0,0.3); }
+    h1 { font-size: 1.4rem; margin-bottom: 8px; color: #f8fafc; }
+    p { font-size: 0.9rem; color: #94a3b8; line-height: 1.5; margin-bottom: 16px; }
+    .dest { color: #f8fafc; font-weight: 600; }
+    .warn { background: #78350f; color: #fcd34d; padding: 10px; border-radius: 6px; font-size: 0.85rem; margin-bottom: 20px; }
+    .row { display: flex; gap: 10px; }
+    button { flex: 1; padding: 12px; border-radius: 6px; border: none; font-size: 0.95rem; font-weight: 600; cursor: pointer; }
+    .approve { background: #0d9488; color: #fff; }
+    .cancel { background: #0f172a; color: #e2e8f0; border: 1px solid #334155; }
+    .logo { font-size: 1.8rem; margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">&#10022;</div>
+    <h1>Confirm this connection</h1>
+    <p>You are about to give <span class="dest">${escapeHtml(destinationHost)}</span> access to your Options Analysis Suite account.</p>
+    <div class="warn">Only continue if you started this yourself from ${escapeHtml(destinationHost)}. If you arrived here from a link someone sent you, cancel.</div>
+    <form method="POST" action="/oauth/consent">
+      <input type="hidden" name="consent_id" value="${escapeHtml(consentId)}">
+      <div class="row">
+        <button class="cancel" type="submit" name="decision" value="cancel">Cancel</button>
+        <button class="approve" type="submit" name="decision" value="approve">Connect</button>
+      </div>
+    </form>
+  </div>
+</body>
+</html>`;
+  return { status: 200, headers: htmlPageHeaders(), body: html };
 }
 
 // --- Route handlers ---
@@ -583,7 +892,7 @@ function renderLoginPage(p: LoginPageParams, status = 200): { status: number; he
   </div>
 </body>
 </html>`;
-  return { status, headers: { 'Content-Type': 'text/html' }, body: html };
+  return { status, headers: htmlPageHeaders(), body: html };
 }
 
 /** GET /oauth/authorize — render login page */
@@ -661,11 +970,14 @@ function renderMfaForm(flowId: string, flow: MfaFlow, errorMsg = ''): { status: 
   </div>
 </body>
 </html>`;
-  return { status: 200, headers: { 'Content-Type': 'text/html' }, body: html };
+  return { status: 200, headers: htmlPageHeaders(), body: html };
 }
 
 /** POST /oauth/authorize — validate credentials, issue code, redirect */
-export async function handleAuthorizePost(body: string): Promise<{ status: number; headers: Record<string, string>; body: string }> {
+export async function handleAuthorizePost(
+  body: string,
+  cookieHeader?: string,
+): Promise<{ status: number; headers: Record<string, string>; body: string }> {
   const params = new URLSearchParams(body);
   const email = params.get('email') || '';
   const password = params.get('password') || '';
@@ -736,8 +1048,12 @@ export async function handleAuthorizePost(body: string): Promise<{ status: numbe
         mfaFlows.delete(mfaFlowId);
         return renderMfaForm(mfaFlowId, flow, 'Your subscription is not active. Please visit optionsanalysissuite.com/pricing to subscribe.');
       }
+      // NET ZERO, and deliberately unguarded: releasing the MFA flow before
+      // issuing means completing a second factor never raises the outstanding
+      // count, so a full budget can never strand a user who has already passed
+      // it. Do not reorder these two lines.
       mfaFlows.delete(mfaFlowId);
-      return issueAuthorizationRedirect({ ...flow, apiKey: `${OAUTH_ACCESS_TOKEN_PREFIX}${accessToken}` });
+      return issueAuthorizationOrConsent({ ...flow, apiKey: `${OAUTH_ACCESS_TOKEN_PREFIX}${accessToken}` }, cookieHeader);
     } catch (err) {
       flow.failedAttempts += 1;
       if (flow.failedAttempts >= MFA_FLOW_MAX_FAILED_ATTEMPTS) {
@@ -763,6 +1079,8 @@ export async function handleAuthorizePost(body: string): Promise<{ status: numbe
     if (result.kind === 'mfa_required') {
       if (result.code !== 'mfa_required' || !result.stepUpToken || !result.cookieHeader) {
         errorMsg = 'Two-factor verification is temporarily unavailable. Please try again later.';
+      } else if (!reserveOutstandingAuthorization()) {
+        return budgetExhaustedPage();
       } else {
         const flowId = randomBytes(32).toString('hex');
         const flow: MfaFlow = {
@@ -808,14 +1126,14 @@ export async function handleAuthorizePost(body: string): Promise<{ status: numbe
     return renderLoginPage({ clientId, redirectUri, state, codeChallenge, codeChallengeMethod, scope, email, errorMsg });
   }
 
-  return issueAuthorizationRedirect({
+  return issueAuthorizationOrConsent({
     apiKey,
     codeChallenge,
     codeChallengeMethod,
     redirectUri,
     clientId,
     state,
-  });
+  }, cookieHeader);
 }
 
 // --- Provider sign-in endpoints ---
@@ -826,8 +1144,8 @@ const PROVIDER_ERROR_MESSAGES: Record<string, string> = {
   exchange: 'Sign-in could not be completed. Please try again.',
 };
 
-/** The provider flow outlived our 10-minute window (or was already consumed). */
-function expiredFlowPage(): { status: number; headers: Record<string, string>; body: string } {
+/** Dead-end notice page: one markup source for every "this flow cannot continue" answer. */
+function noticePage(heading: string, message: string, status = 400): { status: number; headers: Record<string, string>; body: string } {
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -846,16 +1164,245 @@ function expiredFlowPage(): { status: number; headers: Record<string, string>; b
 <body>
   <div class="card">
     <div class="logo">&#10022;</div>
-    <h1>Sign-in session expired</h1>
-    <p>This sign-in attempt is no longer valid. Return to your AI client (ChatGPT, Claude, etc.) and start the connection again.</p>
+    <h1>${escapeHtml(heading)}</h1>
+    <p>${escapeHtml(message)}</p>
   </div>
 </body>
 </html>`;
-  return { status: 400, headers: { 'Content-Type': 'text/html' }, body: html };
+  return { status, headers: htmlPageHeaders(), body: html };
+}
+
+/** The provider flow outlived our 10-minute window (or was already consumed). */
+function expiredFlowPage(): { status: number; headers: Record<string, string>; body: string } {
+  return noticePage(
+    'Sign-in session expired',
+    'This sign-in attempt is no longer valid. Return to your AI client (ChatGPT, Claude, etc.) and start the connection again.',
+  );
+}
+
+/** The flow is live, but this browser is not the one that started it. */
+function unboundFlowPage(): { status: number; headers: Record<string, string>; body: string } {
+  return noticePage(
+    'Sign-in could not be verified',
+    'This sign-in was started in a different browser or session, so it cannot be completed here. '
+    + 'Return to your AI client (ChatGPT, Claude, etc.) and start the connection again from this browser.',
+  );
+}
+
+// ── Browser binding for the provider flow ───────────────────────────────────
+//
+// The mcp_state flow id travels in URLs the whole way round (this server's
+// redirect, the auth server's /start, the provider's callback, the finish page's
+// form), so it is NOT secret: it shows up in address bars, Referer headers and
+// logs. On its own it is a bearer capability, and the thing it bears is "deliver
+// the next completed sign-in into the MCP client params parked under this id".
+//
+// THE ATTACK. An attacker calls /oauth/provider-start with THEIR OWN client_id /
+// redirect_uri / state / code_challenge, keeps the flow id it mints, and lures a
+// victim to <auth server>/api/v1/oauth/start?flow=mcp&mcp_state=<that id>. The
+// victim's browser runs a real provider sign-in - zero clicks if their provider
+// session is live - and the sealed handoff is posted back here, so an
+// authorization code for the VICTIM's account is issued against the ATTACKER's
+// pending authorization. PKCE does not help: the attacker minted the challenge
+// and holds the verifier. Whether the attacker can then SPEND that code depends
+// on the redirect target, and ALLOWED_REDIRECTS deliberately includes a shared
+// multi-tenant gateway callback (see the Smithery entry) where a code delivered
+// for someone else's pending connection can land in the attacker's.
+//
+// THE FIX. Pair the public flow id with a high-entropy secret that never leaves
+// the browser that started the flow: provider-start sets it in an HttpOnly
+// cookie and keeps only its SHA-256, and both provider-callback entry points
+// require the pair before anything is spent. A flow started in one browser
+// cannot be finished in another.
+//
+// WHY THE CHECK LANDS HERE. The attacker routes the victim straight at the auth
+// server, so a pre-flight endpoint on this side would simply be skipped, and the
+// auth server cannot make the check itself - it cannot read this origin's cookie,
+// and the two services are independently deployed behind separate env-configured
+// hostnames, so a shared-domain cookie would be a silent coupling. The last hop
+// is therefore the first place the check can be enforced with no new protocol,
+// and it is sufficient: nothing is spent before it runs. The auth server's own
+// leg is already browser-bound by the signed finish cookie it mints at /callback.
+//
+// AN EARLIER REFUSAL IS POSSIBLE and is deliberately not built here: the auth
+// server could mint a nonce at /start, bounce the browser through an endpoint on
+// THIS origin that checks the cookie and signs (mcp_state, nonce) with the shared
+// handoff secret, and refuse without a valid proof. That needs no cross-origin
+// cookie read. It buys no additional protection against the fixation itself -
+// this check already denies the attacker the code - but it would remove the
+// residual below. Tracked as a follow-up, not a gap in this fix.
+//
+// RESIDUAL. A lured victim's browser still completes a real sign-in before the
+// handoff is refused here, leaving a session + ledger row on the auth server that
+// nobody uses. It holds one of the account's MAX_ACTIVE_SESSIONS (default 5)
+// slots, so repeated lures can push a user's older inactive sessions out.
+//
+// WHAT THIS DOES NOT COVER: an attacker who lures the victim to /oauth/authorize
+// or /oauth/provider-start directly, carrying the attacker's client params. The
+// victim's own browser starts that flow, so the binding is satisfied and the code
+// is issued to the attacker's pending authorization. Flow binding cannot reach
+// it; the defence is client identification at consent time, and it matters most
+// for redirect targets where the recipient is not the initiator (see the
+// multi-tenant gateway entry in ALLOWED_REDIRECTS).
+
+const PROVIDER_FLOW_COOKIE = 'oas_mcp_flow';
+
+/**
+ * How many bindings one browser may hold in a single binding cookie, for either
+ * jar. A single-valued cookie would let each new sign-in evict the previous
+ * one's binding, so a user connecting two AI clients at once - or one who backs
+ * out of Google, picks GitHub, then finishes the first tab - would find the older
+ * tab unfinishable. Binding must not introduce that regression, so each cookie is
+ * a small newest-first jar.
+ */
+const MAX_BINDINGS_PER_COOKIE = 3;
+
+/**
+ * EVERY value sent under `name`, not just the first. A browser sends one cookie
+ * line per (name, domain, path), so a same-named cookie scoped to a parent domain
+ * - which any sibling subdomain can set - would otherwise be able to shadow ours
+ * and make a legitimate browser look unbound. Reading all of them means such a
+ * cookie can add junk entries but never hide the real binding. It cannot forge
+ * one: the secret behind the stored hash is not knowable.
+ */
+function readCookieValues(cookieHeader: string | undefined, name: string): string[] {
+  const values: string[] = [];
+  for (const part of (cookieHeader ?? '').split(';')) {
+    const cookie = part.trim();
+    const equalsIdx = cookie.indexOf('=');
+    if (equalsIdx <= 0) continue;
+    if (cookie.slice(0, equalsIdx) === name) values.push(cookie.slice(equalsIdx + 1));
+  }
+  return values;
+}
+
+function sha256Hex(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+/** Constant-time compare of two hex digests. */
+function digestsEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+}
+
+/**
+ * One `<id>.<secret>` pair from a binding cookie. Both the provider-flow jar and
+ * the consent jar use this shape: an id that also travels in the clear, plus a
+ * secret that only ever lives in the cookie.
+ */
+interface CookieBinding {
+  id: string;
+  secret: string;
+}
+
+/** Cookie value format: `<flowId>.<secret>` entries, newest first, `~`-separated. */
+function parseBindingJar(values: string[]): CookieBinding[] {
+  const jar: CookieBinding[] = [];
+  for (const entry of values.join('~').split('~')) {
+    const dotIdx = entry.indexOf('.');
+    if (dotIdx <= 0) continue;
+    jar.push({ id: entry.slice(0, dotIdx), secret: entry.slice(dotIdx + 1) });
+  }
+  return jar;
+}
+
+/**
+ * Serialize a jar back into a Set-Cookie. Callers pass only entries that have
+ * ALREADY authenticated against live server state, so every byte written here is
+ * provably one we minted.
+ */
+function jarCookieHeader(name: string, jar: CookieBinding[], sameSite: 'None' | 'Lax', ttlMs: number): string {
+  if (!jar.length) return `${name}=; ${cookieAttributes(sameSite)}; Max-Age=0`;
+  const value = jar
+    .slice(0, MAX_BINDINGS_PER_COOKIE)
+    .map((entry) => `${entry.id}.${entry.secret}`)
+    .join('~');
+  return `${name}=${value}; ${cookieAttributes(sameSite)}; Max-Age=${Math.floor(ttlMs / 1000)}`;
+}
+
+/** The bindings this request presents, across every cookie line carrying them. */
+function bindingJarFrom(cookieHeader: string | undefined): CookieBinding[] {
+  return parseBindingJar(readCookieValues(cookieHeader, PROVIDER_FLOW_COOKIE));
+}
+
+/**
+ * The presented bindings that AUTHENTICATE against a live parked flow.
+ *
+ * This is the gate for every write of the jar back to the browser, and shape
+ * checks are not a substitute for it. A sibling subdomain can set a same-named
+ * cookie at a wider scope carrying syntactically perfect but forged entries;
+ * re-serializing those would let it push the browser's real bindings out of a
+ * capped jar - eviction, not injection, is the reachable harm. Requiring the
+ * secret to hash to a live flow's stored digest means a forged entry can neither
+ * survive a round trip nor displace a genuine one, and it also drops spent and
+ * expired flows for free. It is why nothing unauthenticated is ever written into
+ * a Set-Cookie header: every entry we echo is provably one we minted.
+ */
+function liveBindingsFrom(cookieHeader: string | undefined): CookieBinding[] {
+  const now = Date.now();
+  return bindingJarFrom(cookieHeader).filter((entry) => {
+    const flow = providerFlows.get(entry.id);
+    if (!flow || now > flow.expiresAt) return false;
+    return digestsEqual(sha256Hex(entry.secret), flow.bindingHash);
+  });
+}
+
+/**
+ * SameSite=None over https, deliberately. The sealed handoff arrives as a
+ * CROSS-ORIGIN top-level form POST from the auth server's finish page, so a Lax
+ * cookie is withheld unless the two services happen to be same-site - and they
+ * are separate deployments behind independent env-configured hostnames, so
+ * depending on a shared registrable domain would mean provider sign-in breaking
+ * outright, with no code change, the day either host moves. None is safe here
+ * because the cookie carries no authority on its own: spending it also requires a
+ * handoff blob sealed by the auth server for a completed sign-in, which no
+ * third-party site can produce, and the flow id it must be presented with is
+ * unguessable. Local http development falls back to Lax, since None requires
+ * Secure and Secure cannot be set over plain http.
+ */
+function cookieAttributes(sameSite: 'None' | 'Lax'): string {
+  const https = getBaseUrl(undefined).startsWith('https:');
+  // None requires Secure, which cannot be set over plain http, so local
+  // development degrades to Lax - where it is also correct, since a dev auth
+  // server and MCP server on localhost are same-site anyway.
+  const effective = sameSite === 'None' && !https ? 'Lax' : sameSite;
+  return `Path=/oauth; HttpOnly; SameSite=${effective}${https ? '; Secure' : ''}`;
+}
+
+function bindingCookieHeader(jar: CookieBinding[]): string {
+  return jarCookieHeader(PROVIDER_FLOW_COOKIE, jar, 'None', PROVIDER_FLOW_TTL_MS);
+}
+
+/** The client-params half of a parked flow. Never the binding material. */
+function loginParamsFor(flow: ProviderFlow): LoginPageParams {
+  return {
+    clientId: flow.clientId,
+    redirectUri: flow.redirectUri,
+    state: flow.state,
+    codeChallenge: flow.codeChallenge,
+    codeChallengeMethod: flow.codeChallengeMethod,
+    scope: flow.scope,
+  };
+}
+
+/**
+ * True when this browser presents the secret minted alongside `flowId`. EVERY
+ * entry for the id is considered, not the first: a same-named cookie from a wider
+ * scope would otherwise be able to sit ahead of the real one and deny a browser
+ * that does hold the binding.
+ */
+function browserHoldsFlowBinding(cookieHeader: string | undefined, flowId: string, flow: ProviderFlow): boolean {
+  return bindingJarFrom(cookieHeader)
+    .filter((candidate) => candidate.id === flowId)
+    .some((candidate) => digestsEqual(sha256Hex(candidate.secret), flow.bindingHash));
 }
 
 /** GET /oauth/provider-start — park the MCP client's PKCE params, bounce to the auth server's BFF */
-export function handleProviderStart(query: URLSearchParams): { status: number; headers: Record<string, string>; body: string } {
+export function handleProviderStart(
+  query: URLSearchParams,
+  cookieHeader?: string,
+): { status: number; headers: Record<string, string>; body: string } {
   if (!isProviderSignInEnabled()) {
     return {
       status: 404,
@@ -898,6 +1445,7 @@ export function handleProviderStart(query: URLSearchParams): { status: number; h
   }
 
   const flowId = randomBytes(16).toString('hex');
+  const bindingSecret = randomBytes(32).toString('hex');
   providerFlows.set(flowId, {
     clientId,
     redirectUri,
@@ -906,28 +1454,61 @@ export function handleProviderStart(query: URLSearchParams): { status: number; h
     codeChallengeMethod,
     scope,
     expiresAt: Date.now() + PROVIDER_FLOW_TTL_MS,
+    bindingHash: sha256Hex(bindingSecret),
   });
+  // Newest first; bindingCookieHeader trims to the cap, evicting the oldest.
+  const jar: CookieBinding[] = [
+    { id: flowId, secret: bindingSecret },
+    ...liveBindingsFrom(cookieHeader),
+  ];
 
   const target = new URL(`${AUTH_SERVER_URL}/api/v1/oauth/start`);
   target.searchParams.set('provider', provider);
   target.searchParams.set('flow', 'mcp');
   target.searchParams.set('mcp_state', flowId);
-  return { status: 302, headers: { Location: target.toString(), 'Cache-Control': 'no-store' }, body: '' };
+  return {
+    status: 302,
+    headers: {
+      Location: target.toString(),
+      'Cache-Control': 'no-store',
+      'Set-Cookie': bindingCookieHeader(jar),
+    },
+    body: '',
+  };
 }
 
 /** GET /oauth/provider-callback — error bounce from the auth server (no tokens) */
-export function handleProviderCallbackGet(query: URLSearchParams): { status: number; headers: Record<string, string>; body: string } {
+export function handleProviderCallbackGet(
+  query: URLSearchParams,
+  cookieHeader?: string,
+): { status: number; headers: Record<string, string>; body: string } {
   const flowId = query.get('mcp_state') || '';
   const error = query.get('error') || 'provider';
   const flow = providerFlows.get(flowId);
-  providerFlows.delete(flowId); // single-use: retries mint a fresh flow from the re-rendered page
-  if (!flow || Date.now() > flow.expiresAt) return expiredFlowPage();
+  if (!flow || Date.now() > flow.expiresAt) {
+    providerFlows.delete(flowId);
+    return expiredFlowPage();
+  }
+  if (!browserHoldsFlowBinding(cookieHeader, flowId, flow)) return unboundFlowPage();
+  // THE FLOW IS NOT CONSUMED HERE, deliberately. This endpoint authenticates the
+  // browser but not the AUTH SERVER: it is a plain GET carrying a flow id that
+  // travels in URLs, so any cross-site navigation made in the bound browser -
+  // an <img>, a link, a redirect from a page the user is reading - could reach it
+  // with the cookie attached and burn a sign-in the user is midway through.
+  // Deleting bought nothing anyway: retries come from the re-rendered page's
+  // provider buttons, which mint a fresh flow at provider-start. The flow is
+  // still spendable only by this browser with a handoff only the auth server can
+  // seal, so leaving it to age out of its 10-minute TTL costs one map entry and
+  // removes a denial-of-service vector.
   const errorMsg = PROVIDER_ERROR_MESSAGES[error] ?? PROVIDER_ERROR_MESSAGES.provider;
-  return renderLoginPage({ ...flow, errorMsg });
+  return renderLoginPage({ ...loginParamsFor(flow), errorMsg });
 }
 
 /** POST /oauth/provider-callback — auth server's interstitial posts the sealed session handoff */
-export async function handleProviderCallbackPost(body: string): Promise<{ status: number; headers: Record<string, string>; body: string }> {
+export async function handleProviderCallbackPost(
+  body: string,
+  cookieHeader?: string,
+): Promise<{ status: number; headers: Record<string, string>; body: string }> {
   const params = new URLSearchParams(body);
   const flowId = params.get('mcp_state') || '';
   const blob = params.get('handoff') || '';
@@ -936,6 +1517,10 @@ export async function handleProviderCallbackPost(body: string): Promise<{ status
     providerFlows.delete(flowId);
     return expiredFlowPage();
   }
+  // Checked before the blob is even opened: the handoff is only spendable by the
+  // browser that started this flow, so an unbound POST gets no authorization code
+  // and does not consume the flow.
+  if (!browserHoldsFlowBinding(cookieHeader, flowId, flow)) return unboundFlowPage();
 
   const opened = openHandoffBlob(blob, flowId);
   if (!opened) {
@@ -943,8 +1528,16 @@ export async function handleProviderCallbackPost(body: string): Promise<{ status
     // irreversible by the time this POST arrives, so a garbled/expired blob
     // must not ALSO burn the flow - the re-rendered page (TTL-bounded) lets
     // the user retry. Replay of a valid blob is prevented below.
-    return renderLoginPage({ ...flow, errorMsg: 'Sign-in expired or could not be verified. Please try again.' });
+    return renderLoginPage({ ...loginParamsFor(flow), errorMsg: 'Sign-in expired or could not be verified. Please try again.' });
   }
+  // CAPACITY BEFORE CONSUMPTION. Spending this flow is a net-NEW outstanding
+  // authorization (a provider flow is bounded by its own cap, not by the
+  // authorization budget), so a full budget must be discovered while the flow is
+  // still intact. Refusing after the delete would turn a retryable 503 into a
+  // destroyed sign-in: the same POST would come back "expired" and the user
+  // would have to start over at their client.
+  if (!reserveOutstandingAuthorization()) return budgetExhaustedPage();
+
   // Consume the flow only once a cryptographically valid handoff arrived.
   providerFlows.delete(flowId);
 
@@ -954,15 +1547,23 @@ export async function handleProviderCallbackPost(body: string): Promise<{ status
   // no security but WOULD reintroduce a durability hole - the session is already
   // transferred + the browser cookie cleared, so a transient profile 5xx here
   // would strand it with no retry. Trust the sealed blob's provenance.
-  return issueAuthorizationRedirect({
-    apiKey: `${OAUTH_ACCESS_TOKEN_PREFIX}${opened.accessToken}`,
-    refreshCredential: opened.refreshToken || undefined,
-    codeChallenge: flow.codeChallenge,
-    codeChallengeMethod: flow.codeChallengeMethod,
-    redirectUri: flow.redirectUri,
-    clientId: flow.clientId,
-    state: flow.state,
-  });
+  // The spent flow is already deleted, so re-serializing the live bindings drops
+  // it and keeps any other connection this browser has in flight. That refresh
+  // rides along only when a code is issued now; a consent page needs the cookie
+  // slot for itself.
+  return issueAuthorizationOrConsent(
+    {
+      apiKey: `${OAUTH_ACCESS_TOKEN_PREFIX}${opened.accessToken}`,
+      refreshCredential: opened.refreshToken || undefined,
+      codeChallenge: flow.codeChallenge,
+      codeChallengeMethod: flow.codeChallengeMethod,
+      redirectUri: flow.redirectUri,
+      clientId: flow.clientId,
+      state: flow.state,
+    },
+    cookieHeader,
+    bindingCookieHeader(liveBindingsFrom(cookieHeader)),
+  );
 }
 
 /** Wrap a GoTrue refresh token (bound to the client) into a stateless OAuth refresh_token. */

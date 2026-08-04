@@ -28,6 +28,7 @@ import {
   handleProviderStart,
   handleProviderCallbackGet,
   handleProviderCallbackPost,
+  handleConsentPost,
   handleTokenExchange,
   handleClientRegistration,
 } from './oauth.js';
@@ -265,7 +266,15 @@ export function parseRequestUrl(rawUrl: string | undefined, baseUrl: string): UR
   }
 }
 
-const server = createServer(async (req, res) => {
+/**
+ * The HTTP dispatcher. Exported so tests can drive real requests through it -
+ * the seam that hands each handler the request's cookie header is only as good
+ * as the wiring, and asserting on source text would not catch a rewire.
+ */
+export const handleHttpRequest = async (
+  req: import('node:http').IncomingMessage,
+  res: import('node:http').ServerResponse,
+): Promise<void> => {
   const requestUrl = parseRequestUrl(req.url, PUBLIC_BASE_URL);
   if (!requestUrl) {
     res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -360,7 +369,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST') {
       try {
         const body = await readBody(req);
-        const result = await handleAuthorizePost(body);
+        const result = await handleAuthorizePost(body, req.headers.cookie);
         res.writeHead(result.status, result.headers);
         res.end(result.body);
       } catch {
@@ -373,7 +382,7 @@ const server = createServer(async (req, res) => {
   // Provider sign-in: park the client's PKCE params, bounce through the auth
   // server's BFF, and accept the sealed session handoff on the way back.
   if (pathname === '/oauth/provider-start' && req.method === 'GET') {
-    const result = handleProviderStart(requestUrl.searchParams);
+    const result = handleProviderStart(requestUrl.searchParams, req.headers.cookie);
     res.writeHead(result.status, result.headers);
     res.end(result.body);
     return;
@@ -381,7 +390,7 @@ const server = createServer(async (req, res) => {
 
   if (pathname === '/oauth/provider-callback') {
     if (req.method === 'GET') {
-      const result = handleProviderCallbackGet(requestUrl.searchParams);
+      const result = handleProviderCallbackGet(requestUrl.searchParams, req.headers.cookie);
       res.writeHead(result.status, result.headers);
       res.end(result.body);
       return;
@@ -389,7 +398,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST') {
       try {
         const body = await readBody(req);
-        const result = await handleProviderCallbackPost(body);
+        const result = await handleProviderCallbackPost(body, req.headers.cookie);
         res.writeHead(result.status, result.headers);
         res.end(result.body);
       } catch {
@@ -397,6 +406,18 @@ const server = createServer(async (req, res) => {
       }
       return;
     }
+  }
+
+  if (pathname === '/oauth/consent' && req.method === 'POST') {
+    try {
+      const body = await readBody(req);
+      const result = handleConsentPost(body, req.headers.cookie);
+      res.writeHead(result.status, result.headers);
+      res.end(result.body);
+    } catch {
+      if (!res.headersSent) { res.writeHead(413); res.end('Request body too large'); }
+    }
+    return;
   }
 
   if (pathname === '/oauth/token' && req.method === 'POST') {
@@ -551,7 +572,9 @@ const server = createServer(async (req, res) => {
       }
     }
   }
-});
+};
+
+const server = createServer(handleHttpRequest);
 
 async function shutdownRemoteServer(): Promise<void> {
   console.log('[OAS MCP] Shutting down...');
