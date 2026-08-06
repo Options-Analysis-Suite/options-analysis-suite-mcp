@@ -13,7 +13,7 @@ const PLATFORM_INFO: Record<string, string> = {
 
 Vanilla pricing models (10):
 - Black-Scholes: Closed-form European pricing. Log-normal returns, constant vol. Baseline for IV extraction. Includes the Black-76 variant, auto-selected for futures tickers (symbols starting with "/") - uses the futures price directly as the forward, no carry adjustment.
-- Binomial: Lattice method with selectable tree (CRR, Jarrow-Rudd, Tian, Leisen-Reimer). Handles American exercise, discrete dividends.
+- Binomial: Lattice method with selectable tree (CRR, Jarrow-Rudd, Leisen-Reimer). Handles American exercise, discrete dividends.
 - Monte Carlo: Simulation-based with antithetic variates and confidence bands. Handles path-dependent payoffs.
 - Heston: Stochastic volatility (mean-reverting variance, vol-of-vol, spot-vol correlation). Captures skew and smile dynamics.
 - Jump Diffusion: GBM with discrete Poisson jumps (Merton-style). Captures gap risk and tail events.
