@@ -13,7 +13,7 @@
  * token itself using AES-256-GCM with OAS_TOKEN_SECRET. This means tokens
  * survive server restarts and deploys without requiring persistent storage.
  */
-import { createHash, createCipheriv, createDecipheriv, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, createCipheriv, createDecipheriv, randomBytes, timingSafeEqual } from 'node:crypto';
 import { loginForOAuth, getProfile, refreshAccessToken } from './auth/authClient.js';
 import { AuthError } from './types.js';
 import type { AuthTokens } from './types.js';
@@ -1396,6 +1396,122 @@ function browserHoldsFlowBinding(cookieHeader: string | undefined, flowId: strin
   return bindingJarFrom(cookieHeader)
     .filter((candidate) => candidate.id === flowId)
     .some((candidate) => digestsEqual(sha256Hex(candidate.secret), flow.bindingHash));
+}
+
+// ── Flow proof: let the AUTH SERVER refuse a lured sign-in BEFORE it happens ──
+//
+// THE RESIDUAL THIS EXISTS FOR. provider-callback already refuses to spend a
+// handoff into a flow this browser cannot prove it started, which is what denies
+// an attacker the code. But by then the victim's browser has completed a REAL
+// sign-in, so the auth server holds a session and a ledger row nobody will use.
+// That row occupies one of the account's MAX_ACTIVE_SESSIONS slots, and the auth
+// server's enforceSessionLimit evicts OLDEST-INACTIVE - so repeated lures push a
+// user's genuine older sessions out. No access is granted; the harm is that a
+// targeted user gets logged out of their real devices.
+//
+// The auth server cannot check the binding itself: it cannot read this origin's
+// cookie, and the two run on independent hostnames. So it bounces the browser
+// here instead, and this endpoint - which CAN read the cookie - returns a signed
+// statement that the browser holds the binding. No cross-origin cookie read is
+// needed anywhere.
+//
+// A lured victim never visited provider-start, holds no binding for that flow id,
+// and so cannot obtain a proof: they are turned away before authenticating, and
+// no session is ever created.
+const FLOW_PROOF_LABEL = 'oas.mcp.flow-proof.v1';
+
+/**
+ * The proof key: HMAC(handoff secret, label), NEVER the handoff secret itself.
+ *
+ * DOMAIN SEPARATION IS THE POINT. The handoff key is `sha256(secret)` and seals
+ * the AES-GCM blob carrying a real GoTrue session. Deriving the proof key through
+ * a different construction with a distinct label makes the two values unrelated,
+ * so a proof can never be opened, replayed or mistaken for a session handoff, and
+ * a signing oracle on one is not an oracle on the other.
+ *
+ * Derived rather than a second env var on purpose: both services already hold
+ * this secret, so there is nothing to provision and no rotation window in which
+ * the two sides disagree and connector sign-in breaks. The security difference is
+ * nil - both keys would live in the same two environments.
+ */
+let cachedFlowProofKey: { secret: string; key: Buffer } | null = null;
+function flowProofKey(): Buffer | null {
+  const secret = process.env.OAS_MCP_HANDOFF_SECRET || '';
+  if (!secret || secret.length < 32) return null; // fail-dark, mirroring handoffKey
+  if (!cachedFlowProofKey || cachedFlowProofKey.secret !== secret) {
+    cachedFlowProofKey = {
+      secret,
+      key: createHmac('sha256', secret).update(FLOW_PROOF_LABEL).digest(),
+    };
+  }
+  return cachedFlowProofKey.key;
+}
+
+/** The signed statement: "this browser holds the binding for <flowId>, for challenge <nonce>". */
+export function signFlowProof(flowId: string, nonce: string): string | null {
+  const key = flowProofKey();
+  if (!key) return null;
+  // Length-prefixed rather than concatenated: `a.b` from ("a", "b") and ("a.b", "")
+  // must not produce the same signed bytes, or a crafted flow id could borrow
+  // another flow's proof.
+  const message = `${flowId.length}:${flowId}.${nonce.length}:${nonce}`;
+  return createHmac('sha256', key).update(message).digest('hex');
+}
+
+const FLOW_ID_RE = /^[a-f0-9]{32}$/;
+const FLOW_NONCE_RE = /^[a-f0-9]{16,64}$/;
+
+/**
+ * GET /oauth/flow-proof?mcp_state=<flowId>&nonce=<nonce>
+ *
+ * Answers only for a browser that holds this flow's binding cookie, and redirects
+ * back to a FIXED auth-server URL taken from our own env - never a target from
+ * the query string, which would make this an open redirect wearing a proof.
+ *
+ * INERT until the auth server calls it. Shipping it first is what lets that
+ * change deploy without an ordering window in which sign-in is broken.
+ */
+export function handleFlowProof(
+  query: URLSearchParams,
+  cookieHeader?: string,
+): { status: number; headers: Record<string, string>; body: string } {
+  if (!isProviderSignInEnabled()) {
+    return {
+      status: 404,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'invalid_request', error_description: 'Provider sign-in is not enabled' }),
+    };
+  }
+
+  const flowId = query.get('mcp_state') || '';
+  const nonce = query.get('nonce') || '';
+  if (!FLOW_ID_RE.test(flowId) || !FLOW_NONCE_RE.test(nonce)) return unboundFlowPage();
+
+  const flow = providerFlows.get(flowId);
+  if (!flow || Date.now() > flow.expiresAt) {
+    providerFlows.delete(flowId);
+    return unboundFlowPage();
+  }
+
+  // THE CHECK. Everything else here is plumbing.
+  if (!browserHoldsFlowBinding(cookieHeader, flowId, flow)) return unboundFlowPage();
+
+  // NOT CONSUMED, for the reason handleProviderCallbackGet gives: the flow id
+  // travels in URLs, so any cross-site navigation made in the bound browser could
+  // reach this endpoint with the cookie attached and burn a sign-in the user is
+  // midway through. It stays spendable only by this browser, and ages out.
+  const proof = signFlowProof(flowId, nonce);
+  if (!proof) return unboundFlowPage();
+
+  const target = new URL(`${AUTH_SERVER_URL}/api/v1/oauth/start`);
+  target.searchParams.set('mcp_state', flowId);
+  target.searchParams.set('flow_nonce', nonce);
+  target.searchParams.set('flow_proof', proof);
+  return {
+    status: 302,
+    headers: { Location: target.toString(), 'Cache-Control': 'no-store' },
+    body: '',
+  };
 }
 
 /** GET /oauth/provider-start — park the MCP client's PKCE params, bounce to the auth server's BFF */

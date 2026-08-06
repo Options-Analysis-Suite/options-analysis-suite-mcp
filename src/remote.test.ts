@@ -239,6 +239,25 @@ describe('provider-flow cookie forwarding', () => {
     }
   });
 
+  test('flow-proof is wired and sees the cookie', async () => {
+    // Same gap class as the routes above: oauth.flowproof.test.ts injects the
+    // cookie directly, so dropping the dispatcher's forwarding would leave all of
+    // it green while every legitimate bounce from the auth server looked unbound -
+    // an early refusal for real users, which is worse than the bug being closed.
+    const start = await request(START);
+    const cookie = start.headers['Set-Cookie'].split(';')[0];
+    const mcpState = new URL(start.headers.Location).searchParams.get('mcp_state') as string;
+    const proofUrl = `/oauth/flow-proof?mcp_state=${mcpState}&nonce=${'b'.repeat(32)}`;
+
+    const unbound = await request(proofUrl);
+    expect(unbound.status).toBe(400);
+    expect(unbound.headers.Location).toBeUndefined();
+
+    const bound = await request(proofUrl, cookie);
+    expect(bound.status).toBe(302);
+    expect(new URL(bound.headers.Location).searchParams.get('flow_proof')).toMatch(/^[a-f0-9]{64}$/);
+  });
+
   test('provider-start carries an existing binding forward through the dispatcher', async () => {
     const first = await request(START);
     const firstCookie = first.headers['Set-Cookie'].split(';')[0];

@@ -26,6 +26,7 @@ import {
   handleAuthorizeGet,
   handleAuthorizePost,
   handleProviderStart,
+  handleFlowProof,
   handleProviderCallbackGet,
   handleProviderCallbackPost,
   handleConsentPost,
@@ -383,6 +384,16 @@ export const handleHttpRequest = async (
   // server's BFF, and accept the sealed session handoff on the way back.
   if (pathname === '/oauth/provider-start' && req.method === 'GET') {
     const result = handleProviderStart(requestUrl.searchParams, req.headers.cookie);
+    res.writeHead(result.status, result.headers);
+    res.end(result.body);
+    return;
+  }
+
+  // Flow proof: the auth server bounces the browser here so it can refuse a
+  // LURED sign-in before it happens. Only this origin can read the binding
+  // cookie. INERT until the auth server starts calling it.
+  if (pathname === '/oauth/flow-proof' && req.method === 'GET') {
+    const result = handleFlowProof(requestUrl.searchParams, req.headers.cookie);
     res.writeHead(result.status, result.headers);
     res.end(result.body);
     return;
