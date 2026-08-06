@@ -23,7 +23,7 @@ export function register(server: McpServer, client: ProxyClient): void {
       const [res, companyProfile, dividendYield] = await Promise.all([
         client.get(`/fundamentals/${upperSymbol}`),
         client.get(`/company-profile/${upperSymbol}`).catch(() => null),
-        // Trailing dividend yield from the shared /dividend-yield endpoint (ratios-ttm for
+        // Trailing dividend yield from the shared /dividend-yield endpoint (stored ratios-ttm for
         // companies, profile last_div / close for funds) - reused, not re-derived. Funds carry no
         // ratios-ttm dividendYieldTTM, so this is the only place an ETF yield surfaces here.
         client.get(`/dividend-yield/${upperSymbol}`).catch(() => null),
