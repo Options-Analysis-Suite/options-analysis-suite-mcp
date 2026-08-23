@@ -272,6 +272,17 @@ interface PendingConsent {
   expiresAt: number;
 }
 
+// PROCESS-LOCAL by design, and the flow/consent maps below with it. An
+// authorization code lives here for its 5-minute window between issuance and
+// the client's /oauth/token exchange. Two limits this map does NOT paper over:
+//   - A restart, crash, or deploy inside that 5-minute window drops every
+//     in-flight code. The client's token request then fails `invalid_grant`
+//     and it must restart the connect. Accepted as a rare event on one replica.
+//   - Scaling past one replica. Production runs ONE MCP replica today; if that
+//     changes, Railway load-balances with no session affinity and offers no
+//     sticky-session option, so a token request can land on a replica that
+//     never saw the code and fail at random. A SHARED store for these maps is
+//     the real prerequisite for horizontal scaling here.
 const authCodes = new Map<string, AuthCode>();
 const mfaFlows = new Map<string, MfaFlow>();
 const providerFlows = new Map<string, ProviderFlow>();
@@ -508,6 +519,60 @@ interface AuthorizationGrant {
   state: string;
 }
 
+// ── Connector OAuth telemetry (PII-free) ────────────────────────────────────
+//
+// Code issuance and token exchange logged NOTHING, so a connect that reached
+// our final 302 and then never came back for a token was invisible from our
+// side, which is exactly the failure a support case surfaced. These one-line
+// JSON events close that gap and change no behavior. They never carry a raw
+// code, token, email, state, verifier, or handoff blob. A code is identified
+// only by a truncated hash; grant and redirect collapse to a fixed category
+// label (see grantCategory / redirectCategory), never the request-controlled
+// string; the remaining fields are bounded too (hasState is a boolean, pkce is
+// the already-validated S256 constant, ttlSec is fixed). A `code_issued` with
+// no later `token_exchange` for the same code fingerprint is the signal that a
+// client abandoned the exchange after we handed it the code.
+function oauthFingerprint(value: string): string {
+  if (!value) return 'none';
+  return createHash('sha256').update(value).digest('hex').slice(0, 12);
+}
+
+// BOUNDED CATEGORY LABELS, never the raw value. `grant_type` and `redirect_uri`
+// on the token endpoint are request-controlled and reach the telemetry before
+// any allowlist check, so logging them verbatim could print an email, token,
+// or arbitrary string someone stuffed into the field. These collapse to a
+// fixed, finite set of labels instead.
+function grantCategory(grant: string | null): string {
+  if (grant === 'authorization_code' || grant === 'refresh_token') return grant;
+  if (!grant) return 'none';
+  return 'other';
+}
+
+function redirectCategory(uri: string): string {
+  if (!uri) return 'none';
+  let host: string;
+  try {
+    host = new URL(uri).hostname.toLowerCase();
+  } catch {
+    return 'unparseable';
+  }
+  if (host === 'chatgpt.com' || host.endsWith('.chatgpt.com') || host === 'chat.openai.com' || host.endsWith('.openai.com')) return 'chatgpt';
+  if (host === 'claude.ai' || host.endsWith('.claude.ai') || host === 'claude.com' || host.endsWith('.claude.com')) return 'claude';
+  if (host === 'localhost' || host === '127.0.0.1') return 'localhost';
+  return 'other';
+}
+
+// Best-effort: telemetry must NEVER break a request. A throwing logger or a
+// JSON.stringify failure is swallowed here rather than propagating into the
+// OAuth response path (which would strand a code or drop a valid response).
+function logOAuthEvent(event: string, fields: Record<string, string | number | boolean>): void {
+  try {
+    console.log(`[OAS MCP OAuth] ${JSON.stringify({ event, ...fields })}`);
+  } catch {
+    // ignore
+  }
+}
+
 function issueAuthorizationRedirect(input: AuthorizationGrant): { status: number; headers: Record<string, string>; body: string } {
   const code = randomBytes(32).toString('hex');
   authCodes.set(code, {
@@ -519,6 +584,15 @@ function issueAuthorizationRedirect(input: AuthorizationGrant): { status: number
     clientId: input.clientId,
     state: input.state,
     expiresAt: Date.now() + 5 * 60 * 1000,
+  });
+
+  logOAuthEvent('code_issued', {
+    code: oauthFingerprint(code),
+    client: oauthFingerprint(input.clientId),
+    redirect: redirectCategory(input.redirectUri),
+    hasState: Boolean(input.state),
+    pkce: input.codeChallengeMethod,
+    ttlSec: 300,
   });
 
   const redirectUrl = new URL(input.redirectUri);
@@ -841,7 +915,8 @@ function providerStartUrl(provider: string, p: LoginPageParams): string {
 function renderLoginPage(p: LoginPageParams, status = 200): { status: number; headers: Record<string, string>; body: string } {
   const errorHtml = p.errorMsg ? `<div class="error">${escapeHtml(p.errorMsg)}</div>\n    ` : '';
   const providersHtml = isProviderSignInEnabled()
-    ? `${SIGN_IN_PROVIDERS.map((prov) =>
+    ? `<p class="hint">Use the button for the account you signed up with. The email and password form below works only if you created a password for your account.</p>
+      ${SIGN_IN_PROVIDERS.map((prov) =>
       `<a class="provider-btn" href="${escapeHtml(providerStartUrl(prov.id, p))}">Continue with ${prov.label}</a>`).join('\n      ')}
       <div class="divider"><span>or use your email and password</span></div>
       `
@@ -869,6 +944,7 @@ function renderLoginPage(p: LoginPageParams, status = 200): { status: number; he
     .provider-btn:hover { border-color: #0d9488; }
     .divider { display: flex; align-items: center; gap: 10px; color: #64748b; font-size: 0.8rem; margin: 16px 0; }
     .divider::before, .divider::after { content: ''; flex: 1; border-top: 1px solid #334155; }
+    .hint { font-size: 0.8rem; color: #94a3b8; background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 10px 12px; margin-bottom: 16px; line-height: 1.45; }
   </style>
 </head>
 <body>
@@ -1776,11 +1852,24 @@ export async function handleTokenExchange(body: string): Promise<{ status: numbe
   const redirectUri = params.get('redirect_uri') || '';
   const clientId = params.get('client_id') || '';
 
+  // One outcome line per token POST, paired to `code_issued` by code
+  // fingerprint. See the telemetry note above issueAuthorizationRedirect.
+  const logExchange = (outcome: string) =>
+    logOAuthEvent('token_exchange', {
+      grant: grantCategory(grantType),
+      code: oauthFingerprint(code),
+      client: oauthFingerprint(clientId),
+      redirect: redirectCategory(redirectUri),
+      outcome,
+    });
+
   if (grantType === 'refresh_token') {
+    logOAuthEvent('token_exchange', { grant: 'refresh_token', client: oauthFingerprint(clientId), outcome: 'refresh_delegated' });
     return handleRefreshGrant(params);
   }
 
   if (grantType !== 'authorization_code') {
+    logExchange('unsupported_grant_type');
     return {
       status: 400,
       headers: { 'Content-Type': 'application/json' },
@@ -1791,6 +1880,7 @@ export async function handleTokenExchange(body: string): Promise<{ status: numbe
   const authCode = authCodes.get(code);
   if (!authCode || Date.now() > authCode.expiresAt) {
     authCodes.delete(code);
+    logExchange('unknown_or_expired_code');
     return {
       status: 400,
       headers: { 'Content-Type': 'application/json' },
@@ -1801,6 +1891,7 @@ export async function handleTokenExchange(body: string): Promise<{ status: numbe
   // Verify client_id matches the original authorization request
   if (clientId !== authCode.clientId) {
     authCodes.delete(code);
+    logExchange('client_mismatch');
     return {
       status: 400,
       headers: { 'Content-Type': 'application/json' },
@@ -1808,9 +1899,14 @@ export async function handleTokenExchange(body: string): Promise<{ status: numbe
     };
   }
 
-  // Verify PKCE — S256 only (code_challenge enforced at authorize time)
+  // Verify PKCE. Every authorize entry rejects a non-S256 method before a code
+  // is stored, so authCode.codeChallengeMethod is always 'S256' here. This
+  // branch is unreachable defense-in-depth, which is why pkce_method_unsupported
+  // is the one token_exchange outcome without a test: the public flow cannot
+  // mint a non-S256 code to exercise it.
   if (authCode.codeChallengeMethod !== 'S256') {
     authCodes.delete(code);
+    logExchange('pkce_method_unsupported');
     return {
       status: 400,
       headers: { 'Content-Type': 'application/json' },
@@ -1822,6 +1918,7 @@ export async function handleTokenExchange(body: string): Promise<{ status: numbe
     .digest('base64url');
   if (computedChallenge !== authCode.codeChallenge) {
     authCodes.delete(code);
+    logExchange('pkce_mismatch');
     return {
       status: 400,
       headers: { 'Content-Type': 'application/json' },
@@ -1832,6 +1929,7 @@ export async function handleTokenExchange(body: string): Promise<{ status: numbe
   // Verify redirect_uri matches the original authorization request (RFC 6749 Section 4.1.3)
   if (authCode.redirectUri && redirectUri !== authCode.redirectUri) {
     authCodes.delete(code);
+    logExchange('redirect_mismatch');
     return {
       status: 400,
       headers: { 'Content-Type': 'application/json' },
@@ -1848,6 +1946,7 @@ export async function handleTokenExchange(body: string): Promise<{ status: numbe
   try {
     accessToken = encryptToken(authCode.apiKey, expiresAt);
   } catch {
+    logExchange('encryption_unconfigured');
     return {
       status: 500,
       headers: { 'Content-Type': 'application/json' },
@@ -1867,6 +1966,7 @@ export async function handleTokenExchange(body: string): Promise<{ status: numbe
     }
   }
 
+  logExchange('success');
   return {
     status: 200,
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Pragma': 'no-cache' },

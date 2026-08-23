@@ -1081,6 +1081,22 @@ describe('OAuth page security headers', () => {
 describe('outstanding-authorization budget', () => {
   const GATEWAY_REDIRECT = 'https://smithery.run/oauth/callback';
 
+  // Each test here mints thousands of codes to fill the budget, and issuance
+  // now emits one `code_issued` telemetry line per code (see the OAuth
+  // telemetry note in oauth.ts). That is expected, but it would bury CI output,
+  // so drop only those lines for this describe; any other console.log still
+  // prints, and no test here asserts on log content.
+  let restoreConsoleLog: (() => void) | undefined;
+  beforeEach(() => {
+    const original = console.log;
+    restoreConsoleLog = () => { console.log = original; };
+    console.log = (...args: unknown[]) => {
+      if (typeof args[0] === 'string' && args[0].startsWith('[OAS MCP OAuth]')) return;
+      original(...args);
+    };
+  });
+  afterEach(() => { restoreConsoleLog?.(); restoreConsoleLog = undefined; });
+
   /** Password login that always succeeds, no second factor. */
   function mockPasswordSuccess() {
     globalThis.fetch = (async (url: string | URL | Request) => {
