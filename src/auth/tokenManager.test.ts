@@ -1,21 +1,36 @@
-import { describe, expect, test, mock, beforeEach } from 'bun:test';
+import { describe, expect, test, spyOn, beforeEach, afterAll } from 'bun:test';
 import { AuthError, SubscriptionError } from '../types.js';
+import * as authClient from './authClient.js';
+import { TokenManager } from './tokenManager.js';
 
-// We mock the entire authClient module so TokenManager exercises its real
-// orchestration logic against deterministic auth/profile responses.
+// SPIES ON THE MODULE NAMESPACE, NOT A MODULE-LEVEL MOCK.
+//
+// This file used to register a full-module replacement for './authClient.js'
+// through Bun's module-mock registry. That registry is process-global and
+// permanent, so whichever test file bun loaded AFTER this one also imported
+// the fakes: authClient.test.ts then failed all 8 of its HTTP-layer tests -
+// login() resolving without ever touching its stubbed fetch,
+// refreshAccessToken() returning this file's 'r-inactive'. Bun runs files in
+// filesystem readdir order, not sorted, so the same tree passed on one
+// machine and failed in CI.
+//
+// spyOn replaces the live export binding tokenManager.ts imported, so
+// TokenManager still runs its real orchestration against deterministic
+// responses, and mockRestore below hands the real functions back before the
+// next file loads. The default implementations the old fakes carried were
+// never observable: beforeEach resets every fake before each test, and a
+// reset spy returns undefined exactly as a reset mock() did.
 const fakes = {
-  login: mock(async () => ({ accessToken: 'tok', refreshToken: 'r', expiresAt: Date.now() + 3_600_000 })),
-  refreshAccessToken: mock(async () => ({ accessToken: 'tok2', refreshToken: 'r2', expiresAt: Date.now() + 3_600_000 })),
-  getProfile: mock(async () => ({
-    user: { isDeveloper: false, bypassSubscription: false } as any,
-    subscription: { status: 'active' } as any,
-  })),
+  login: spyOn(authClient, 'login'),
+  refreshAccessToken: spyOn(authClient, 'refreshAccessToken'),
+  getProfile: spyOn(authClient, 'getProfile'),
 };
 
-mock.module('./authClient.js', () => fakes);
-
-// Import AFTER mocking the dependency so TokenManager binds to the mock.
-const { TokenManager } = await import('./tokenManager.js');
+afterAll(() => {
+  fakes.login.mockRestore();
+  fakes.refreshAccessToken.mockRestore();
+  fakes.getProfile.mockRestore();
+});
 
 function activeProfile() {
   return {
