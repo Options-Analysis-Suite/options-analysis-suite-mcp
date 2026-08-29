@@ -291,11 +291,86 @@ const CONSENT_TTL_MS = 5 * 60 * 1000;
 const PROVIDER_FLOW_TTL_MS = 10 * 60 * 1000; // matches the auth server's flow-cookie TTL
 // provider-start is unauthenticated, so bound the map: age is bounded by the
 // TTL, cardinality by this cap (with opportunistic pruning at the limit).
-const MAX_PROVIDER_FLOWS = 5000;
+export const MAX_PROVIDER_FLOWS = 5000;
+// The global cap alone is a denial-of-service lever: one client can fill every
+// slot inside a TTL window and 503 every real sign-in until they age out. So
+// each SOURCE (the client IP the dispatcher resolves in clientSource.ts) also
+// gets its own budget of starts per TTL window, charged only to a request that
+// passed every validation gate and would actually allocate - malformed probes
+// are refused before they count. Sized for shared egress: an office or carrier
+// NAT is many people behind one address, and a start is one GET per connection
+// set up, so a budget in the tens is generous for legitimate use while an
+// attacker now needs ~170 addresses to reach the global cap instead of one.
+// (30 per 10 minutes is a judgement, not a measurement: there is no usage data
+// on connector sign-ins per shared address yet. Revisit if a NAT ever hits it.)
+export const MAX_PROVIDER_STARTS_PER_SOURCE = 30;
+// The budget map is keyed by attacker-influenced input (addresses are cheap to
+// rotate), so it is bounded by its own cap - the flow cap does NOT bound it,
+// because a completed callback consumes its flow at once while the source's
+// budget lives out the window, so budgets outlive flows. At the cap, expired
+// buckets go first, then the OLDEST live one.
+//
+// Eviction is an availability-biased trade, not a free one. Evicting a live
+// bucket hands that source a fresh budget, and a distributed attacker can
+// arrange that deliberately: exhaust one address, open a single flow from ~999
+// others, and the next new source evicts the first - a reset every ~1,000
+// flows, well inside the global cap. So the per-source figure is NOT an
+// invariant against ~1,000 cooperating addresses, and with enough churn one
+// address can hold more than its budget. What survives is the budget's
+// practical purpose: every extra budget an address regains costs ~1,000
+// cooperating addresses, which is the very pool that can fill the cap
+// directly (1,000 x 30 > 5,000) with no eviction at all - so eviction adds no
+// capability that pool did not already have. The alternative, refusing every new source
+// once the map is full, was rejected: 1,000 one-shot addresses would then deny
+// every previously unseen legitimate network for ten minutes. Sized below
+// MAX_PROVIDER_FLOWS so the bound is exercised in-suite without consuming
+// flows (oauth.providerStartBudget.test).
+export const MAX_PROVIDER_START_SOURCES = 1000;
+const providerStartBudgets = new Map<string, { count: number; windowEndsAt: number }>();
 
-// Cleanup expired auth codes every 60s
-setInterval(() => {
-  const now = Date.now();
+/**
+ * Charge one provider-start to `source`. Returns null when the start may
+ * proceed (it has been counted), or the seconds until the source's budget
+ * resets when it is spent. Called immediately before allocation and only when
+ * every gate ahead of it has passed; nothing between the charge and
+ * providerFlows.set can ordinarily fail.
+ */
+function chargeProviderStart(source: string, now: number): number | null {
+  const current = providerStartBudgets.get(source);
+  if (current && now < current.windowEndsAt) {
+    if (current.count >= MAX_PROVIDER_STARTS_PER_SOURCE) {
+      return Math.max(1, Math.ceil((current.windowEndsAt - now) / 1000));
+    }
+    current.count += 1;
+    return null;
+  }
+  // Expired (or new): delete first so Map order stays oldest-first for eviction.
+  if (current) providerStartBudgets.delete(source);
+  if (providerStartBudgets.size >= MAX_PROVIDER_START_SOURCES) {
+    for (const [key, budget] of providerStartBudgets) {
+      if (now >= budget.windowEndsAt) providerStartBudgets.delete(key);
+    }
+    if (providerStartBudgets.size >= MAX_PROVIDER_START_SOURCES) {
+      const oldest = providerStartBudgets.keys().next().value;
+      if (oldest !== undefined) providerStartBudgets.delete(oldest);
+    }
+  }
+  providerStartBudgets.set(source, { count: 1, windowEndsAt: now + PROVIDER_FLOW_TTL_MS });
+  return null;
+}
+
+/**
+ * Drop every entry of the in-memory OAuth state that has expired by `now`.
+ * Runs on the 60s interval below; exported so a test that has to allocate
+ * thousands of flows can run the SAME sweep in its afterEach with the clock
+ * advanced past every TTL, even when a test fails mid-way. Note what that
+ * means: it clears everything expired by the instant it is given, not only
+ * what the caller allocated - fine in a sequential test process, unsafe if
+ * tests ever share these maps concurrently.
+ *
+ * @internal Maintenance only; not routed externally.
+ */
+export function sweepExpiredOAuthState(now: number = Date.now()): void {
   for (const [code, data] of authCodes) {
     if (now > data.expiresAt) authCodes.delete(code);
   }
@@ -305,10 +380,16 @@ setInterval(() => {
   for (const [id, data] of providerFlows) {
     if (now > data.expiresAt) providerFlows.delete(id);
   }
+  for (const [source, budget] of providerStartBudgets) {
+    if (now >= budget.windowEndsAt) providerStartBudgets.delete(source);
+  }
   for (const [id, data] of pendingConsents) {
     if (now > data.expiresAt) pendingConsents.delete(id);
   }
-}, 60_000);
+}
+
+// Cleanup expired auth codes every 60s
+setInterval(() => sweepExpiredOAuthState(), 60_000);
 
 /** Resolve an OAuth Bearer token to an API key (base64 email:password) */
 export function resolveOAuthToken(token: string): string | null {
@@ -709,6 +790,21 @@ function budgetExhaustedPage(): { status: number; headers: Record<string, string
       503,
     ),
     headers: { ...htmlPageHeaders(), 'Retry-After': '60' },
+  };
+}
+
+/**
+ * The 429 a source over its provider-start budget receives. Retryable: the
+ * budget resets with the window, and Retry-After says when.
+ */
+function startBudgetExhaustedPage(retryAfterSeconds: number): { status: number; headers: Record<string, string>; body: string } {
+  return {
+    ...noticePage(
+      'Too many sign-in attempts',
+      'Too many sign-ins were started from your network in the last few minutes. Wait a few minutes and start the connection again from your AI client.',
+      429,
+    ),
+    headers: { ...htmlPageHeaders(), 'Retry-After': String(retryAfterSeconds) },
   };
 }
 
@@ -1594,6 +1690,7 @@ export function handleFlowProof(
 export function handleProviderStart(
   query: URLSearchParams,
   cookieHeader?: string,
+  source?: string,
 ): { status: number; headers: Record<string, string>; body: string } {
   if (!isProviderSignInEnabled()) {
     return {
@@ -1634,6 +1731,16 @@ export function handleProviderStart(
         body: JSON.stringify({ error: 'temporarily_unavailable', error_description: 'Too many sign-in attempts in progress. Try again shortly.' }),
       };
     }
+  }
+
+  // Per-source budget, charged only now that every gate above has passed AND
+  // the global cap has room, i.e. this request allocates. A start refused with
+  // the 503 above costs its source nothing. `source` is the dispatcher's client
+  // identity (clientSource.ts); remote.ts always supplies one. A direct caller
+  // that passes none is not budgeted - that is the seam the unit tests use.
+  if (source !== undefined) {
+    const retryAfter = chargeProviderStart(source, Date.now());
+    if (retryAfter !== null) return startBudgetExhaustedPage(retryAfter);
   }
 
   const flowId = randomBytes(16).toString('hex');

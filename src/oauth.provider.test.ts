@@ -14,6 +14,7 @@ import {
   handleAuthorizePost,
   handleAuthServerMetadata,
   handleProviderStart,
+  MAX_PROVIDER_STARTS_PER_SOURCE,
   handleProviderCallbackGet,
   handleProviderCallbackPost,
   handleConsentPost,
@@ -178,6 +179,65 @@ describe('provider-start', () => {
     expect(handleProviderStart(providerStartQuery({ redirect_uri: 'https://evil.com/cb' })).status).toBe(400);
     expect(handleProviderStart(providerStartQuery({ code_challenge: '' })).status).toBe(400);
     expect(handleProviderStart(providerStartQuery({ code_challenge_method: 'plain' })).status).toBe(400);
+  });
+});
+
+describe('provider-start per-source budget', () => {
+  afterEach(() => setSystemTime());
+  const freshSource = () => `src-${randomBytes(6).toString('hex')}`;
+
+  test('one source gets MAX starts per window; the next is refused without allocating a flow', () => {
+    const source = freshSource();
+    for (let i = 0; i < MAX_PROVIDER_STARTS_PER_SOURCE; i++) {
+      expect(handleProviderStart(providerStartQuery({ state: `s-${i}` }), undefined, source).status).toBe(302);
+    }
+    const refused = handleProviderStart(providerStartQuery(), undefined, source);
+    expect(refused.status).toBe(429);
+    expect(Number(refused.headers['Retry-After'])).toBeGreaterThan(0);
+    expect(refused.headers['Content-Type']).toContain('text/html');
+    // Nothing was parked and no binding was issued: the refusal is free.
+    expect(refused.headers['Set-Cookie']).toBeUndefined();
+    expect(refused.headers.Location).toBeUndefined();
+  });
+
+  test('another source is untouched by an exhausted one', () => {
+    const spent = freshSource();
+    for (let i = 0; i <= MAX_PROVIDER_STARTS_PER_SOURCE; i++) handleProviderStart(providerStartQuery(), undefined, spent);
+    expect(handleProviderStart(providerStartQuery(), undefined, spent).status).toBe(429);
+    expect(handleProviderStart(providerStartQuery(), undefined, freshSource()).status).toBe(302);
+  });
+
+  test('malformed starts are refused before they are charged', () => {
+    const source = freshSource();
+    for (let i = 0; i <= MAX_PROVIDER_STARTS_PER_SOURCE; i++) {
+      expect(handleProviderStart(providerStartQuery({ provider: 'facebook' }), undefined, source).status).toBe(400);
+    }
+    // The full budget is still available to a well-formed start.
+    for (let i = 0; i < MAX_PROVIDER_STARTS_PER_SOURCE; i++) {
+      expect(handleProviderStart(providerStartQuery(), undefined, source).status).toBe(302);
+    }
+    expect(handleProviderStart(providerStartQuery(), undefined, source).status).toBe(429);
+  });
+
+  test('the budget resets once its window has elapsed', () => {
+    const source = freshSource();
+    const startedAt = Date.now();
+    setSystemTime(new Date(startedAt));
+    for (let i = 0; i < MAX_PROVIDER_STARTS_PER_SOURCE; i++) handleProviderStart(providerStartQuery(), undefined, source);
+    expect(handleProviderStart(providerStartQuery(), undefined, source).status).toBe(429);
+    // Just short of the window: still refused, and Retry-After has shrunk to match.
+    setSystemTime(new Date(startedAt + 10 * 60 * 1000 - 1000));
+    const late = handleProviderStart(providerStartQuery(), undefined, source);
+    expect(late.status).toBe(429);
+    expect(Number(late.headers['Retry-After'])).toBe(1);
+    setSystemTime(new Date(startedAt + 10 * 60 * 1000 + 1));
+    expect(handleProviderStart(providerStartQuery(), undefined, source).status).toBe(302);
+  });
+
+  test('a direct caller that supplies no source is not budgeted (the dispatcher always supplies one)', () => {
+    for (let i = 0; i <= MAX_PROVIDER_STARTS_PER_SOURCE; i++) {
+      expect(handleProviderStart(providerStartQuery()).status).toBe(302);
+    }
   });
 });
 

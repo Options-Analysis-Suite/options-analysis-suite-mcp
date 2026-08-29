@@ -18,6 +18,7 @@ import {
   getMcpIconBytes,
 } from './branding.js';
 import { AuthError, SubscriptionError } from './types.js';
+import { resolveRequestSource } from './clientSource.js';
 import {
   OAUTH_ACCESS_TOKEN_PREFIX,
   resolveOAuthToken,
@@ -38,6 +39,13 @@ const PROXY_URL = process.env.OAS_PROXY_URL || 'https://proxy.optionsanalysissui
 const AUTH_SERVER_URL = process.env.OAS_AUTH_SERVER_URL || 'https://api.optionsanalysissuite.com';
 const PUBLIC_BASE_URL = process.env.OAS_MCP_BASE_URL || 'https://mcp.optionsanalysissuite.com';
 const PORT = parseInt(process.env.PORT || '8080', 10);
+
+// The provider-start budget is keyed by x-real-ip (what Railway's edge sets).
+// When that header is absent OR malformed the identity falls back to the
+// socket peer, which behind an edge proxy is the proxy itself - every user in
+// one bucket. That is a loud failure for users but invisible to the operator
+// unless something says so; this says so once per process.
+let warnedProviderStartFallback = false;
 
 /** WWW-Authenticate challenge header for OAuth discovery */
 function wwwAuthChallenge(error?: string): string {
@@ -383,7 +391,12 @@ export const handleHttpRequest = async (
   // Provider sign-in: park the client's PKCE params, bounce through the auth
   // server's BFF, and accept the sealed session handoff on the way back.
   if (pathname === '/oauth/provider-start' && req.method === 'GET') {
-    const result = handleProviderStart(requestUrl.searchParams, req.headers.cookie);
+    const { source, from } = resolveRequestSource(req.headers, req.socket?.remoteAddress);
+    if ((from === 'socket' || from === 'unknown') && !warnedProviderStartFallback) {
+      warnedProviderStartFallback = true;
+      console.warn(`[MCP OAuth] provider-start has no trusted client address (x-real-ip absent or invalid); budgeting by ${from}, which behind an edge proxy is one bucket for everyone`);
+    }
+    const result = handleProviderStart(requestUrl.searchParams, req.headers.cookie, source);
     res.writeHead(result.status, result.headers);
     res.end(result.body);
     return;

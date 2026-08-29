@@ -130,8 +130,9 @@ describe('provider-flow cookie forwarding', () => {
     url: string,
     cookie?: string,
     postBody?: string,
+    extraHeaders: Record<string, string> = {},
   ): Promise<{ status: number; headers: Record<string, string>; body: string }> {
-    const reqHeaders: Record<string, string> = cookie ? { cookie } : {};
+    const reqHeaders: Record<string, string> = { ...extraHeaders, ...(cookie ? { cookie } : {}) };
     const req = (postBody === undefined
       ? { url, method: 'GET', headers: reqHeaders }
       : Object.assign(Readable.from([Buffer.from(postBody)]), { url, method: 'POST', headers: reqHeaders })
@@ -256,6 +257,22 @@ describe('provider-flow cookie forwarding', () => {
     const bound = await request(proofUrl, cookie);
     expect(bound.status).toBe(302);
     expect(new URL(bound.headers.Location).searchParams.get('flow_proof')).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  test('provider-start is budgeted per x-real-ip through the dispatcher, and a client header cannot reset it', async () => {
+    const from = (ip: string, extra: Record<string, string> = {}) =>
+      request(START, undefined, undefined, { 'x-real-ip': ip, ...extra });
+    for (let i = 0; i < 30; i++) expect((await from('203.0.113.10')).status).toBe(302);
+    const refused = await from('203.0.113.10');
+    expect(refused.status).toBe(429);
+    expect(Number(refused.headers['Retry-After'])).toBeGreaterThan(0);
+    expect(refused.headers['Set-Cookie']).toBeUndefined();
+    expect(refused.headers.Location).toBeUndefined();
+    // A different address is untouched.
+    expect((await from('203.0.113.11')).status).toBe(302);
+    // x-forwarded-for is client-writable and untrusted by default: prepending a
+    // fresh address does not buy a fresh budget.
+    expect((await from('203.0.113.10', { 'x-forwarded-for': '198.51.100.1' })).status).toBe(429);
   });
 
   test('provider-start carries an existing binding forward through the dispatcher', async () => {
