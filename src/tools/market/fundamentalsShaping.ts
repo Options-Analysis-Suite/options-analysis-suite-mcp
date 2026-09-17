@@ -175,7 +175,12 @@ function summarizeCompanyProfile(profile: unknown): Record<string, unknown> | un
  */
 function extractEndpointDividendYield(info: unknown): number | undefined {
   if (info == null || typeof info !== 'object') return undefined;
-  const raw = (info as { dividendYield?: unknown }).dividendYield;
+  // New responses separate the observation from permission to price with it.
+  // Presence matters: an explicit null observation must not resurrect an older
+  // pricing field. Retain compatibility with endpoints predating the split.
+  const data = info as Record<string, unknown>;
+  const raw = Object.prototype.hasOwnProperty.call(data, 'observedYield')
+    ? data.observedYield : data.dividendYield;
   if (raw == null) return undefined;
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? n : undefined;

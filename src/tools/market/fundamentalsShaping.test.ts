@@ -231,3 +231,16 @@ describe('summarizeFundamentals', () => {
     expect(summary.ratios_ttm.dividendYieldTTM).toBeUndefined();
   });
 });
+
+
+describe('reported dividend yield is independent of pricing eligibility', () => {
+  test.each([
+    [{ dividendYield: null, observedYield: 1.853678 }, 1.8537],
+    [{ dividendYield: null, observedYield: 0 }, 0],
+    [{ dividendYield: 0.04, observedYield: null }, undefined],
+    [{ dividendYield: 0.04 }, 0.04],
+  ])('preserves endpoint observation %j', (info, expected) => {
+    const out = summarizeFundamentals({ symbol: 'FUND', ratios_ttm: {}, key_metrics_ttm: {} }, null, info) as any;
+    expect(out.ratios_ttm.dividendYieldTTM).toBe(expected);
+  });
+});
