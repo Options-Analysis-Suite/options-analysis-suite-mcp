@@ -9,7 +9,7 @@
  * 5. We return a self-contained encrypted access token
  * 6. ChatGPT sends Bearer <token> on MCP requests
  *
- * OAuth tokens are stateless — the API key and expiry are encrypted into the
+ * OAuth tokens are stateless - the API key and expiry are encrypted into the
  * token itself using AES-256-GCM with OAS_TOKEN_SECRET. This means tokens
  * survive server restarts and deploys without requiring persistent storage.
  */
@@ -33,7 +33,7 @@ function tokenKey(): Buffer | null {
   return cachedTokenKey.key;
 }
 
-// Allowed redirect URIs — exact origin+path
+// Allowed redirect URIs - exact origin+path
 const ALLOWED_REDIRECTS = [
   // ChatGPT/OpenAI callback endpoints
   'https://chatgpt.com/aip/oauth/callback',
@@ -46,7 +46,7 @@ const ALLOWED_REDIRECTS = [
   'https://www.perplexity.ai/rest/connections/oauth_callback',
   // Grok / x.ai remote MCP connectors (trailing slash is part of the path)
   'https://grok.com/connectors-oauth-exchange-code/',
-  // Smithery gateway. INTENTIONAL — DO NOT REMOVE.
+  // Smithery gateway. INTENTIONAL - DO NOT REMOVE.
   // Smithery (smithery.ai) is a curated MCP marketplace whose gateway uses a
   // single shared callback URL for every server it hosts. Removing this entry
   // breaks the live Smithery listing for this MCP.
@@ -204,7 +204,7 @@ function oauthCredentialExpiresAt(credential: string): number {
   return Date.now() + TOKEN_TTL_MS;
 }
 
-// --- In-memory stores (auth codes only — tokens are stateless) ---
+// --- In-memory stores (auth codes only - tokens are stateless) ---
 
 interface AuthCode {
   apiKey: string;
@@ -423,7 +423,7 @@ function isRedirectAllowed(uri: string): boolean {
   }
 }
 
-/** Get the server's base URL — prefer configured env var over request host */
+/** Get the server's base URL - prefer configured env var over request host */
 function getBaseUrl(host: string | undefined): string {
   const configured = process.env.OAS_MCP_BASE_URL;
   if (configured) return configured;
@@ -579,6 +579,46 @@ function hasActiveSubscription(accessToken: string): Promise<boolean> {
  * and form targets, and a leaked flow id is the premise of the attack this file
  * exists to stop; no-referrer keeps them out of other origins' logs.
  */
+/**
+ * One stylesheet for every page this module renders (sign-in, MFA step-up,
+ * connection consent, notices): the web app's sign-in card on the light site
+ * palette - white card on the blue-tinted background, the Contact field kit,
+ * the CTA gradient button, #3568a8 focus ring. Inlined into each page (CSP
+ * allows inline style and nothing external). server/src/routes/oauthRoutes.ts
+ * carries a lockstep copy for the /mcp/finish interstitial.
+ */
+const PAGE_STYLE = `
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: radial-gradient(1200px 600px at 50% -10%, rgba(59, 130, 246, 0.07) 0%, transparent 60%), linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%); color: #111827; display: flex; justify-content: center; align-items: flex-start; min-height: 100vh; padding: 48px 16px; line-height: 1.5; }
+    .card { width: 100%; max-width: 440px; padding: 32px 32px 28px; background: linear-gradient(165deg, #ffffff 0%, #fbfcfd 100%); border: 1px solid rgba(59, 130, 246, 0.12); border-radius: 14px; box-shadow: 0 1px 2px -1px rgba(15, 23, 42, 0.04), 0 8px 24px -12px rgba(15, 23, 42, 0.08); }
+    .brand { font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #6b7280; margin-bottom: 12px; }
+    h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1.25; color: #111827; margin-bottom: 8px; }
+    p, .subtitle { font-size: 0.95rem; color: #6b7280; line-height: 1.5; margin-bottom: 20px; }
+    p:last-child { margin-bottom: 0; }
+    .dest { color: #111827; font-weight: 600; }
+    label { display: block; font-size: 13px; font-weight: 500; color: #374151; margin-bottom: 6px; }
+    input[type="email"], input[type="password"], input[type="text"], select { width: 100%; padding: 11px 14px; border: 1px solid #d1d5db; border-radius: 8px; background: #ffffff; color: #1f2937; font-size: 14px; line-height: 1.4; margin-bottom: 14px; }
+    input::placeholder { color: #9ca3af; }
+    input:focus, select:focus { outline: none; border-color: #3568a8; box-shadow: 0 0 0 3px rgba(53, 104, 168, 0.15); }
+    #mfa_code, #mfacode { text-align: center; font-size: 1.5rem; letter-spacing: 0.35em; font-variant-numeric: tabular-nums; padding: 12px 14px; }
+    button { width: 100%; min-height: 44px; padding: 12px 18px; border: 0; border-radius: 8px; background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); color: #ffffff; font-size: 14px; font-weight: 600; cursor: pointer; }
+    button:hover { opacity: 0.9; }
+    .row { display: flex; gap: 10px; }
+    .row button { flex: 1; }
+    .cancel { background: #ffffff; color: #1f2937; border: 1px solid #d1d5db; }
+    .cancel:hover { opacity: 1; background: #f8fafc; border-color: #3568a8; }
+    .error { padding: 10px 12px; margin-bottom: 14px; background: #fef2f2; border: 1px solid #fca5a5; border-radius: 8px; color: #991b1b; font-size: 0.85rem; line-height: 1.45; }
+    .error-text { color: #b91c1c; font-size: 0.85rem; margin: -6px 0 12px; }
+    .warn { padding: 10px 12px; margin-bottom: 18px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; color: #856404; font-size: 0.85rem; line-height: 1.5; }
+    .hint { padding: 10px 12px; margin-bottom: 14px; background: rgba(59, 130, 246, 0.04); border: 1px solid rgba(59, 130, 246, 0.18); border-radius: 8px; color: #4b5563; font-size: 0.85rem; line-height: 1.5; }
+    .provider-btn { display: block; min-height: 44px; padding: 11px 16px; margin-bottom: 10px; border: 1px solid #d1d5db; border-radius: 8px; background: #ffffff; color: #1f2937; font-size: 14px; font-weight: 600; text-align: center; text-decoration: none; }
+    .provider-btn:hover { background: #f8fafc; border-color: #3568a8; }
+    .divider { display: flex; align-items: center; gap: 10px; margin: 16px 0; color: #6b7280; font-size: 0.8rem; }
+    .divider::before, .divider::after { content: ''; flex: 1; border-top: 1px solid #e5e7eb; }
+    .mfa { margin-top: 20px; }
+    @media (max-width: 480px) { body { padding: 24px 12px; } .card { padding: 24px 20px 22px; border-radius: 12px; } h1 { font-size: 1.35rem; } }
+`;
+
 function htmlPageHeaders(): Record<string, string> {
   return {
     'Content-Type': 'text/html',
@@ -877,7 +917,7 @@ function issueAuthorizationOrConsent(
   };
 }
 
-/** POST /oauth/consent — the user's answer to the confirmation above. */
+/** POST /oauth/consent - the user's answer to the confirmation above. */
 export function handleConsentPost(
   body: string,
   cookieHeader?: string,
@@ -915,25 +955,12 @@ function consentPage(consentId: string, destinationHost: string): { status: numb
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Options Analysis Suite — Confirm connection</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-    .card { background: #1e293b; border-radius: 12px; padding: 40px; max-width: 420px; width: 100%; box-shadow: 0 4px 24px rgba(0,0,0,0.3); }
-    h1 { font-size: 1.4rem; margin-bottom: 8px; color: #f8fafc; }
-    p { font-size: 0.9rem; color: #94a3b8; line-height: 1.5; margin-bottom: 16px; }
-    .dest { color: #f8fafc; font-weight: 600; }
-    .warn { background: #78350f; color: #fcd34d; padding: 10px; border-radius: 6px; font-size: 0.85rem; margin-bottom: 20px; }
-    .row { display: flex; gap: 10px; }
-    button { flex: 1; padding: 12px; border-radius: 6px; border: none; font-size: 0.95rem; font-weight: 600; cursor: pointer; }
-    .approve { background: #0d9488; color: #fff; }
-    .cancel { background: #0f172a; color: #e2e8f0; border: 1px solid #334155; }
-    .logo { font-size: 1.8rem; margin-bottom: 16px; }
-  </style>
+  <title>Options Analysis Suite - Confirm connection</title>
+  <style>${PAGE_STYLE}</style>
 </head>
 <body>
   <div class="card">
-    <div class="logo">&#10022;</div>
+    <p class="brand">Options Analysis Suite</p>
     <h1>Confirm this connection</h1>
     <p>You are about to give <span class="dest">${escapeHtml(destinationHost)}</span> access to your Options Analysis Suite account.</p>
     <div class="warn">Only continue if you started this yourself from ${escapeHtml(destinationHost)}. If you arrived here from a link someone sent you, cancel.</div>
@@ -1022,30 +1049,11 @@ function renderLoginPage(p: LoginPageParams, status = 200): { status: number; he
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Options Analysis Suite — Sign In</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-    .card { background: #1e293b; border-radius: 12px; padding: 40px; max-width: 400px; width: 100%; box-shadow: 0 4px 24px rgba(0,0,0,0.3); }
-    h1 { font-size: 1.4rem; margin-bottom: 8px; color: #f8fafc; }
-    .subtitle { font-size: 0.85rem; color: #94a3b8; margin-bottom: 24px; }
-    label { display: block; font-size: 0.85rem; color: #94a3b8; margin-bottom: 4px; }
-    input[type="email"], input[type="password"] { width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; font-size: 0.95rem; margin-bottom: 16px; }
-    input:focus { outline: none; border-color: #0d9488; }
-    button { width: 100%; padding: 12px; border-radius: 6px; border: none; background: #0d9488; color: #fff; font-size: 1rem; font-weight: 600; cursor: pointer; }
-    button:hover { background: #0f766e; }
-    .error { background: #7f1d1d; color: #fca5a5; padding: 10px; border-radius: 6px; margin-bottom: 16px; font-size: 0.85rem; }
-    .logo { font-size: 1.8rem; margin-bottom: 16px; }
-    .provider-btn { display: block; text-align: center; padding: 10px 12px; border: 1px solid #334155; border-radius: 6px; background: #0f172a; color: #e2e8f0; text-decoration: none; font-size: 0.95rem; margin-bottom: 10px; }
-    .provider-btn:hover { border-color: #0d9488; }
-    .divider { display: flex; align-items: center; gap: 10px; color: #64748b; font-size: 0.8rem; margin: 16px 0; }
-    .divider::before, .divider::after { content: ''; flex: 1; border-top: 1px solid #334155; }
-    .hint { font-size: 0.8rem; color: #94a3b8; background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 10px 12px; margin-bottom: 16px; line-height: 1.45; }
-  </style>
+  <title>Options Analysis Suite - Sign In</title>
+  <style>${PAGE_STYLE}</style>
 </head>
 <body>
   <div class="card">
-    <div class="logo">&#10022;</div>
     <h1>Options Analysis Suite</h1>
     <p class="subtitle">Sign in to connect your account to ChatGPT</p>
     ${errorHtml}${providersHtml}<form method="POST" action="/oauth/authorize">
@@ -1067,7 +1075,7 @@ function renderLoginPage(p: LoginPageParams, status = 200): { status: number; he
   return { status, headers: htmlPageHeaders(), body: html };
 }
 
-/** GET /oauth/authorize — render login page */
+/** GET /oauth/authorize - render login page */
 export function handleAuthorizeGet(query: URLSearchParams): { status: number; headers: Record<string, string>; body: string } {
   const clientId = query.get('client_id') || '';
   const redirectUri = query.get('redirect_uri') || '';
@@ -1106,25 +1114,12 @@ function renderMfaForm(flowId: string, flow: MfaFlow, errorMsg = ''): { status: 
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Options Analysis Suite — Two-Factor Verification</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-    .card { background: #1e293b; border-radius: 12px; padding: 40px; max-width: 400px; width: 100%; box-shadow: 0 4px 24px rgba(0,0,0,0.3); }
-    h1 { font-size: 1.4rem; margin-bottom: 8px; color: #f8fafc; }
-    .subtitle { font-size: 0.85rem; color: #94a3b8; margin-bottom: 24px; line-height: 1.4; }
-    label { display: block; font-size: 0.85rem; color: #94a3b8; margin-bottom: 4px; }
-    input[type="text"] { width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; font-size: 0.95rem; margin-bottom: 16px; letter-spacing: 0.08em; }
-    input:focus { outline: none; border-color: #0d9488; }
-    button { width: 100%; padding: 12px; border-radius: 6px; border: none; background: #0d9488; color: #fff; font-size: 1rem; font-weight: 600; cursor: pointer; }
-    button:hover { background: #0f766e; }
-    .error { background: #7f1d1d; color: #fca5a5; padding: 10px; border-radius: 6px; margin-bottom: 16px; font-size: 0.85rem; }
-    .logo { font-size: 1.8rem; margin-bottom: 16px; }
-  </style>
+  <title>Options Analysis Suite - Two-Factor Verification</title>
+  <style>${PAGE_STYLE}</style>
 </head>
 <body>
   <div class="card">
-    <div class="logo">&#10022;</div>
+    <p class="brand">Options Analysis Suite</p>
     <h1>Two-factor verification</h1>
     <p class="subtitle">Enter the code from your authenticator app to finish connecting Options Analysis Suite.</p>
     ${errorHtml}
@@ -1145,7 +1140,7 @@ function renderMfaForm(flowId: string, flow: MfaFlow, errorMsg = ''): { status: 
   return { status: 200, headers: htmlPageHeaders(), body: html };
 }
 
-/** POST /oauth/authorize — validate credentials, issue code, redirect */
+/** POST /oauth/authorize - validate credentials, issue code, redirect */
 export async function handleAuthorizePost(
   body: string,
   cookieHeader?: string,
@@ -1171,7 +1166,7 @@ export async function handleAuthorizePost(
     };
   }
 
-  // PKCE is required — reject requests without a code challenge
+  // PKCE is required - reject requests without a code challenge
   if (!codeChallenge) {
     return {
       status: 400,
@@ -1180,7 +1175,7 @@ export async function handleAuthorizePost(
     };
   }
 
-  // Only S256 is supported — reject early before credential validation
+  // Only S256 is supported - reject early before credential validation
   if (codeChallengeMethod !== 'S256') {
     return {
       status: 400,
@@ -1323,19 +1318,12 @@ function noticePage(heading: string, message: string, status = 400): { status: n
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Options Analysis Suite — Sign In</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-    .card { background: #1e293b; border-radius: 12px; padding: 40px; max-width: 400px; width: 100%; box-shadow: 0 4px 24px rgba(0,0,0,0.3); }
-    h1 { font-size: 1.4rem; margin-bottom: 8px; color: #f8fafc; }
-    p { font-size: 0.9rem; color: #94a3b8; line-height: 1.5; }
-    .logo { font-size: 1.8rem; margin-bottom: 16px; }
-  </style>
+  <title>Options Analysis Suite - Sign In</title>
+  <style>${PAGE_STYLE}</style>
 </head>
 <body>
   <div class="card">
-    <div class="logo">&#10022;</div>
+    <p class="brand">Options Analysis Suite</p>
     <h1>${escapeHtml(heading)}</h1>
     <p>${escapeHtml(message)}</p>
   </div>
@@ -1686,7 +1674,7 @@ export function handleFlowProof(
   };
 }
 
-/** GET /oauth/provider-start — park the MCP client's PKCE params, bounce to the auth server's BFF */
+/** GET /oauth/provider-start - park the MCP client's PKCE params, bounce to the auth server's BFF */
 export function handleProviderStart(
   query: URLSearchParams,
   cookieHeader?: string,
@@ -1776,7 +1764,7 @@ export function handleProviderStart(
   };
 }
 
-/** GET /oauth/provider-callback — error bounce from the auth server (no tokens) */
+/** GET /oauth/provider-callback - error bounce from the auth server (no tokens) */
 export function handleProviderCallbackGet(
   query: URLSearchParams,
   cookieHeader?: string,
@@ -1803,7 +1791,7 @@ export function handleProviderCallbackGet(
   return renderLoginPage({ ...loginParamsFor(flow), errorMsg });
 }
 
-/** POST /oauth/provider-callback — auth server's interstitial posts the sealed session handoff */
+/** POST /oauth/provider-callback - auth server's interstitial posts the sealed session handoff */
 export async function handleProviderCallbackPost(
   body: string,
   cookieHeader?: string,
@@ -1874,7 +1862,7 @@ function mintRefreshToken(clientId: string, gotrueRefreshToken: string): string 
 }
 
 /**
- * grant_type=refresh_token — unwrap the GoTrue refresh token and rotate it via
+ * grant_type=refresh_token - unwrap the GoTrue refresh token and rotate it via
  * the auth server's /oauth/refresh (which owns GoTrue rotation AND keeps the
  * session-ledger row in sync). Returns a fresh bearer + a re-wrapped refresh
  * token holding the rotated GoTrue token. Failures split by cause: a REJECTED
@@ -1950,7 +1938,7 @@ async function handleRefreshGrant(params: URLSearchParams): Promise<{ status: nu
   }
 }
 
-/** POST /oauth/token — exchange code (or refresh token) for an access token */
+/** POST /oauth/token - exchange code (or refresh token) for an access token */
 export async function handleTokenExchange(body: string): Promise<{ status: number; headers: Record<string, string>; body: string }> {
   const params = new URLSearchParams(body);
   const grantType = params.get('grant_type');
@@ -2090,7 +2078,7 @@ export async function handleTokenExchange(body: string): Promise<{ status: numbe
   };
 }
 
-/** POST /oauth/register — Dynamic Client Registration (RFC 7591) */
+/** POST /oauth/register - Dynamic Client Registration (RFC 7591) */
 export function handleClientRegistration(body: string): { status: number; headers: Record<string, string>; body: string } {
   try {
     const req = JSON.parse(body);
@@ -2130,7 +2118,7 @@ export function handleClientRegistration(body: string): { status: number; header
     // gates the actually-used redirect_uri against ALLOWED_REDIRECTS, so this is
     // safe defense-in-depth. Only insecure http:// (non-loopback) is rejected.
     //
-    // DO NOT tighten this to isRedirectAllowed() — that breaks Cursor, which
+    // DO NOT tighten this to isRedirectAllowed() - that breaks Cursor, which
     // sends both its HTTPS callback AND a `cursor://` custom scheme in a single
     // DCR payload. Rejecting the registration on the custom scheme rejects the
     // whole client. The authorization-time allowlist check is the real gate.
