@@ -11,9 +11,60 @@ export interface AccessTokenProvider {
   getAccessToken(): Promise<string>;
 }
 
+/** What a 401 from the proxy means, for both clients that talk to it. */
+export const AUTH_EXPIRED_MESSAGE = 'Authentication expired. Please restart the MCP extension to re-authenticate.';
+
+export interface UnauthorizedMeaning {
+  /** The proxy's structured code, when the 401 was not the bearer being refused. */
+  code?: 'mfa_required' | 'mfa_check_unavailable';
+  message: string;
+  retryable: boolean;
+}
+
+/**
+ * ONE reading of the proxy's 401, for both clients.
+ *
+ * The proxy answers 401 for three things, and only one of them is fixed by
+ * re-authenticating. A bearer that was refused (missing, expired, revoked)
+ * carries no code. Two structured codes come from enforceAal2 in
+ * proxy/lib/middleware.ts on a VALID session: `mfa_required`, when the
+ * account has a verified factor and this session never completed the TOTP
+ * step-up, and `mfa_check_unavailable`, when the factor lookup itself failed
+ * (it fails closed). Telling either of those users their session expired sends
+ * them to restart the extension, which changes nothing for the first and
+ * hides an outage for the second.
+ */
+export function interpretUnauthorized(body: unknown): UnauthorizedMeaning {
+  const code = body && typeof body === 'object' && typeof (body as { code?: unknown }).code === 'string'
+    ? (body as { code: string }).code : undefined;
+  if (code === 'mfa_required') {
+    return {
+      code,
+      retryable: false,
+      message: 'Multi-factor authentication is required for this account, and this session has not completed the TOTP step-up. '
+        + 'Re-authorize the Options Analysis Suite connection to complete it; retrying the call without that will not succeed.',
+    };
+  }
+  if (code === 'mfa_check_unavailable') {
+    return {
+      code,
+      retryable: true,
+      message: 'The proxy could not verify this account\'s MFA status; the check is temporarily unavailable. '
+        + 'The session itself was accepted. This may be retried.',
+    };
+  }
+  return { retryable: false, message: AUTH_EXPIRED_MESSAGE };
+}
+
+/** The error body, or null when there is none or it is not JSON. */
+async function errorBody(response: Response): Promise<unknown> {
+  try { return await response.json(); } catch { return null; }
+}
+
 export class ProxyClient {
   constructor(
-    private proxyUrl: string,
+    /** Readable so a second client can be built against the SAME backend. */
+    readonly proxyUrl: string,
     private tokenManager: AccessTokenProvider,
   ) {}
 
@@ -92,7 +143,9 @@ export class ProxyClient {
     const status = response.status;
 
     if (status === 401) {
-      throw new AuthError('Authentication expired. Please restart the MCP extension to re-authenticate.');
+      // Text only: this client has no structured error class, so `retryable`
+      // travels in the words. LiveApiClient carries the same reading as a code.
+      throw new AuthError(interpretUnauthorized(await errorBody(response)).message);
     }
 
     if (status === 403) {

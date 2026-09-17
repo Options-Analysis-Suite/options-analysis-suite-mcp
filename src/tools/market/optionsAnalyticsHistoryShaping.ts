@@ -65,6 +65,38 @@ function getPointArrayKey(response: OptionsAnalyticsPayload): 'data' | 'history'
   return null;
 }
 
+/**
+ * option_ticker_snapshots.expected_move_pct is iv * sqrt(30 / 365): a decimal
+ * FRACTION of spot over 30 calendar days despite the column name. Stated once
+ * and attached to every response shape this tool can return.
+ */
+export const OPTIONS_ANALYTICS_UNITS = {
+  expectedMove30dFraction: 'decimal fraction of spot over the next 30 calendar days (0.018 = 1.8%); '
+    + 'expected_move_30d_fraction on each point, avgExpectedMove30dFraction and maxExpectedMove30dFraction in summary',
+} as const;
+
+/**
+ * Rename the column on every point and attach the units, for the response
+ * paths that do NOT go through summarizeOptionsAnalyticsHistory: the `full`
+ * path and the ordinary short window (90 rows or fewer). A first fix renamed
+ * the field only in the summary, so a 30-day request - the default - still
+ * published 0.018 under a name ending in "pct". Everything else on the row
+ * and on the payload is passed through as the proxy sent it.
+ */
+export function labelOptionsAnalyticsHistory<T>(payload: T): T {
+  if (payload == null || typeof payload !== 'object' || Array.isArray(payload)) return payload;
+  const response = payload as OptionsAnalyticsPayload;
+  const key = getPointArrayKey(response);
+  if (!key) return payload;
+  const rows = (response[key] as unknown[]).map((row) => {
+    if (row == null || typeof row !== 'object' || Array.isArray(row)) return row;
+    if (!('expected_move_pct' in row)) return row;
+    const { expected_move_pct, ...rest } = row as Record<string, unknown>;
+    return { ...rest, expected_move_30d_fraction: expected_move_pct };
+  });
+  return { ...response, [key]: rows, units: OPTIONS_ANALYTICS_UNITS } as T;
+}
+
 export function sortOptionsAnalyticsPoints(points: unknown): OptionsAnalyticsPoint[] {
   if (!Array.isArray(points)) return [];
   return points
@@ -115,7 +147,9 @@ export function compactOptionsAnalyticsPoint(point: OptionsAnalyticsPoint): Reco
     iv_rank: round(point.iv_rank),
     iv_percentile: round(point.iv_percentile),
     put_call_ratio: round(point.put_call_ratio),
-    expected_move_pct: round(point.expected_move_pct),
+    // The column is iv * sqrt(30 / 365): a decimal FRACTION of spot over 30
+    // calendar days despite its name, so the name does not reach the reader.
+    expected_move_30d_fraction: round(point.expected_move_pct),
     term_structure_slope: round(point.term_structure_slope, 5),
     iv_skew_25d: round(point.iv_skew_25d),
     vwiv: round(point.vwiv),
@@ -187,6 +221,7 @@ export function summarizeOptionsAnalyticsHistory(
     endDate: getPointDate(latest),
     latest: compactOptionsAnalyticsPoint(latest),
     earliest: compactOptionsAnalyticsPoint(earliest),
+    units: OPTIONS_ANALYTICS_UNITS,
     summary: {
       avgAtmIv: round(avg(atmIvSeries)),
       minAtmIv: round(atmIvSeries.length ? Math.min(...atmIvSeries) : undefined),
@@ -198,8 +233,8 @@ export function summarizeOptionsAnalyticsHistory(
       ),
       avgHv20d: round(avg(hv20Series)),
       avgPutCallRatio: round(avg(putCallSeries)),
-      avgExpectedMovePct: round(avg(expectedMoveSeries)),
-      maxExpectedMovePct: round(expectedMoveSeries.length ? Math.max(...expectedMoveSeries) : undefined),
+      avgExpectedMove30dFraction: round(avg(expectedMoveSeries)),
+      maxExpectedMove30dFraction: round(expectedMoveSeries.length ? Math.max(...expectedMoveSeries) : undefined),
       avgDividendYield: round(avg(dividendYieldSeries), 5),
       latestDividendYield: round(latest.dividend_yield, 5),
       avgRiskFreeRate: round(avg(riskFreeRateSeries), 5),

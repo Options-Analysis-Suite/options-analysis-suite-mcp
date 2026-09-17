@@ -4,6 +4,7 @@ import type { ProxyClient } from '../../proxy/proxyClient.js';
 import { toolHandler } from '../helpers.js';
 import { marketDataOutputSchema } from '../outputSchemas.js';
 import {
+  labelOptionsAnalyticsHistory,
   shouldSummarizeOptionsAnalyticsHistory,
   summarizeOptionsAnalyticsHistory,
 } from './optionsAnalyticsHistoryShaping.js';
@@ -13,7 +14,7 @@ export function register(server: McpServer, client: ProxyClient): void {
     'get_options_analytics_history',
     {
       title: 'Options Analytics History',
-      description: 'Get daily end-of-day options analytics snapshots for a symbol — historical trend data going back years. Covers ATM IV, HV, IV rank/percentile, VWIV, skew, GEX/DEX/VEX, net vanna/charm/vomma, put/call ratio, max pain, expected move, term structure, dividend yield, and risk-free rate. Best for trend analysis over time. For current authoritative Greek exposures and dealer-positioning levels like call wall, put wall, gamma flip, and abs gamma, use get_regime with scope="symbol" instead. Up to 5000 days. Large windows return a compact recent/trend summary by default.',
+      description: 'Get daily end-of-day options analytics snapshots for a symbol - historical trend data going back years. Covers ATM IV, HV, IV rank/percentile, VWIV, skew, GEX/DEX/VEX, net vanna/charm/vomma, put/call ratio, max pain, the 30-day expected move (expected_move_30d_fraction, a decimal fraction of spot: 0.018 = 1.8%), term structure, dividend yield, and risk-free rate. Best for trend analysis over time. For current authoritative Greek exposures and dealer-positioning levels like call wall, put wall, gamma flip, and abs gamma, use get_regime with scope="symbol" instead. Up to 5000 days. Large windows return a compact recent/trend summary by default.',
       inputSchema: {
         symbol: z.string().describe('Ticker symbol (e.g., AAPL, SPY)'),
         days: z.number().int().min(1).max(5000).default(30).describe('Days of history (default 30). Ignored if from/to are provided.'),
@@ -59,7 +60,11 @@ export function register(server: McpServer, client: ProxyClient): void {
 
       const res = await client.get('/history', params) as any;
 
-      if (full && res != null) return { _skipSizeGuard: true, data: res };
+      // Every path names the expected move by its unit: the summarizer does it
+      // itself past 90 rows, and the `full` and short paths are labelled here.
+      // A first fix covered the summarizer only, so the default 30-day window
+      // still published the column name.
+      if (full && res != null) return { _skipSizeGuard: true, data: labelOptionsAnalyticsHistory(res) };
 
       if (shouldSummarizeOptionsAnalyticsHistory(res)) {
         return summarizeOptionsAnalyticsHistory(res);
@@ -77,7 +82,7 @@ export function register(server: McpServer, client: ProxyClient): void {
         }
       }
 
-      return res;
+      return labelOptionsAnalyticsHistory(res);
     }),
   );
 }

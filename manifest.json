@@ -163,6 +163,30 @@
       "description": "Get Schedule 13D/13G beneficial-ownership filings with current above-threshold holder snapshots by default and below-threshold amendments summarized separately; full=true returns the less-summarized filing list"
     },
     {
+      "name": "get_live_options_chain",
+      "description": "Get a LIVE options chain for one expiration from the broker connected to your account (Pro and above); the only tool with intraday option prices"
+    },
+    {
+      "name": "get_live_dealer_positioning",
+      "description": "Get LIVE dealer positioning from your connected broker's chain (Pro and above): net GEX/DEX, vega, vanna, charm and vomma, the gamma flip, call and put walls, and the gamma regime over the nearest four expirations"
+    },
+    {
+      "name": "get_options_snapshot",
+      "description": "Get the end-of-day options snapshot for a symbol (spot, max pain, net GEX/DEX, ATM IV term structure, IV rank and percentile, historical vol, volume and open interest), with optional per-strike curve summaries; pass several symbols to compare headline metrics in one request"
+    },
+    {
+      "name": "get_regime_fits",
+      "description": "Get the calibrated parameters and fit quality for the eight pricing models on a symbol, with an error history (Pro and above; regime universe of about 124 symbols)"
+    },
+    {
+      "name": "get_dealer_positioning",
+      "description": "Get end-of-day dealer positioning from the last completed session over 0-60 days: net GEX/DEX, dealer regime, gamma flip, call and put walls, gamma magnet, 30-day expected move and top contributing strikes, for roughly 5,500 listed equities and ETFs"
+    },
+    {
+      "name": "compute_black_scholes",
+      "description": "Price a European option with Black-Scholes from explicit inputs (Pro and above): price, seventeen Greeks in the commercial API's convention, expected move and risk-neutral ITM probability; r and q supplied or resolved from stored market data, never defaulted"
+    },
+    {
       "name": "get_platform_info",
       "description": "Get platform background information"
     },

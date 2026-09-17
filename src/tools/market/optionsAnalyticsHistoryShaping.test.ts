@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  labelOptionsAnalyticsHistory,
   shouldSummarizeOptionsAnalyticsHistory,
   sortOptionsAnalyticsPoints,
   summarizeOptionsAnalyticsHistory,
@@ -53,7 +54,7 @@ describe('summarizeOptionsAnalyticsHistory', () => {
       iv_rank: 0.7,
       iv_percentile: 0.8,
       put_call_ratio: 1.3,
-      expected_move_pct: 0.05,
+      expected_move_30d_fraction: 0.05,
       term_structure_slope: 0.01,
       iv_skew_25d: 0.05,
       vwiv: 0.26,
@@ -73,8 +74,8 @@ describe('summarizeOptionsAnalyticsHistory', () => {
       atmIvChange: 0.08,
       avgHv20d: 0.13,
       avgPutCallRatio: 1.1,
-      avgExpectedMovePct: 0.04,
-      maxExpectedMovePct: 0.05,
+      avgExpectedMove30dFraction: 0.04,
+      maxExpectedMove30dFraction: 0.05,
       avgDividendYield: 0.0116,
       latestDividendYield: 0.013,
       avgRiskFreeRate: 0.0435,
@@ -103,6 +104,44 @@ describe('summarizeOptionsAnalyticsHistory', () => {
       trend_samples: 2,
       total_snapshots: 5,
     });
+    // option_ticker_snapshots.expected_move_pct is a 30-day decimal FRACTION
+    // of spot (iv * sqrt(30/365)); the column name reaches no reader here,
+    // and the unit is stated once for the point field and both aggregates.
+    expect(summary.units.expectedMove30dFraction).toContain('decimal fraction');
+    expect(summary.latest).not.toHaveProperty('expected_move_pct');
+    expect(summary.summary).not.toHaveProperty('avgExpectedMovePct');
+  });
+});
+
+describe('labelOptionsAnalyticsHistory', () => {
+  // The summarizer only runs past 90 rows. A 30-day request, the default,
+  // went out with the column name on every row and no units; this is the
+  // shape those rows take on the short and `full` paths.
+  test('renames the column on every point, attaches the units, and touches nothing else', () => {
+    const labelled: any = labelOptionsAnalyticsHistory({
+      symbol: 'SPY',
+      source: 'option_ticker_snapshots',
+      data: [
+        { date: '2026-09-15', spot_price: 650.12, expected_move_pct: 0.018, total_volume: 5 },
+        { date: '2026-09-14', spot_price: 648.3 },
+        null,
+      ],
+    });
+    expect(labelled.data[0]).toEqual({ date: '2026-09-15', spot_price: 650.12, expected_move_30d_fraction: 0.018, total_volume: 5 });
+    expect(labelled.data[0]).not.toHaveProperty('expected_move_pct');
+    expect(labelled.data[1]).toEqual({ date: '2026-09-14', spot_price: 648.3 });
+    expect(labelled.data[2]).toBeNull();
+    expect(labelled.symbol).toBe('SPY');
+    expect(labelled.source).toBe('option_ticker_snapshots');
+    expect(labelled.units.expectedMove30dFraction).toContain('decimal fraction');
+  });
+
+  test('reads the `history` key as well, and leaves a payload with no points alone', () => {
+    const labelled: any = labelOptionsAnalyticsHistory({ history: [{ expected_move_pct: 0.02 }] });
+    expect(labelled.history[0]).toEqual({ expected_move_30d_fraction: 0.02 });
+    for (const payload of [null, undefined, 7, 'x', [], {}, { data: 'nope' }]) {
+      expect(labelOptionsAnalyticsHistory(payload as any)).toEqual(payload as any);
+    }
   });
 });
 

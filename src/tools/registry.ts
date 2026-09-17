@@ -5,6 +5,7 @@
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { AccessTokenProvider, ProxyClient } from '../proxy/proxyClient.js';
+import type { LiveApiClient } from '../proxy/liveApiClient.js';
 
 // Market data tools
 import { register as ivHistory } from './market/ivHistory.js';
@@ -32,6 +33,12 @@ import { register as tradingHalts } from './market/tradingHalts.js';
 import { register as activistFilings } from './market/activistFilings.js';
 import { register as companyProfile } from './market/companyProfile.js';
 import { register as screeners } from './market/screeners.js';
+import { register as liveOptionsChain } from './market/liveOptionsChain.js';
+import { register as optionsSnapshot } from './market/optionsSnapshot.js';
+import { register as regimeFits } from './market/regimeFits.js';
+import { register as dealerPositioning } from './market/dealerPositioning.js';
+import { register as eodDealerPositioning } from './market/eodDealerPositioning.js';
+import { register as blackScholes } from './market/blackScholes.js';
 
 // Platform info
 import { registerPlatformInfo } from './platformInfo.js';
@@ -48,6 +55,7 @@ export function registerAllTools(
   server: McpServer,
   client: ProxyClient,
   _tokenManager: AccessTokenProvider,
+  liveClient: LiveApiClient,
 ): void {
   // Market data tools. Several previously individual tools were consolidated
   // into enum-driven unified tools (run_screener, get_regime, get_snapshot,
@@ -79,7 +87,35 @@ export function registerAllTools(
   companyProfile(server, client);
   screeners(server, client);
 
-  // Platform info (1 tool)
+  // Live broker data and the two EOD reads no other tool covers, through the
+  // proxy's structured routes. Registered UNCONDITIONALLY, whatever the
+  // entitlement (every session has passed TokenManager.initialize's check: an
+  // active or trialing subscription, or a developer or comped account, so no
+  // caller here is free-tier).
+  //
+  // The proxy gates the two live tools, the fit history and Black-Scholes to
+  // Pro and above; this process resolves no tier at all. Doing so would mean
+  // an async lookup before the tool list exists, on every session - and a
+  // hidden tool means a non-Pro subscriber never discovers that live data is
+  // what Pro buys. A visible tool
+  // that answers "this needs Pro, upgrade at <url>" is the better answer, and
+  // the proxy's envelope (code PRO_TIER_REQUIRED, retryable false, upgradeUrl)
+  // is what makes that answer specific.
+  //
+  // get_options_snapshot and get_regime_fits spend no broker call, so both
+  // keep openWorldHint false. The snapshot reads are anonymous on the proxy.
+  liveOptionsChain(server, liveClient);
+  optionsSnapshot(server, liveClient);
+  regimeFits(server, liveClient);
+  dealerPositioning(server, liveClient);
+  // The end-of-day twin of the live positioning tool (no Pro requirement, no
+  // broker) and Black-Scholes from explicit inputs (Pro, no broker). Separate tools,
+  // never a fallback inside the live one: a last-close gamma flip and a live
+  // one are different claims.
+  eodDealerPositioning(server, liveClient);
+  blackScholes(server, liveClient);
+
+  // Platform info (1 tool).
   registerPlatformInfo(server);
 
   // User data (synced from browser via /sync/* endpoints)

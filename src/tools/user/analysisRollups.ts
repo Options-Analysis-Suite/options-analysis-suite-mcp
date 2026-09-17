@@ -4,7 +4,7 @@ import type { ProxyClient } from '../../proxy/proxyClient.js';
 import { toolHandler } from '../helpers.js';
 import { syncedDataOutputSchema } from '../outputSchemas.js';
 import { humanizeAnalysisWireOutput, sanitizeFullSyncResponse, stripSyncRecordMetadata } from './syncResponseShaping.js';
-import { summarizeAnalysisRollupsResponse } from './analysisRollupsShaping.js';
+import { ROLLUP_VEGA_UNITS, summarizeAnalysisRollupsResponse, withholdLegacyMixedVega } from './analysisRollupsShaping.js';
 
 export function register(server: McpServer, client: ProxyClient): void {
   server.registerTool(
@@ -26,6 +26,15 @@ export function register(server: McpServer, client: ProxyClient): void {
 	      if (full && res != null) {
 	        humanizeAnalysisWireOutput(res);
 	        sanitizeFullSyncResponse(res, { topLevelKeys: ['id', 'user_id', 'created_at', 'key'], dataKeys: ['id', 'user_id', 'key'] });
+	        // The raw rows get the same avgVega verdict as the compact ones: a
+	        // legacy row that averaged Digital's per-unit vega with per-point
+	        // vega is withheld here too, not just in the summary view.
+	        if (Array.isArray(res.data)) {
+	          for (const record of res.data) {
+	            if (record && typeof record.data === 'object' && record.data !== null) withholdLegacyMixedVega(record.data);
+	          }
+	          res.units = { avgVega: ROLLUP_VEGA_UNITS };
+	        }
 	        return { _skipSizeGuard: true, data: res };
 	      }
       if (res && Array.isArray(res.data)) {

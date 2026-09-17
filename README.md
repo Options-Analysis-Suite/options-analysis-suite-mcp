@@ -12,11 +12,13 @@ MCP server that gives Claude, ChatGPT, Perplexity, and Grok direct access to you
 
 ## Current Tool Surface
 
-The MCP currently exposes **32 tools** - consolidated into enum-driven unified tools where tool shapes are a clean family match (calendars, regime views, Treasury rates, FINRA short-side series, user snapshots, and options-market screeners).
+The MCP currently exposes **38 tools** - consolidated into enum-driven unified tools where tool shapes are a clean family match (calendars, regime views, Treasury rates, FINRA short-side series, user snapshots, and options-market screeners).
 
-- **25 market and research tools**
+- **31 market, research and pricing tools**, two of them live
 - **6 synced user-data tools**
 - **1 platform-context tool**
+
+Two tools read in real time from the broker connected to your account: `get_live_options_chain` and `get_live_dealer_positioning` (Pro and above). The other market tools answer from the platform's stored data - end-of-day snapshots and history, plus the intraday regime scans behind `get_regime` with `scope='intraday'` - and the synced tools from your own account data. `compute_black_scholes` prices from the inputs you give it. `get_regime_fits` and `compute_black_scholes` also need Pro; neither needs a broker. A tool that needs more than the account has says so, with the upgrade link, rather than being hidden.
 
 ## Market And Research Tools
 
@@ -26,6 +28,8 @@ The MCP currently exposes **32 tools** - consolidated into enum-driven unified t
 - **Greeks History** (`get_greeks_history`) - Historical Greeks with recent/trend summaries plus DTE and moneyness filters
 - **IV Surface** (`get_iv_surface`) - Surface and skew snapshots across strikes and expirations
 - **Options Chain** (`get_options_chain`) - Latest available end-of-day chain summary with expirations, ATM term structure, skew, and representative near-money contracts
+- **Live Options Chain** (`get_live_options_chain`, Pro and above) - One expiration, fetched in real time from the broker connected to your account: near-the-money strikes, the ATM pair, 25-delta wings, whole-chain volume and open interest. Spends your own broker quota; 10 requests per minute
+- **EOD Options Snapshot** (`get_options_snapshot`) - Spot, max pain, net GEX/DEX, ATM IV term structure, IV rank and percentile, historical vol, volume and open interest for any symbol the platform holds an options snapshot for, with optional per-strike max-pain, GEX/DEX and skew curve summaries; up to 50 symbols compared in one request
 - **Options Analytics History** (`get_options_analytics_history`) - Daily analytics history including IV, skew, expected move, rates, dividend yield, GEX/DEX/VEX, and net vanna/charm/vomma
 - **Treasury Rates** (`get_rates`) - Unified Treasury view with `view='benchmark'` (current platform risk-free rate, 10Y-based) or `view='curve'` (full yield curve with key rates, inversion flags, and compact history)
 
@@ -41,6 +45,10 @@ The MCP currently exposes **32 tools** - consolidated into enum-driven unified t
 ### Regime and exposure
 
 - **Regime** (`get_regime`) - Unified regime tool with three scopes: `scope='market'` (composite stress regime across SPY/QQQ/IWM/DIA with score bands and drivers), `scope='symbol'` (per-symbol daily regime + authoritative Greek exposures: net gamma/delta/vega/vanna/charm/vomma, call/put walls, gamma flip, abs gamma anchor, top 10 gamma strikes), or `scope='intraday'` (5 scans/day with stress scoring + Greek snapshots)
+- **Live Dealer Positioning** (`get_live_dealer_positioning`, Pro and above) - Net GEX/DEX plus vega, vanna, charm and vomma, the gamma flip with its search status and resolution, call and put walls, gamma concentration and the gamma regime, computed in real time from your connected broker's chain over the nearest four expirations. Five weighted units per call against the 10-unit-per-minute live budget
+- **EOD Dealer Positioning** (`get_dealer_positioning`) - Last completed session's net GEX/DEX over 0-60 days, dealer regime, gamma flip (coarse-grid, no search status), call and put walls, gamma magnet, 30-day expected move and top contributing strikes, for roughly 5,500 listed equities and ETFs; a past session via `date`
+- **Model Calibration Fits** (`get_regime_fits`, Pro and above) - Calibrated parameters and fit quality (IV and price RMSE) for the eight pricing models on a symbol, with an error history; covers the regime universe of about 124 symbols
+- **Black-Scholes Pricing** (`compute_black_scholes`, Pro and above) - Price, seventeen Greeks in the commercial API's convention, expected move and risk-neutral ITM probability from explicit inputs; `r` and `q` supplied or resolved from stored market data for a symbol, never defaulted. Black-Scholes only; the other models, calibration and multi-model runs are on the REST API and Python SDK
 
 ### Company, events, and filings
 
@@ -108,6 +116,8 @@ Without sync enabled, the assistant can still use the market and research tools.
 ## Requirements
 
 - Active Options Analysis Suite subscription
+- Pro or above for the two live tools, the calibration fits and Black-Scholes pricing
+- A broker connected under Account -> Broker for the two live tools only; the calibration fits and Black-Scholes pricing need no broker
 - Claude Desktop, ChatGPT, Claude Web, Perplexity, or Grok
 - Sync enabled if you want personal analysis data in addition to market data
 

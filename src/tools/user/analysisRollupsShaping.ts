@@ -17,6 +17,8 @@ type CompactRollupRow = {
   avgDelta?: number;
   avgGamma?: number;
   avgVega?: number;
+  avgVegaUnit?: 'per_unit_vol';
+  avgVegaWithheld?: string;
   avgTheta?: number;
   avgVol?: number;
   minVol?: number;
@@ -51,6 +53,53 @@ function numericValue(value: unknown, decimals = 4): number | undefined {
   return round(value, decimals);
 }
 
+/**
+ * avgVega's unit, and whether the row can state one.
+ *
+ * The web app's applyGreekScaling leaves the Digital model's vega per unit of
+ * volatility and scales every other model's per percentage point. The rollup
+ * producer (apps/web analysisRollupsService) now normalizes Digital before
+ * averaging and stamps `avgVegaUnit: 'per_vol_point'`. A row without the
+ * stamp was computed before that: if it mixes Digital with any other model
+ * its avgVega averaged two units (a Black-Scholes 0.2765 and a Digital
+ * -27.0979 gave -13.41), and no caveat repairs an aggregate that is already
+ * mixed, so it is withheld; a Digital-only legacy row is per unit and says so.
+ *
+ * The legacy rows are replaced, not kept: the web app recomputes every rollup
+ * from its facts and re-queues them when it ACTIVATES SYNC (sign-in with Data
+ * Sync enabled; syncClient's lifecycle work). Not merely "the next time the
+ * app runs": a startup whose storage initialization precedes sign-in
+ * recomputes the rows before any owner can accept them, and nothing else
+ * re-queued them, so that wording promised a recovery that could not happen.
+ */
+const DIGITAL_MODEL = 'Digital';
+const LEGACY_MIXED_VEGA =
+  'computed before the Digital model\'s per-unit vega was normalized, so it averaged two units; '
+  + 'the web app re-queues normalized rollups when it next activates sync';
+
+export const ROLLUP_VEGA_UNITS =
+  'per 1 percentage point of volatility. A rollup computed before the Digital model\'s vega was normalized '
+  + 'withholds avgVega when it mixed Digital with other models (avgVegaWithheld says so) and carries it per unit '
+  + 'of volatility when it was Digital-only (avgVegaUnit: "per_unit_vol").';
+
+function describeRollupVega(data: Record<string, unknown> | null): { withheld?: string; unit?: 'per_unit_vol' } {
+  if (!data || data.avgVegaUnit === 'per_vol_point') return {};
+  const models = Array.isArray(data.models) ? data.models.filter((m): m is string => typeof m === 'string') : [];
+  if (!models.includes(DIGITAL_MODEL)) return {};
+  return models.some((m) => m !== DIGITAL_MODEL) ? { withheld: LEGACY_MIXED_VEGA } : { unit: 'per_unit_vol' };
+}
+
+/** The same verdict, applied in place to a raw synced row's `data` for the `full` path. */
+export function withholdLegacyMixedVega(data: Record<string, unknown>): void {
+  const verdict = describeRollupVega(data);
+  if (verdict.withheld) {
+    delete data.avgVega;
+    data.avgVegaWithheld = verdict.withheld;
+  } else if (verdict.unit) {
+    data.avgVegaUnit = verdict.unit;
+  }
+}
+
 export function shapeAnalysisRollupRecord(record: unknown): CompactRollupRow | unknown {
   const raw = getObject(record);
   if (!raw) return record;
@@ -62,6 +111,7 @@ export function shapeAnalysisRollupRecord(record: unknown): CompactRollupRow | u
       ? nested.periodStart
       : undefined;
   const models = getUniqueModels(nested?.models);
+  const vega = describeRollupVega(nested);
 
   return {
     symbol: typeof raw.symbol === 'string' ? raw.symbol : typeof nested?.symbol === 'string' ? nested.symbol : undefined,
@@ -71,7 +121,9 @@ export function shapeAnalysisRollupRecord(record: unknown): CompactRollupRow | u
     count: typeof nested?.count === 'number' ? nested.count : undefined,
     avgDelta: numericValue(nested?.avgDelta),
     avgGamma: numericValue(nested?.avgGamma, 6),
-    avgVega: numericValue(nested?.avgVega),
+    avgVega: vega.withheld ? undefined : numericValue(nested?.avgVega),
+    ...(vega.unit ? { avgVegaUnit: vega.unit } : {}),
+    ...(vega.withheld ? { avgVegaWithheld: vega.withheld } : {}),
     avgTheta: numericValue(nested?.avgTheta),
     avgVol: numericValue(nested?.avgVol),
     minVol: numericValue(nested?.minVol),
@@ -117,6 +169,7 @@ export function summarizeAnalysisRollupsResponse(payload: unknown): unknown {
   return {
     ...response,
     data: shapedRows,
+    units: { avgVega: ROLLUP_VEGA_UNITS },
     summary: {
       periodsReturned: shapedRows.length,
       totalAnalyses: counts.reduce((sum, value) => sum + value, 0),
