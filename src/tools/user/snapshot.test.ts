@@ -154,7 +154,7 @@ describe('get_snapshot — full mode returns less-summarized payload', () => {
     const stub = {
       data: [
         { id: 1, user_id: 10, created_at: '2026-04-01T00:00:00.000Z', data: { id: 5, gammaFlip: 495 } },
-        { id: 2, data: { id: 6, callWall: 510 } },
+        { id: 2, data: { id: 6, callWall: 510, absGamma: 505 } },
       ],
       count: 2,
       meta: 'x',
@@ -168,8 +168,24 @@ describe('get_snapshot — full mode returns less-summarized payload', () => {
     expect(parsed.data[0].data.id).toBeUndefined();
     expect(parsed.data[1].id).toBeUndefined();
     expect(parsed.data[1].data.id).toBeUndefined();
-    expect(parsed.data[0].data['gamma flip']).toBe(495);
-    expect(parsed.data[1].data['call wall']).toBe(510);
+    expect(parsed.data[0].data.gammaFlip).toBe(495);
+    expect(parsed.data[1].data.callWall).toBe(510);
+    expect(parsed.data[1].data.gammaMagnet).toBe(505);
+    expect(JSON.stringify(parsed)).not.toMatch(/gamma flip|call wall|abs gamma|absGamma/);
+  });
+
+  // review: putWall, gammaTilt and secondaryFlips could revert
+  // to spaced keys, and the record-root normalization could go, unnoticed.
+  test('type=gex publishes every level key camelCase on the data block and the record root, default and full', async () => {
+    const stored = { callWall: 510, putWall: 490, gammaFlip: 495, gammaTilt: -1, secondaryFlips: [480], absGamma: 505 };
+    const published = { callWall: 510, putWall: 490, gammaFlip: 495, gammaTilt: -1, secondaryFlips: [480], gammaMagnet: 505 };
+    for (const full of [false, true]) {
+      const { handler } = createHarness({ data: [{ id: 1, ...stored, data: { ...stored } }] });
+      const parsed = JSON.parse((await handler({ type: 'gex', symbol: 'SPY', full })).content[0].text);
+      expect(parsed.data[0].data).toMatchObject(published);
+      expect(parsed.data[0]).toMatchObject(published);
+      expect(JSON.stringify(parsed)).not.toMatch(/call wall|put wall|gamma flip|gamma tilt|secondary flips|abs gamma|absGamma/);
+    }
   });
 
   test('type=portfolio full=true returns raw payload', async () => {

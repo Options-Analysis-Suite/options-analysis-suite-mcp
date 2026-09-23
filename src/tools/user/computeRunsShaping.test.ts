@@ -1227,6 +1227,17 @@ function calibrationModel(
 }
 
 describe('shapeComputeRunRecord', () => {
+  // review: bypassing shapeKeyLevels in the summary passed,
+  // so an absGamma on the sweep levels was never pinned there.
+  test('the summary publishes the sweep levels camelCase, with absGamma as gammaMagnet', () => {
+    const record = makeRecord() as any;
+    record.data.exposureSweep[0].keyLevels.absGamma = 640;
+    const shaped = shapeComputeRunRecord(record) as Record<string, any>;
+    expect(shaped.exposureSweep[0].levels).toEqual({
+      regime: 'negative-gamma', gammaFlip: 645.9, callWall: 650, putWall: 620, gammaTilt: -1, secondaryFlips: [], gammaMagnet: 640,
+    });
+  });
+
   test('builds a compact assistant-facing compute-run summary', () => {
     const shaped = shapeComputeRunRecord(makeRecord()) as Record<string, any>;
 
@@ -1247,7 +1258,7 @@ describe('shapeComputeRunRecord', () => {
       expect.objectContaining({
         underlying: 'SPY',
         strikeCount: 136,
-        levels: expect.objectContaining({ 'call wall': 650 }),
+        levels: expect.objectContaining({ callWall: 650 }),
       }),
     );
     expect(shaped.exposureSweep[0].keyLevels).toBeUndefined();
@@ -2422,6 +2433,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
     (payload.data[0].positions[0].models as any).Heston.calibration.seedRejections = [{ reason: 'bad_seed' }];
     (payload.data[0].positions[0].models as any).Heston.calibration.executionPath = 'worker';
     (payload.data[0].positions[0].models as any).Heston.calibration.economicPenalty = 1.25;
+    (payload.data[0].data.exposureSweep[0] as any).keyLevels.absGamma = 640;
 
     sanitizeComputeRunsWireOutput(payload);
 
@@ -2436,21 +2448,21 @@ describe('sanitizeComputeRunsWireOutput', () => {
     expect(text).not.toContain('executionPath');
     expect(text).not.toContain('economicPenalty');
     expect(text).not.toContain('byReason');
-    expect(text).not.toContain('callWall');
-    expect(text).not.toContain('putWall');
-    expect(text).not.toContain('gammaFlip');
-    expect(text).not.toContain('gammaTilt');
-    expect(text).not.toContain('secondaryFlips');
+    // Field names are camelCase: the levels keep callWall, putWall,
+    // gammaFlip, gammaTilt and secondaryFlips, and absGamma is gammaMagnet
+    // as on the positioning tools; no spaced key survives.
+    expect(text).not.toMatch(/call wall|put wall|gamma flip|gamma tilt|secondary flips|abs gamma|absGamma/);
     expect(text).not.toContain('isFallback');
     expect(text).not.toContain('"key"');
     expect(text).not.toContain('keyLevels');
 
     const levels = (payload.data[0].data.exposureSweep[0] as any).levels;
-    expect(levels['call wall']).toBe(650);
-    expect(levels['put wall']).toBe(620);
-    expect(levels['gamma flip']).toBe(645.9);
-    expect(levels['gamma tilt']).toBe(-1);
-    expect(levels['secondary flips']).toEqual([]);
+    expect(levels.callWall).toBe(650);
+    expect(levels.putWall).toBe(620);
+    expect(levels.gammaFlip).toBe(645.9);
+    expect(levels.gammaTilt).toBe(-1);
+    expect(levels.secondaryFlips).toEqual([]);
+    expect(levels.gammaMagnet).toBe(640);
 
     const hestonCalibration = (payload.data[0].positions[0].models as any).Heston.calibration;
     expect(hestonCalibration.confidence).toBe(0.94);

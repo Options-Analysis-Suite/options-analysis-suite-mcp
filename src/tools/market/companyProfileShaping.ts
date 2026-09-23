@@ -87,7 +87,9 @@ export function shapeCompanyProfileResponse(
     isActivelyTrading: typeof payload.is_actively_trading === 'boolean' ? payload.is_actively_trading : null,
     description,
     updatedAt: payload.updated_at ?? null,
-    ...(trimmed ? { _description_truncated: true } : {}),
+    // No leading underscore: the wire sanitizer drops those, and this flag
+    // is for the reader.
+    ...(trimmed ? { descriptionTruncated: true } : {}),
     ...(payload.error ? { error: payload.error } : {}),
   };
 }

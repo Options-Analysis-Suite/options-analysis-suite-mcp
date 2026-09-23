@@ -305,8 +305,8 @@ export function truncateRecord(record: any): void {
  *  and `truncateRecord` (Pass 2). Sync-backed FFT data is sorted newest-first
  *  (`timestamp DESC` in `proxy/routes/sync.ts`), so `pop()` drops the oldest.
  *  Preserves at least 1 record and annotates the internal response with
- *  `_truncation_meta`; the shared MCP handler strips leading-underscore
- *  metadata before returning content to AI clients.
+ *  `_truncation_meta`, which the wire sanitizer publishes as
+ *  `truncationMeta` (a `_x_meta` key is renamed, not stripped).
  *  Returns the mutated response for chaining. No-op when already under budget.
  */
 export function trimToSizeBudget(

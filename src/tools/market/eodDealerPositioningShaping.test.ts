@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { EOD_GAMMA_FLIP_NOTE, summarizeEodDealerPositioning } from './eodDealerPositioningShaping.js';
+import { EOD_GAMMA_FLIP_NOTE, EOD_GAMMA_FLIP_NULL_NOTE, summarizeEodDealerPositioning } from './eodDealerPositioningShaping.js';
 import { sanitizeMcpWireOutput } from '../helpers.js';
 
 /** The proxy's /eod/exposure shape, as packages/shared's buildEodExposureResponse emits it. */
@@ -60,6 +60,47 @@ describe('summarizeEodDealerPositioning', () => {
     expect(shaped.topContributingStrikes).toHaveLength(3);
     const expected = structuredClone(shaped);
     expect(sanitizeMcpWireOutput(shaped as Record<string, unknown>)).toEqual(expected as Record<string, unknown>);
+  });
+
+  it('says what a null gamma flip means instead of describing a level that is not there', () => {
+    // Eighth run, APT 2026-09-17: gammaFlip null beside the same "Coarse-grid
+    // level from the stored end-of-day snapshot" note a real level carries.
+    // The producer (proxy/lib/exposure-compute.ts computeRepricedGammaFlip)
+    // stores null when its sweep within 20% of spot finds no zero crossing,
+    // or had no near-term open interest to sweep; that is not a level of
+    // zero and says nothing about a crossing beyond the range.
+    // Ninth run: the note named both causes and the row could not say
+    // which. On any row the route serves, "no near-term open interest" is
+    // impossible: serving needs dealer_regime, which the producer sets only
+    // when the near-term universe had a strike with open interest and a
+    // valid gamma (SnapshotComputeService hasNearExposure), and that row
+    // enters the sweep held or repriced. What remains is no crossing, or a
+    // profile that is zero at every sampled price (validGamma accepts 0;
+    // calls at one strike and puts at another under one held gamma cancel
+    // at every price; a far strike with a tiny T reprices to 0 everywhere).
+    // review refuted a pick from the listed strikes: +10,000 at
+    // 95 and -10,000 at 105 are two non-zero listed strikes whose sweep is
+    // zero at every price, and the producer stores no search status, so the
+    // note keeps both causes and says the row cannot tell them apart.
+    const shaped = summarizeEodDealerPositioning(response({ gammaFlip: null }));
+    expect(shaped.gammaFlip).toBeNull();
+    expect(shaped.gammaFlipNote).toBe(EOD_GAMMA_FLIP_NULL_NOTE);
+    expect(shaped.gammaFlipNote).toMatch(/^No level is stored for this session: the coarse-grid sweep within 20% of spot found no zero crossing, or its net gamma profile was zero at every price it sampled; the stored row does not say which\. A session with no near-term open interest at all is not served\. That is not a level of zero and says nothing about a crossing beyond that range\./);
+    expect(shaped.gammaFlipNote).not.toMatch(/^Coarse-grid level|no near-term open interest to sweep|found no zero crossing in its net gamma profile\./);
+    // A missing field reads the same as a stored null, and the listed
+    // strikes, zero, non-zero or absent, change nothing.
+    for (const over of [
+      { gammaFlip: undefined },
+      { gammaFlip: null, topContributingStrikes: [] },
+      { gammaFlip: null, topContributingStrikes: [{ strike: 5, netGex: 0, netDex: 12 }] },
+      { gammaFlip: null, topContributingStrikes: [{ strike: 95, netGex: 10000 }, { strike: 105, netGex: -10000 }] },
+      { gammaFlip: null, topContributingStrikes: undefined },
+    ]) {
+      expect(summarizeEodDealerPositioning(response(over)).gammaFlipNote).toBe(EOD_GAMMA_FLIP_NULL_NOTE);
+    }
+    // And a real level keeps the level note, whatever the strikes say.
+    expect(summarizeEodDealerPositioning(response()).gammaFlipNote).toBe(EOD_GAMMA_FLIP_NOTE);
+    expect(summarizeEodDealerPositioning(response({ topContributingStrikes: [] })).gammaFlipNote).toBe(EOD_GAMMA_FLIP_NOTE);
   });
 
   it('caps the contributing strikes in stored order and says how many there were', () => {

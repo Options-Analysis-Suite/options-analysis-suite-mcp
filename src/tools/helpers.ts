@@ -12,7 +12,7 @@ type ToolResult = {
   isError?: boolean;
 };
 
-const MAX_RESPONSE_BYTES = 50 * 1024; // 50 KB
+export const MAX_RESPONSE_BYTES = 50 * 1024; // 50 KB
 const UTF8_ENCODER = new TextEncoder();
 
 export function utf8ByteLength(value: string): number {
@@ -33,6 +33,7 @@ const SAFE_UNDERSCORE_KEY_RENAMES: Record<string, string> = {
   _omitted: 'omitted',
   _note: 'note',
   _stress_score_note: 'stressScoreNote',
+  _exposures_note: 'exposuresNote',
   _symbols_truncation_meta: 'symbolCoverage',
   _venues_note: 'venuesNote',
   _dealers_note: 'dealersNote',
@@ -112,7 +113,40 @@ function isNestedSyncSnapshotPayload(obj: Record<string, unknown>): boolean {
  * quote verbatim. It preserves useful preview structures by renaming their
  * leading-underscore keys to normal JSON labels.
  */
-export function sanitizeMcpWireOutput(data: unknown, depth = 0): unknown {
+// Field names are camelCase on every tool. Proxy and database rows carry
+// snake_case columns (market_date, iv_rank, stress_score) and several tools
+// pass them through on raw and full paths, so this boundary converts every
+// PURE lowercase snake_case key. Anything else is data or already a field
+// name and is left alone: a date, a tenor (10Y), a ticker, a model or feature
+// display name, a form type, a camelCase key. Values are never touched.
+const SNAKE_KEY_RE = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/;
+// The yield-curve summary already names these spreads; the raw analysis
+// block's columns take the same names.
+const WIRE_KEY_OVERRIDES: Record<string, string> = {
+  spread_2_10: 'twoTen',
+  spread_3m_10y: 'threeMonthTenYear',
+};
+// Dictionaries keyed by a regime tier: the tier's stored name (fixed_income)
+// is data, the same string `symbolTier` carries as a value. Only the direct
+// children of an OBJECT under these keys are exempt; a `symbols` array is a
+// list of rows.
+const DATA_KEYED_PARENTS = new Set(['symbols', 'tiers']);
+
+function camelWireKey(key: string): string {
+  if (!SNAKE_KEY_RE.test(key)) return key;
+  if (key in WIRE_KEY_OVERRIDES) return WIRE_KEY_OVERRIDES[key];
+  const parts = key.split('_');
+  let out = parts[0];
+  for (let i = 1; i < parts.length; i += 1) {
+    const part = parts[i];
+    // Two adjacent number segments would glue (net_gex_0_60d -> netGex060d).
+    if (/^[0-9]/.test(part) && /[0-9]$/.test(parts[i - 1])) out += `to${part}`;
+    else out += part.charAt(0).toUpperCase() + part.slice(1);
+  }
+  return out;
+}
+
+export function sanitizeMcpWireOutput(data: unknown, depth = 0, dataKeyed = false): unknown {
   if (depth > 20 || data == null || typeof data !== 'object') return data;
   if (Array.isArray(data)) return data.map((item) => sanitizeMcpWireOutput(item, depth + 1));
 
@@ -133,7 +167,7 @@ export function sanitizeMcpWireOutput(data: unknown, depth = 0): unknown {
     const dynamicMetaMatch = key.match(DYNAMIC_META_KEY_RE);
     if (dynamicMetaMatch) {
       const [, base] = dynamicMetaMatch;
-      out[`${base}Meta`] = sanitizeMcpWireOutput(value, depth + 1);
+      out[`${camelWireKey(base)}Meta`] = sanitizeMcpWireOutput(value, depth + 1);
       continue;
     }
     if (key.startsWith('_')) continue;
@@ -142,7 +176,11 @@ export function sanitizeMcpWireOutput(data: unknown, depth = 0): unknown {
     if (INTERNAL_IDENTIFIER_KEYS.has(key)) continue;
     if (key === 'id' && (syncBackedRow || nestedSyncSnapshotPayload)) continue;
 
-    out[key] = sanitizeMcpWireOutput(value, depth + 1);
+    const camel = dataKeyed ? key : camelWireKey(key);
+    // Never overwrite: a snake key whose camelCase twin is already present
+    // stays as it is rather than replace a value.
+    const outKey = camel !== key && Object.prototype.hasOwnProperty.call(obj, camel) ? key : camel;
+    out[outKey] = sanitizeMcpWireOutput(value, depth + 1, DATA_KEYED_PARENTS.has(outKey));
   }
 
   return out;
@@ -543,16 +581,23 @@ export function toolHandler<T extends Record<string, unknown>>(
           // the instruction not to retry. A client rendering text alone has
           // nowhere else to learn it. Message first, then details, then never
           // this.
-          const prefix = 'API error: ';
+          // The CODE is in the text too, in the prefix, where truncation
+          // cannot reach it: a text-only client was shown the prose and the
+          // guidance and never UNKNOWN_EXPIRATION, which is the one token a
+          // model can match on. And a full stop between the upstream message
+          // and the guidance where the message brought none: "not listed for
+          // SPY Retrying will not succeed" read as one sentence.
+          const prefix = code ? `API error (${code}): ` : 'API error: ';
           const guidance = `${hint}${action}`;
-          const reserved = utf8ByteLength(prefix) + utf8ByteLength(guidance);
+          const reserved = utf8ByteLength(prefix) + utf8ByteLength(guidance) + 1;
           const shownMessage = truncateToBytes(message, Math.max(0, MAX_ERROR_TEXT_BYTES - reserved));
+          const separator = shownMessage && guidance && !/[.!?:;]$/.test(shownMessage) && !shownMessage.endsWith(TRUNCATION_SUFFIX) ? '.' : '';
           const shownDetails = truncateToBytes(
             detailText,
             Math.max(0, MAX_ERROR_TEXT_BYTES - reserved - utf8ByteLength(shownMessage)),
           );
           return {
-            content: [{ type: 'text', text: `${prefix}${shownMessage}${guidance}${shownDetails}` }],
+            content: [{ type: 'text', text: `${prefix}${shownMessage}${separator}${guidance}${shownDetails}` }],
             structuredContent: {
               dataAvailable: false,
               error: message,

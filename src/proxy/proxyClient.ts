@@ -61,6 +61,25 @@ async function errorBody(response: Response): Promise<unknown> {
   try { return await response.json(); } catch { return null; }
 }
 
+/**
+ * The most of a proxy error body's reason that travels in an ApiError
+ * message. The proxy's own reasons are a sentence; anything longer is not
+ * a reason, and a caller that embeds the message elsewhere than the tool
+ * helpers' error branch (which truncates) must still be safe.
+ */
+export const MAX_REASON_BYTES = 512;
+const REASON_SUFFIX = '...';
+const UTF8 = { encode: new TextEncoder(), decode: new TextDecoder() };
+
+function boundReason(text: string): string {
+  const encoded = UTF8.encode.encode(text);
+  if (encoded.byteLength <= MAX_REASON_BYTES) return text;
+  // Back off to a character boundary so a multi-byte sequence is never cut.
+  let end = MAX_REASON_BYTES - REASON_SUFFIX.length;
+  while (end > 0 && (encoded[end] & 0b1100_0000) === 0b1000_0000) end -= 1;
+  return `${UTF8.decode.decode(encoded.subarray(0, end))}${REASON_SUFFIX}`;
+}
+
 export class ProxyClient {
   constructor(
     /** Readable so a second client can be built against the SAME backend. */
@@ -161,6 +180,16 @@ export class ProxyClient {
       throw new ApiError('Rate limit exceeded. Please wait a moment and try again.', 429);
     }
 
-    throw new ApiError(`Request to ${path} failed (HTTP ${status})`, status);
+    // The reason the proxy sent, where it sent one. A surface read for a
+    // date with no file answers 500 { error: 'No data for this date' }, and
+    // without the body that read the same as an outage. The same two keys
+    // LiveApiClient reads, message first. Bounded here, not only in the
+    // tool helpers: get_dark_pool_data embeds err.message in a
+    // partial-failure note that the helpers' truncation never sees, so an
+    // unbounded body reached the model whole or tripped the size guard and
+    // discarded the healthy half of the response beside it.
+    const body = await errorBody(response) as { message?: unknown; error?: unknown } | null;
+    const reason = [body?.message, body?.error].find((v): v is string => typeof v === 'string' && v !== '');
+    throw new ApiError(`Request to ${path} failed (HTTP ${status})${reason ? `: ${boundReason(reason)}` : ''}`, status);
   }
 }

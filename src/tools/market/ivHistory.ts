@@ -4,6 +4,7 @@ import type { ProxyClient } from '../../proxy/proxyClient.js';
 import { toolHandler } from '../helpers.js';
 import { marketDataOutputSchema } from '../outputSchemas.js';
 import { shouldSummarizeIvHistory, summarizeIvHistory, trimIvHistoryToRecent } from './ivHistoryShaping.js';
+import { collapseProvenance } from './provenanceShaping.js';
 
 export function register(server: McpServer, client: ProxyClient): void {
   server.registerTool(
@@ -20,7 +21,8 @@ export function register(server: McpServer, client: ProxyClient): void {
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     toolHandler(async ({ symbol, days, full }) => {
-      const res = await client.get('/scanner/history', { symbol: symbol.toUpperCase(), days: String(days) }) as any;
+      // One provenance copy on every path, the raw one included (twenty-first run).
+      const res = collapseProvenance(await client.get('/scanner/history', { symbol: symbol.toUpperCase(), days: String(days) }) as any);
       if (full) return { _skipSizeGuard: true, data: res };
 
       if (days === 90) {

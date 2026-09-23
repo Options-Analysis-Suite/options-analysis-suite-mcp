@@ -23,6 +23,19 @@ describe('sortIvHistoryPoints', () => {
 });
 
 describe('trimIvHistoryToRecent', () => {
+  // Twenty-second check: the default path returned endDate null (the proxy
+  // echoes the REQUESTED end, null for an open window) beside startDate and
+  // rows to 2026-09-22, while the summary path fills it from the newest row.
+  test('fills an open endDate from the newest row, as the summary path does, and keeps a requested one', () => {
+    const rows = [{ market_date: '2026-09-18' }, { market_date: '2026-09-22' }, { market_date: '2026-09-19' }];
+    for (const cap of [2, 10]) {
+      expect((trimIvHistoryToRecent({ symbol: 'SPY', startDate: '2026-06-25', endDate: null, data: rows }, cap) as any).endDate).toBe('2026-09-22');
+      expect((trimIvHistoryToRecent({ symbol: 'SPY', startDate: '2026-06-25', data: rows }, cap) as any).endDate).toBe('2026-09-22');
+      expect((trimIvHistoryToRecent({ symbol: 'SPY', endDate: '2026-09-30', data: rows }, cap) as any).endDate).toBe('2026-09-30');
+    }
+    expect((trimIvHistoryToRecent({ symbol: 'SPY', endDate: null, data: [] }, 2) as any).endDate).toBeNull();
+  });
+
   test('keeps the latest rows instead of the oldest rows', () => {
     const payload = {
       symbol: 'SPY',

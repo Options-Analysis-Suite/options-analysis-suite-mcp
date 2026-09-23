@@ -1,3 +1,5 @@
+import { compareByDte, sampleExpirationsAcrossCurve } from './expirationSampling.js';
+
 type OptionContract = {
   [key: string]: unknown;
   optionSymbol?: string;
@@ -32,25 +34,11 @@ type OptionsChainPayload = {
   pricingTier?: string;
 };
 
-type ExpirationBucket = {
-  minDte: number;
-  maxDte: number;
-};
-
 type ExpirationGroup = {
   expiration: string;
   dte: number;
   contracts: OptionContract[];
 };
-
-const REPRESENTATIVE_BUCKETS: ExpirationBucket[] = [
-  { minDte: 0, maxDte: 7 },
-  { minDte: 8, maxDte: 21 },
-  { minDte: 22, maxDte: 45 },
-  { minDte: 46, maxDte: 90 },
-  { minDte: 91, maxDte: 180 },
-  { minDte: 181, maxDte: Number.POSITIVE_INFINITY },
-];
 
 const MAX_EXPIRATION_SUMMARIES = 6;
 const MAX_PAIR_SUMMARIES = 4;
@@ -89,6 +77,28 @@ function contractIv(contract: OptionContract): number | null {
   return asNumber(contract.impliedVolatility);
 }
 
+/**
+ * Where a contract's impliedVolatility came from. The proxy fills it from
+ * the side's own mid IV where that is usable and otherwise from the smoothed
+ * SMV (SupabaseService.getOptionsChain: capIv(side) ?? capIv(smooth)), and
+ * carries cMidIv, pMidIv and smoothSmvVol beside it. Stored (smv 0.3, call
+ * mid 0, put mid 0) therefore arrives as 0.3 on both wings, and a skew built
+ * from the two was 0 with nothing saying so. 'mid' is the side's own mid IV;
+ * 'smoothed' is the surface value standing in; null is no usable IV, or a
+ * payload without the per-side columns, where the source cannot be known.
+ */
+type IvSource = 'mid' | 'smoothed' | null;
+
+export const CHAIN_SKEW_BASIS = '25-delta put IV minus 25-delta call IV, side mid IVs only; null unless both wings are side mids';
+
+function contractIvSource(contract: OptionContract): IvSource {
+  if (contractIv(contract) === null) return null;
+  const sideKey = contractType(contract) === 'call' ? 'cMidIv' : 'pMidIv';
+  if (asNumber(contract[sideKey]) !== null) return 'mid';
+  // A payload without the columns lands here too: both null, source unknown.
+  return asNumber(contract.smoothSmvVol) !== null ? 'smoothed' : null;
+}
+
 function contractStrike(contract: OptionContract): number | null {
   return asNumber(contract.strike);
 }
@@ -124,15 +134,11 @@ function trimContract(contract: OptionContract): Record<string, unknown> {
     dte: contract.dte,
     mid: contractMid(contract),
     impliedVolatility: contract.impliedVolatility,
+    ivSource: contractIvSource(contract),
     delta: contract.delta,
     openInterest: contract.openInterest,
     volume: contract.volume,
   };
-}
-
-function compareByDte(left: ExpirationGroup, right: ExpirationGroup): number {
-  if (left.dte !== right.dte) return left.dte - right.dte;
-  return left.expiration.localeCompare(right.expiration);
 }
 
 function compareByLiquidity(left: OptionContract, right: OptionContract): number {
@@ -235,22 +241,14 @@ function groupByExpiration(contracts: OptionContract[]): ExpirationGroup[] {
   return Array.from(groups.values()).sort(compareByDte);
 }
 
-function pickRepresentativeGroups(groups: ExpirationGroup[]): ExpirationGroup[] {
-  const selected = new Map<string, ExpirationGroup>();
-
-  for (const bucket of REPRESENTATIVE_BUCKETS) {
-    const match = groups.find((group) => group.dte >= bucket.minDte && group.dte <= bucket.maxDte);
-    if (match) selected.set(match.expiration, match);
-  }
-
-  if (selected.size < MAX_EXPIRATION_SUMMARIES) {
-    for (const group of groups) {
-      if (selected.size >= MAX_EXPIRATION_SUMMARIES) break;
-      if (!selected.has(group.expiration)) selected.set(group.expiration, group);
-    }
-  }
-
-  return Array.from(selected.values()).sort(compareByDte).slice(0, MAX_EXPIRATION_SUMMARIES);
+/**
+ * The expiration summaries, near-ATM pairs and nearestExpiration are built
+ * from this sample; the representative contracts apply the same same-day rule
+ * on their own (hasNonZeroDte) before grouping. The rule and the tenor buckets
+ * are shared with the IV surface (expirationSampling.ts).
+ */
+function pickRepresentativeGroups(allGroups: ExpirationGroup[]): ExpirationGroup[] {
+  return sampleExpirationsAcrossCurve(allGroups, MAX_EXPIRATION_SUMMARIES);
 }
 
 function summarizeExpiration(group: ExpirationGroup, spotPrice: number): Record<string, unknown> {
@@ -275,11 +273,25 @@ function summarizeExpiration(group: ExpirationGroup, spotPrice: number): Record<
     atmPutMid,
     atmStraddleMid: atmCallMid != null && atmPutMid != null ? atmCallMid + atmPutMid : null,
     atmCallIv,
+    atmCallIvSource: atm.call ? contractIvSource(atm.call) : null,
     atmPutIv,
+    atmPutIvSource: atm.put ? contractIvSource(atm.put) : null,
     atmAverageIv: atmCallIv != null && atmPutIv != null ? (atmCallIv + atmPutIv) / 2 : (atmCallIv ?? atmPutIv),
+    // The contract each wing actually is. On a coarse strike grid the
+    // nearest-to-25-delta OTM contract can be the ATM strike (APT at 5.25
+    // with 50-cent strikes: the strike-5 put at delta -0.212), and with no
+    // OTM contract on a side it is an ITM one; the strike and delta say so.
+    put25DeltaStrike: otmPut ? contractStrike(otmPut) : null,
+    put25DeltaDelta: otmPut ? contractDelta(otmPut) : null,
     put25DeltaIv: otmPut ? contractIv(otmPut) : null,
+    put25DeltaIvSource: otmPut ? contractIvSource(otmPut) : null,
+    call25DeltaStrike: otmCall ? contractStrike(otmCall) : null,
+    call25DeltaDelta: otmCall ? contractDelta(otmCall) : null,
     call25DeltaIv: otmCall ? contractIv(otmCall) : null,
-    putCallSkew: otmPut && otmCall && contractIv(otmPut) != null && contractIv(otmCall) != null
+    call25DeltaIvSource: otmCall ? contractIvSource(otmCall) : null,
+    // Put wing minus call wing, from two side mids only: a wing whose IV is
+    // the smoothed stand-in, or whose source cannot be known, builds no skew.
+    putCallSkew: otmPut && otmCall && contractIvSource(otmPut) === 'mid' && contractIvSource(otmCall) === 'mid'
       ? contractIv(otmPut)! - contractIv(otmCall)!
       : null,
     callOpenInterest: callContracts.reduce((sum, contract) => sum + contractOpenInterest(contract), 0),
@@ -398,6 +410,10 @@ export function summarizeOptionsChain(payload: unknown): unknown {
       putCallVolumeRatio: totalCallVolume > 0 ? totalPutVolume / totalCallVolume : null,
     },
     expirations: representativeGroups.map((group) => summarizeExpiration(group, spotPrice)),
+    // get_iv_surface publishes a putCallSkew on another basis (fixed 95% and
+    // 105% strikes); the two read fivefold apart on one expiration under one
+    // name, so each says what it is beside the number.
+    putCallSkewBasis: CHAIN_SKEW_BASIS,
     nearAtmPairs: representativeGroups
       .slice(0, MAX_PAIR_SUMMARIES)
       .map((group) => {

@@ -12,7 +12,7 @@
  */
 import { describe, it, expect } from 'bun:test';
 import { summarizeLiveChain, type LiveChainResponse, type LiveOption } from './liveChainShaping.js';
-import { utf8ByteLength } from '../helpers.js';
+import { applyResponseSizeGuard, sanitizeMcpWireOutput, utf8ByteLength } from '../helpers.js';
 
 const call = (strike: number, delta: number, over: Partial<LiveOption> = {}): LiveOption => ({
   strike, type: 'call', bid: 1, ask: 1.2, mid: 1.1, iv: 0.2, delta,
@@ -111,6 +111,120 @@ describe('summarizeLiveChain', () => {
     expect(shaped.wings.call25Delta).toBeNull();
     expect(shaped.atm?.call?.delta).toBeNull();
     expect(shaped.atm?.call?.iv).toBeNull();
+  });
+
+  // Nineteenth run (tastytrade, MU, 2026-09-23): the ATM rows carried delta
+  // and no gamma, theta or vega, on every broker in every run. The adapters
+  // map all three and `last` (packages/shared brokerService.ts), and row()
+  // dropped them, so "live Greeks" was delta alone.
+  it("carries the broker's gamma, theta, vega and last on every contract row", () => {
+    const greeks = { gamma: 0.012345678, theta: -0.456789012, vega: 0.312345678, last: 1.15 };
+    const shaped = summarizeLiveChain({
+      spotPrice: 500,
+      calls: [call(495, 0.6, greeks), call(500, 0.5, greeks), call(505, 0.25, greeks)],
+      puts: [put(495, -0.25, greeks), put(500, -0.5, greeks), put(505, -0.6, greeks)],
+    });
+    const rows = [shaped.atm!.call!, shaped.atm!.put!, shaped.wings.call25Delta!, shaped.wings.put25Delta!,
+      ...shaped.nearTheMoney.calls, ...shaped.nearTheMoney.puts];
+    expect(rows.length).toBe(10);
+    for (const r of rows) {
+      expect(r).toMatchObject(greeks);
+      expect(Object.keys(r)).toEqual(['strike', 'bid', 'ask', 'mid', 'mark', 'last', 'iv', 'delta', 'gamma', 'theta', 'vega', 'volume', 'openInterest']);
+    }
+  });
+
+  it('reports an unpublished gamma, theta, vega or last as absent, not zero', () => {
+    const shaped = summarizeLiveChain({ spotPrice: 500, calls: [call(500, 0.5)], puts: [] });
+    expect(shaped.atm?.call).toMatchObject({ gamma: null, theta: null, vega: null, last: null });
+  });
+
+  it('still fits the 50KB ceiling at the widest strikeRange with long published decimals', () => {
+    const chain = wideChain();
+    const long = { gamma: 0.001234567891, theta: -0.123456789012, vega: 0.987654321098, last: 123.456789, mark: 123.456789, iv: 0.514250373 };
+    chain.calls = chain.calls!.map((o) => ({ ...o, ...long, delta: (o.delta as number) + 0.000000001 }));
+    chain.puts = chain.puts!.map((o) => ({ ...o, ...long, delta: (o.delta as number) - 0.000000001 }));
+    const shaped = summarizeLiveChain(chain, { strikeRange: 40 });
+    expect(shaped.nearTheMoney.calls.length).toBe(81);
+    // About 40KB at 12-digit decimals, against the 50KB ceiling (helpers.ts
+    // MAX_RESPONSE_BYTES, measured on compact JSON), so nothing is truncated.
+    expect(utf8ByteLength(JSON.stringify(shaped))).toBeLessThan(50 * 1024);
+  });
+
+  // review: 101 strikes a side from 475 to 525 in 0.5 steps with
+  // full-precision decimals took the shaped payload from 35,197 to 53,291
+  // bytes at strikeRange 40, past the 51,200-byte guard, which kept the first
+  // 50 rows a side (480 to 504.5 instead of 480 to 520): a lopsided window.
+  function denseChain(): LiveChainResponse {
+    const calls: LiveOption[] = []; const puts: LiveOption[] = [];
+    for (let i = 0; i <= 100; i += 1) {
+      const strike = 475 + i / 2;
+      const long = (base: number, scale: number) => base + Math.sqrt(i + 2) / scale;
+      const shared = {
+        bid: long(10, 7), ask: long(10.5, 7), mid: long(10.25, 7), mark: long(10.25, 7), last: long(10.1, 7),
+        iv: long(0.3, 700), gamma: long(0.01, 7e5), theta: -long(0.1, 7e3), vega: long(0.3, 7e4),
+        volume: 1_234_567 + i, openInterest: 7_654_321 + i,
+      };
+      calls.push(call(strike, long(0.2, 170), shared));
+      puts.push(put(strike, -long(0.2, 170), shared));
+    }
+    return { symbol: 'MU', expiration: '2026-10-02', dataSource: 'live', provider: 'tastytrade', asOf: '2026-09-23T19:10:46.783Z', spotPrice: 500, calls, puts };
+  }
+
+  it('narrows the window evenly on both sides when the requested range would exceed the response budget', () => {
+    const shaped = summarizeLiveChain(denseChain(), { strikeRange: 40 });
+    expect(shaped.view.requestedStrikeRange).toBe(40);
+    expect(shaped.view.narrowedForSize).toBe(true);
+    const range = shaped.view.strikeRange;
+    expect(range).toBeGreaterThan(20);
+    expect(range).toBeLessThan(40);
+    for (const side of [shaped.nearTheMoney.calls, shaped.nearTheMoney.puts]) {
+      expect(side.length).toBe(2 * range + 1);
+      expect(side[0].strike).toBe(500 - range / 2);
+      expect(side[side.length - 1].strike).toBe(500 + range / 2);
+    }
+    // One range wider would not have fitted: the narrowing is the least it can be.
+    const wider = summarizeLiveChain(denseChain(), { strikeRange: range + 1 });
+    expect(wider.view.narrowedForSize).toBe(true);
+    expect(wider.view.strikeRange).toBe(range);
+    // And the size guard passes it through whole, with no truncation.
+    const wire = applyResponseSizeGuard(shaped);
+    expect(utf8ByteLength(wire)).toBeLessThanOrEqual(50 * 1024);
+    expect(JSON.parse(wire)).toEqual(JSON.parse(JSON.stringify(sanitizeMcpWireOutput(shaped))));
+  });
+
+  it('does not narrow a range that fits, and says so', () => {
+    const shaped = summarizeLiveChain(denseChain());
+    expect(shaped.view).toMatchObject({ strikeRange: 8, requestedStrikeRange: 8, narrowedForSize: false });
+    expect(shaped.nearTheMoney.calls.length).toBe(17);
+  });
+
+  it("reports a broker IV outside the platform's usable band as absent, and counts it", () => {
+    // Seen live on SPY after hours (2026-09-18, Tradier): a 0DTE deep-ITM
+    // call with `iv: 10, delta: 1` and deep-ITM puts with `iv: 0` beside real
+    // deltas. Those are the broker's solver giving up (a mid below intrinsic
+    // has no IV), not a 1000% or a 0% vol, and the exposure engine already
+    // treats them as absent (packages/shared exposure-compute isUsableIV, the
+    // proxy's capIv: finite, above 0, at most 5). This tool passed them
+    // through as numbers. Same band here; the delta and the quote stay.
+    const shaped = summarizeLiveChain({
+      spotPrice: 762.6,
+      calls: [call(755, 1, { iv: 10 }), call(763, 0.4, { iv: 0.1314 }), call(800, 0.02, { iv: 5 })],
+      puts: [put(769, -0.95, { iv: 0 }), put(770, -0.96, { iv: 0 }), put(763, -0.6, { iv: 0.1192 }), put(700, -0.01, { iv: 5.0001 })],
+    }, { strikeRange: 40 });
+    const ivAt = (side: 'calls' | 'puts', strike: number) => shaped.nearTheMoney[side].find((c) => c.strike === strike)?.iv;
+    expect(ivAt('calls', 755)).toBeNull();
+    expect(ivAt('calls', 763)).toBe(0.1314);
+    expect(ivAt('calls', 800)).toBe(5);
+    expect(ivAt('puts', 769)).toBeNull();
+    expect(ivAt('puts', 770)).toBeNull();
+    expect(ivAt('puts', 763)).toBe(0.1192);
+    expect(ivAt('puts', 700)).toBeNull();
+    // The delta the broker published beside it is still real.
+    expect(shaped.nearTheMoney.calls.find((c) => c.strike === 755)?.delta).toBe(1);
+    expect(shaped.totals.calls.contractsWithoutUsableIv).toBe(1);
+    expect(shaped.totals.puts.contractsWithoutUsableIv).toBe(3);
+    // And the ATM pair, which is what a model quotes first.
+    expect(shaped.atm?.call?.iv).toBe(0.1314);
   });
 
   it('does not count a contract with no quote as quoted', () => {

@@ -33,7 +33,7 @@ export function register(server: McpServer, client: LiveApiClient): void {
       description:
         'Get the calibrated parameters and fit quality for the eight pricing models (Black-Scholes, Heston, SABR, Variance Gamma, Merton, Kou, Bates, eSSVI) for one symbol. '
         + 'Answers "what parameters were fitted, and how well did each model fit" - use get_regime instead for which market regime a symbol is in, which is a different question and a different dataset. '
-        + 'Returns each model\'s latest parameters with its IV and price RMSE, plus a short error history showing whether the fit is stable. '
+        + 'Returns each model\'s latest parameters with its IV RMSE, and a price RMSE for every model except eSSVI, which is fitted on the implied-volatility surface and stores none (priceRmse is null there by design, not a failed fit), plus a short error history showing whether the fit is stable. '
         + 'failedQualityCheck true means the fit was REJECTED: it did not converge, or fewer than three options could be repriced, or its error exceeded the threshold. Only the first substitutes the parameters; the other two leave a real fitted set that was then rejected. Either way the fit was not accepted, so do not present those parameters as a good fit for this symbol. '
         + 'Coverage is the regime universe of about 124 symbols; a symbol outside it returns an empty history rather than an error. '
         + 'Requires a Pro subscription or above.',

@@ -80,7 +80,7 @@
     },
     {
       "name": "get_regime",
-      "description": "Get regime data at one of three scopes: market (composite stress regime across SPY/QQQ/IWM/DIA), symbol (per-symbol daily regime + authoritative Greek exposures — net gamma/delta/vega/vanna/charm/vomma, call wall, put wall, gamma flip, abs gamma anchor, top 10 gamma strikes), or intraday (5 scans/day with stress scoring + Greek snapshots). Pick via the scope enum; symbol and intraday require `symbol`"
+      "description": "Get regime data at one of three scopes: market (composite stress regime across SPY/QQQ/IWM/DIA), symbol (per-symbol daily regime + authoritative Greek exposures — net gamma/delta/vega/vanna/charm/vomma, call wall, put wall, gamma flip, gamma magnet, top 10 gamma strikes), or intraday (5 scans/day with stress scoring + Greek snapshots). Pick via the scope enum; symbol and intraday require `symbol`"
     },
     {
       "name": "get_earnings",
@@ -112,7 +112,7 @@
     },
     {
       "name": "get_options_analytics_history",
-      "description": "Get historical daily analytics snapshots (IV, skew, expected move, rates/dividend yield, GEX/DEX/VEX, net vanna/charm/vomma) — for walls and current Greek exposures use get_regime with scope='symbol'"
+      "description": "Get historical daily analytics snapshots (IV, skew, expected move, risk-free rate, GEX/DEX/VEX, net vanna/charm/vomma); for walls and current Greek exposures use get_regime with scope='symbol'"
     },
     {
       "name": "get_iv_surface",
@@ -180,7 +180,7 @@
     },
     {
       "name": "get_dealer_positioning",
-      "description": "Get end-of-day dealer positioning from the last completed session over 0-60 days: net GEX/DEX, dealer regime, gamma flip, call and put walls, gamma magnet, 30-day expected move and top contributing strikes, for roughly 5,500 listed equities and ETFs"
+      "description": "Get end-of-day dealer positioning from the most recent session on file over 0-60 days: net GEX/DEX, dealer regime, gamma flip, call and put walls, gamma magnet, 30-day expected move and top contributing strikes, for roughly 5,500 listed equities and ETFs"
     },
     {
       "name": "compute_black_scholes",

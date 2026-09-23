@@ -45,11 +45,18 @@ const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
  * FRACTION of spot over 30 calendar days despite the column name, and 0.018
  * under a key ending in "Pct" reads as 0.018%. It is published under the name
  * of its unit, with the unit stated again in `units`, by every shaper here.
+ *
+ * `dividendYield` is NOT here either. The producer has never written it: on
+ * 2026-09-18 the column was 0 on all but 24 of 21.3 million rows, and every
+ * row of the latest session. Published, AAPL read as "pays no dividend", a
+ * zero nobody computed. The live positioning tool resolves q from the company
+ * profile and says so under `resolved`; this one says nothing until the
+ * stored value is real.
  */
 const SCALARS = [
   'spotPrice', 'maxPain', 'netGex', 'netDex',
   'atmIv', 'atmIv7d', 'atmIv30d', 'atmIv90d',
-  'putCallRatio', 'ivSkew25d', 'dividendYield',
+  'putCallRatio', 'ivSkew25d',
   'totalVolume', 'totalOi', 'callVolume', 'putVolume', 'callOi', 'putOi',
   'ivRank', 'ivPercentile', 'hv20d', 'hv60d',
 ] as const;
@@ -287,6 +294,13 @@ export function summarizeMetricsBatch(response: MetricsBatchResponse, requestedS
   // answer about a set the caller did not ask about.
   const returned = new Set(rows.map((r) => r.symbol).filter((s): s is string => s !== null));
   const missing = requestedSymbols.filter((symbol) => !returned.has(symbol));
+
+  // In the order asked for, not the endpoint's alphabetical one: a comparison
+  // table built row by row against the request came out misaligned. A row
+  // for a symbol nobody asked for is kept, last.
+  const position = new Map(requestedSymbols.map((symbol, index) => [symbol, index] as const));
+  const rank = (symbol: string | null) => (symbol !== null ? position.get(symbol) : undefined) ?? Number.MAX_SAFE_INTEGER;
+  rows.sort((a, b) => rank(a.symbol) - rank(b.symbol));
 
   return {
     dataSource: 'eod' as const,

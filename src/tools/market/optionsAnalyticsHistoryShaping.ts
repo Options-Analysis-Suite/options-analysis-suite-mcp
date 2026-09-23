@@ -1,3 +1,5 @@
+import { collapseProvenance } from './provenanceShaping.js';
+
 type OptionsAnalyticsPoint = {
   date?: string;
   spot_price?: number;
@@ -72,7 +74,7 @@ function getPointArrayKey(response: OptionsAnalyticsPayload): 'data' | 'history'
  */
 export const OPTIONS_ANALYTICS_UNITS = {
   expectedMove30dFraction: 'decimal fraction of spot over the next 30 calendar days (0.018 = 1.8%); '
-    + 'expected_move_30d_fraction on each point, avgExpectedMove30dFraction and maxExpectedMove30dFraction in summary',
+    + 'expectedMove30dFraction on each point, avgExpectedMove30dFraction and maxExpectedMove30dFraction in the summary shape (returned only past 90 rows)',
 } as const;
 
 /**
@@ -83,6 +85,17 @@ export const OPTIONS_ANALYTICS_UNITS = {
  * published 0.018 under a name ending in "pct". Everything else on the row
  * and on the payload is passed through as the proxy sent it.
  */
+/**
+ * UNWRITTEN_COLUMNS: option_ticker_snapshots.dividend_yield is 0 on every row
+ * the producer has ever written (24 positive rows in 21.3 million on
+ * 2026-09-18), because scan_strikes.div_rate, which it is the median of, is
+ * the data vendor's per-strike divRate and that is 0 on all 1,009,414 rows of a session.
+ * Published, AAPL read as "pays no dividend" on every path of this tool: the
+ * compact point, the earliest/latest, the two aggregates, and the raw rows the
+ * short and `full` paths carry. The snapshot tool withholds it for the same
+ * reason (optionsSnapshotShaping SCALARS). Nothing here says the yield is
+ * zero until the stored value is real.
+ */
 export function labelOptionsAnalyticsHistory<T>(payload: T): T {
   if (payload == null || typeof payload !== 'object' || Array.isArray(payload)) return payload;
   const response = payload as OptionsAnalyticsPayload;
@@ -90,12 +103,26 @@ export function labelOptionsAnalyticsHistory<T>(payload: T): T {
   if (!key) return payload;
   const rows = (response[key] as unknown[]).map((row) => {
     if (row == null || typeof row !== 'object' || Array.isArray(row)) return row;
-    if (!('expected_move_pct' in row)) return row;
-    const { expected_move_pct, ...rest } = row as Record<string, unknown>;
+    // dividend_yield is withheld on every path (see UNWRITTEN_COLUMNS); the
+    // expected move is renamed to its unit.
+    const { expected_move_pct, dividend_yield: _unwritten, ...rest } = row as Record<string, unknown>;
+    if (!('expected_move_pct' in row)) return rest;
     return { ...rest, expected_move_30d_fraction: expected_move_pct };
   });
-  return { ...response, [key]: rows, units: OPTIONS_ANALYTICS_UNITS } as T;
+  // Every raw path ends here, so this is where the raw shape says which way
+  // it runs (the proxy sorts ascending, history-backtest.ts), beside the
+  // trim meta the 30-day default writes first. The summary says its own.
+  const metaKey = `_${key}_meta`;
+  const meta = response[metaKey];
+  const priorMeta = meta != null && typeof meta === 'object' && !Array.isArray(meta) ? meta as Record<string, unknown> : {};
+  return {
+    ...collapseProvenance(response),
+    [key]: rows,
+    [metaKey]: { ...priorMeta, order: 'oldest first' },
+    units: OPTIONS_ANALYTICS_UNITS,
+  } as T;
 }
+
 
 export function sortOptionsAnalyticsPoints(points: unknown): OptionsAnalyticsPoint[] {
   if (!Array.isArray(points)) return [];
@@ -153,7 +180,7 @@ export function compactOptionsAnalyticsPoint(point: OptionsAnalyticsPoint): Reco
     term_structure_slope: round(point.term_structure_slope, 5),
     iv_skew_25d: round(point.iv_skew_25d),
     vwiv: round(point.vwiv),
-    dividend_yield: round(point.dividend_yield, 5),
+    // No dividend_yield: see UNWRITTEN_COLUMNS.
     risk_free_rate: round(point.risk_free_rate, 5),
     net_gex: round(point.net_gex, 0),
     net_dex: round(point.net_dex, 0),
@@ -208,11 +235,13 @@ export function summarizeOptionsAnalyticsHistory(
   const vannaSeries = getNumberSeries(sorted, (point) => point.net_vanna);
   const charmSeries = getNumberSeries(sorted, (point) => point.net_charm);
   const vommaSeries = getNumberSeries(sorted, (point) => point.net_vomma);
-  const dividendYieldSeries = getNumberSeries(sorted, (point) => point.dividend_yield);
   const riskFreeRateSeries = getNumberSeries(sorted, (point) => point.risk_free_rate);
   const latestAtmIv = getPreferredAtmIv(latest);
   const earliestAtmIv = getPreferredAtmIv(earliest);
-  const { data, history, ...rest } = response;
+  // Collapsed here as on the raw path: a first fix reached only
+  // labelOptionsAnalyticsHistory, and a 400-day request still carried the
+  // provenance three times.
+  const { data, history, ...rest } = collapseProvenance(response);
 
   return {
     ...rest,
@@ -235,8 +264,6 @@ export function summarizeOptionsAnalyticsHistory(
       avgPutCallRatio: round(avg(putCallSeries)),
       avgExpectedMove30dFraction: round(avg(expectedMoveSeries)),
       maxExpectedMove30dFraction: round(expectedMoveSeries.length ? Math.max(...expectedMoveSeries) : undefined),
-      avgDividendYield: round(avg(dividendYieldSeries), 5),
-      latestDividendYield: round(latest.dividend_yield, 5),
       avgRiskFreeRate: round(avg(riskFreeRateSeries), 5),
       latestRiskFreeRate: round(latest.risk_free_rate, 5),
       spotChangePct: round(
@@ -260,6 +287,8 @@ export function summarizeOptionsAnalyticsHistory(
     trendSample,
     [`_${dataKey}_meta`]: {
       summarized: true,
+      // The raw shape is the proxy's ascending order; this one is not.
+      order: 'newest first',
       recent: recent.length,
       trend_samples: trendSample.length,
       total_snapshots: sorted.length,

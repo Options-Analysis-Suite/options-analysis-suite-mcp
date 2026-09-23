@@ -2677,19 +2677,14 @@ function shapeCalibrationOutcomeFields(
   };
 }
 
-/** Rename camelCase wall/flip/tilt keys to space-separated equivalents so the
- *  LLM doesn't surface backend identifiers (callWall, gammaTilt, etc.) verbatim
- *  in user-facing summaries. */
+/** The key levels keep their camelCase field names, like every other field;
+ *  absGamma is published as gammaMagnet, the name get_regime and both
+ *  positioning tools use for the strike with the largest absolute gamma. */
 function shapeKeyLevels(value: unknown): Record<string, unknown> | undefined {
   const levels = getObject(value);
   if (!levels) return undefined;
   const KEY_MAP: Record<string, string> = {
-    callWall: 'call wall',
-    putWall: 'put wall',
-    gammaFlip: 'gamma flip',
-    absGamma: 'abs gamma',
-    gammaTilt: 'gamma tilt',
-    secondaryFlips: 'secondary flips',
+    absGamma: 'gammaMagnet',
   };
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(levels)) {

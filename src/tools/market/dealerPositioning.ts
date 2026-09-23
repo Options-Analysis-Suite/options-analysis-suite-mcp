@@ -15,7 +15,7 @@ import { summarizeDealerPositioning } from './dealerPositioningShaping.js';
  * existed and the computation existed, and nothing joined them. The proxy's
  * /live/exposure route joins them, from the stored broker credential.
  *
- * NO END-OF-DAY FALLBACK INSIDE THIS TOOL. A live gamma flip and a last-close
+ * NO END-OF-DAY FALLBACK INSIDE THIS TOOL. A live gamma flip and an end-of-day
  * one are different claims, and a caller must be able to tell them apart; a
  * failure here reports the failure, never a quiet substitute.
  */
@@ -26,18 +26,68 @@ export function register(server: McpServer, client: LiveApiClient): void {
       title: 'Live Dealer Positioning / GEX (Pro)',
       description:
         'Get LIVE dealer positioning for a symbol, computed in real time from the broker credential stored on your Options Analysis Suite account. '
-        + 'Returns net GEX and DEX plus net vega, vanna, charm and vomma; the gamma flip (the repriced regime-change level), the call wall and put wall (the gamma levels that act as resistance and support), a gamma magnet, gamma concentration, a dealer regime of positive or negative gamma, and per-strike gamma and delta contributions around spot. '
+        + 'Returns net GEX and DEX plus net vega, vanna, charm and vomma; the gamma flip (the repriced regime-change level), the call wall and put wall (the call wall is the strike with the largest positive call gamma and the put wall the strike with the most negative put gamma (ties go to the lower strike; a side with no such strike leaves that wall null), and nothing orders them, so the put wall can sit above the call wall), a gamma magnet, gamma concentration, a dealer regime, and per-strike gamma and delta contributions around spot. '
         + 'Positive net gamma means dealers hedge against moves and dampen them; negative means they hedge with moves and amplify them. '
-        + 'The gamma flip is found by repricing the book across a range of spot levels. `coverage.gammaFlipMethod` says how: "repriced" recomputes gamma from implied volatility at every level, while "frozen-gamma" means at least one leg had no IV and its published gamma was held constant, which is an approximation that can materially move the level or create one where there was none. Say which was used when quoting it. '
+        + '`dealerRegime` is the sign of the net gamma over the selected expirations interpolated at spot between the two strikes that bracket it (the nearest strike\'s gamma when spot is outside the strike range), not the sign of `netGex` and not which side of `gammaFlip` spot sits on; it can disagree with both, and only with fewer than two gamma-bearing strikes is it the sign of `netGex` itself. '
+        + 'The gamma flip is found by repricing the book across a range of spot levels. `coverage.gammaFlipMethod` says how: "repriced" recomputed gamma from implied volatility for every leg; "frozen-gamma" means no leg had a usable IV, so every published gamma was held constant across the sweep; "mixed" means some legs were repriced and the rest held constant. A held gamma is an approximation that can materially move the level or create one where there was none, and a usable IV is finite, above 0 and at most 5 (500%): a broker-published IV of 0 or above that band counts as absent. Say which method was used when quoting the level. '
         + 'The gamma-flip search samples prices within 20% of spot. A pair of crossings within one sampling interval can be missed; no detected flip does not prove that no crossing exists within or beyond that range. '
-        + '`coverage.gammaFlipResolution` is the local sampling bracket width where the flip was found, not a confidence interval or an error bound. The reported flip is the nearest crossing detected by that search, and the resolution is null when no level is reported. '
+        // The scan's step starts at spot x 5e-6, grows 1% a sample and caps at
+        // spot x 0.0002 after 371 samples, 1.955% out (observed-gamma-flip.ts
+        // NEAR_STEP, GROWTH, MAX_STEP); the reported resolution is the step at
+        // the bracket, so a far crossing usually reads spot x 0.0002 (KBE at
+        // 20:05Z: 0.013324 = 66.62 x 0.0002, 2.81% out) and a near one an
+        // irregular smaller width (1.54% out at 19:39Z: 0.0106). Not always
+        // (review): the width is max(step, |sample - anchor|),
+        // clipped by the 20% edge (flip 120 at spot 100: 0.0046), widened by
+        // zero samples between the signs (0.04 in a fixture), and about twice
+        // the first step for a crossing at spot (:290).
+        + '`coverage.gammaFlipResolution` is the width of the bracket the sign change was found in, not a confidence interval or an error bound. The search steps out from spot in samples starting at 0.0005% of spot, growing 1% a sample to a cap of 0.02% of spot from about 2% out, and the width is usually that step (a flip beyond about 2% out usually reads spot times 0.0002), wider when zero-valued samples sat between the two signs, narrower at the 20% search edge, and about twice the first step for a crossing at spot itself. The reported flip is the nearest crossing detected by that search, and the resolution is null when no level is reported. '
         + '`coverage.gammaFlipSearchStatus` describes the search on supported legs: "found" detected a crossing, "not-found" detected none in the sampled range, and "unresolved" means numerical signs or crossing order could not be established reliably. An unresolved null gives no conclusion about whether a crossing exists; a null status means the response did not report a recognized search status. '
-        + 'Computed over the nearest four expirations of the live chain, so it reflects the current session rather than the last close. '
-        + 'Metric coverage and statuses distinguish complete, partial, unmeasured, empty and unknown results. Partial values sum only supported option legs; they are not measurements of the whole book. Unmeasured or unknown values are null. Gamma-derived levels require complete coverage; the gamma flip uses its own repricing coverage, including usable IV. '
-        + 'EXPENSIVE: each call is charged five weighted units against the 10-unit-per-minute live-broker limit, so at most two calls a minute. A cold request reads the expirations list and up to four chains; actual upstream request counts vary with the provider and cache state. Do not call it in a loop or for a list of symbols. '
+        // Seventeenth run: `levelStatus.gammaFlip` read "complete" beside a
+        // null flip. The status is the level's required coverage
+        // (dealerPositioningShaping.ts measuredLevel), and nothing said so.
+        + '`levelStatus` is each level\'s required coverage (the flip\'s sweep coverage, `coverage.gammaFlip`, which counts repriced and held legs alike, so it can be complete under "frozen-gamma" with no leg repriced; the walls\', the magnet\'s and the concentration\'s net-gamma coverage), not whether a level was found: a null `gammaFlip` beside a complete `levelStatus.gammaFlip` is a null the route reported over complete coverage, and `coverage.gammaFlipSearchStatus` says whether the search found no crossing or was unresolved. '
+        + 'Each per-strike row carries `callGex` and `putGex` beside `netGex`, the two sides the walls are chosen from, only when the row\'s gamma coverage is complete or empty: the coverage counts both sides together, so under partial coverage a side could be an unmeasured zero, and both sides are then null while the partial net is still published. '
+        + 'Computed over the first four expirations the broker lists for the live chain, which on a name with monthly listings can span months (KBE on 2026-09-18: 09-18, 10-16, 11-20, 12-18, three months; on 2026-09-21, with the 09-18 listing gone, 10-16, 11-20, 12-18, 2027-01-15, nearly four) against the EOD tools\' 0-60 days; `window.expirations` lists them. The window moves with the broker\'s list, as a listing expires or a nearer one is added, so two answers across such a change cover different books (KBE at 17:47Z on 2026-09-21: netGex -5,013,878, call wall 75, put wall 59, no flip found within 20% of spot, against 358,515, 70 and a flip at 66.68 at 20:46Z on 09-18), and the live figure can differ in sign from the 0-60 day figure on file, a different window on a different session (KBE: +184,861 on file for 09-18, +248,246 for 09-17). It reflects the current session rather than the most recent session on file. Outside trading hours the quotes are the broker\'s last, but time to expiry is measured from the wall clock when the chain rows are built, moments before `asOf`, so the repriced flip and the time-sensitive totals drift a little between calls with no new quotes; that is the clock, not the market. The broker can also refresh its Greeks after the close, and a refresh can move the levels and totals at unchanged spot (KBE on 2026-09-18 at 20:46Z against the 20:05Z snapshot, spot 66.62 both times: every per-strike vega changed, netGex 326,483 to 358,515, the call wall 66 to 70, the flip 64.75 to 66.68), so a change after hours can be a refresh rather than the market, and the payload does not say which. '
+        // Fourteenth run: every per-strike vega identical between two
+        // calls 23 minutes apart and netGex scaled by (S2/S1)^2 to its
+        // rounding (exposure-compute.ts:791 Math.round), so the broker's
+        // Greeks were one snapshot; the Tradier adapter drops
+        // greeks.updated_at (brokerService.ts:637-640), so nothing dates it.
+        // And charm swung -2.6M to +8.1M over 70 legs both times: the engine
+        // computes vanna, charm and vomma analytically from time to expiry
+        // (exposure-compute.ts:365-377), the route's expirations list is
+        // cached 15 minutes with no close-time filter (live-broker.ts:58),
+        // and the T floor drops a leg from those three sums at one minute
+        // to its close. A same-day strike-66 leg with 1,000 OI carries charm
+        // 3,276,453 at 44 minutes and 8,662 at 21 minutes through that
+        // formula, against the low thousands for a one-month leg; its vanna
+        // flips sign where d2 = 0, S = K*exp(-(r - q - iv^2/2)T): 66.00014
+        // here, $2.25 off at K 6000 and IV 3; it rises with IV throughout but
+        // sits below K while iv^2/2 < r - q, so "farther" was wrong at low
+        // IV (review: charm is
+        // the one that can own the book; a later review: the vanna and vomma
+        // peaks were a 30%-IV grid, not an ordering, so no size comparison
+        // is published; another: the input checks a published Greek
+        // passes first, exposure-compute.ts:196-235, are named).
+        + 'The broker\'s Greeks and implied volatilities can be a snapshot older than `asOf`, which is the fetch time, and nothing in the payload dates them: Tradier\'s refresh about hourly (KBE on 2026-09-18: every per-strike vega identical at 19:16Z and 19:39Z, different at 18:56Z). Between refreshes the published Greeks are fixed, so with the resolved rate and yield, open interest and the summed leg set also unchanged, only spot and the clock move the totals: the per-strike gamma rows move with spot squared exactly and netGex to its rounding (325,161 to 326,140 as spot went 66.485 to 66.585). On an expiration day the same-day expiration stays in the window while the broker lists it (Tradier still listed KBE\'s 2026-09-18 expiration 46 minutes after the close, and the route caches that list for 15 minutes, so it can be asked for that long after the listing ends); its legs stay eligible for gamma, delta and vega under the engine\'s input checks (a known open interest, finite and from 0 to 1e12; a finite gamma or delta of size at most 10, a finite vega of size at most 10,000; a finite contribution), and drop out of vanna, charm and vomma a minute before its close. Those three are computed from time to expiry, so on the same-day legs they change sharply with small spot moves and with the clock: charm near the money can be the largest term in the book (a strike-66 leg with 1,000 open interest: charm 3.3 million at 44 minutes to the close with spot 66.485, 8,662 at 21 minutes with spot 66.585; a one-month leg with the same open interest, in the low thousands), and its vanna changes sign at the price where d2 is zero, 66.0001 in the example (higher implied volatility raises this crossing price). On an expiration afternoon netCharm can be mostly the same-day legs and the clock (KBE 2026-09-18: -2,631,616 at 19:16Z, +8,063,999 at 19:39Z, over 70 of 106 legs both times). '
+        // Fifteenth run, 20:05Z: the flip read 64.75 against 65.56 at 19:39Z
+        // on one broker snapshot. observedFlipInput takes yte > 0 as having
+        // time, and computeYearsToExpiration floors an elapsed expiry at one
+        // minute, so the same-day legs are repriced at T = 1 minute after
+        // the close for as long as the cached list carries the date.
+        + 'After the close the expired legs stay inside the totals and the levels while the expiration is listed, and `window.expirations` beside `asOf` is the only sign of it. The flip sweep reprices each leg from its implied volatility at its time to expiry floored at one minute, so on an expiration day the same-day legs\' repriced gamma narrows onto their strikes through the afternoon and holds the one-minute shape after the close, and the flip moves with the clock (KBE 2026-09-18: 65.56 at 19:39Z, 64.75 at 20:05Z, on one broker snapshot, spot 66.585 to 66.62). '
+        // A leg enters the vanna, charm and vomma sums only while its IV
+        // passes exposure-compute.ts:365 (above .01, at most 5, time left)
+        // and the gamma, delta and vega sums only while that Greek is
+        // published, so the summed set moves between calls: KBE's netCharm
+        // read +4,387,168 over 80 of 106 legs and, twenty minutes later,
+        // -2,631,616 over 70. Nothing in the payload names the legs.
+        + 'Metric coverage and statuses distinguish complete, partial, unmeasured, empty and unknown results. Partial values sum only supported option legs; they are not measurements of the whole book. A leg counts toward vanna, charm and vomma only while the broker\'s implied volatility for it is above 1% and at most 500% and its expiration\'s close is more than a minute away, and toward gamma, delta and vega only while the broker publishes that Greek for it, so the included count of a partial total moves between calls, and two partial totals minutes apart can differ by which legs were summed rather than by the market (KBE on 2026-09-18: netCharm +4,387,168 over 80 of 106 legs at 18:56Z, -2,631,616 over 70 at 19:16Z); the payload does not say which legs each summed. Unmeasured or unknown values are null. Gamma-derived levels require complete coverage. `coverage.gammaFlip` counts every leg that entered the sweep, repriced or held, so it can read complete while `gammaFlipMethod` is "mixed"; the method, not the count, says whether those legs were repriced, held, or both. '
+        + 'EXPENSIVE: each call is charged five weighted units against the 10-unit-per-minute live-broker limit, so at most two calls a minute. A cold request reads the expirations list and up to four chains; actual upstream request counts vary with the provider and cache state. Do not call it in a loop or for a list of symbols. A repeat for the same symbol and broker over the same four expirations within 15 seconds can be answered from a short in-memory cache, with the same `asOf`, totals and levels whatever `strikeRange` it asks for (the limit only chooses which computed rows are returned), and is still charged five units; the cache is per proxy instance, so a repeat can also be computed afresh. '
         + 'The risk-free rate and dividend yield are resolved from real market data and never defaulted, because the gamma flip is a repricing that depends on them; `resolved` reports what was used. '
         + 'Requires a Pro subscription or above and a broker connected under Account -> Broker. '
-        + 'For the last completed session\'s positioning over 0-60 days, free and without a broker, use get_dealer_positioning; its gamma flip is a coarse-grid level and is a different claim from the repriced one here.',
+        + 'For the most recent session on file\'s positioning over 0-60 days, free and without a broker, use get_dealer_positioning; its gamma flip is a coarse-grid level and is a different claim from the repriced one here.',
       inputSchema: {
         symbol: z.string().describe('Ticker symbol (e.g., AAPL, SPY, MU)'),
         // Every provider a stored credential may name. It must match the
@@ -47,7 +97,7 @@ export function register(server: McpServer, client: LiveApiClient): void {
         provider: z.enum(['tradier', 'tastytrade', 'public', 'schwab']).optional()
           .describe('Which connected broker to use. Defaults to the first one connected.'),
         strikeRange: z.number().int().min(1).max(40).optional()
-          .describe('TOTAL per-strike rows nearest spot. Default 10. Totals use all supported legs in the selected expirations regardless of this display limit; metric statuses identify partial coverage.'),
+          .describe('TOTAL per-strike rows nearest spot. Default 10, max 40. Totals use all supported legs in the selected expirations regardless of this display limit; metric statuses identify partial coverage. The walls and the magnet are chosen over every strike in the window (`strikes.total` of them), so they can sit outside the returned rows (KBE on 2026-09-21: walls 75 and 59 with the ten default rows spanning 62 to 71); a wall with no row here has no `callGex` or `putGex` beside it to check it against, and a wider limit returns more of them while `strikes.returned` is below `strikes.total`.'),
       },
       outputSchema: marketDataOutputSchema,
       // Unlike every other tool here except the live chain, this reaches a

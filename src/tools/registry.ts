@@ -110,7 +110,7 @@ export function registerAllTools(
   dealerPositioning(server, liveClient);
   // The end-of-day twin of the live positioning tool (no Pro requirement, no
   // broker) and Black-Scholes from explicit inputs (Pro, no broker). Separate tools,
-  // never a fallback inside the live one: a last-close gamma flip and a live
+  // never a fallback inside the live one: an end-of-day gamma flip and a live
   // one are different claims.
   eodDealerPositioning(server, liveClient);
   blackScholes(server, liveClient);

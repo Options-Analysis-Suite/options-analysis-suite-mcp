@@ -29,6 +29,28 @@ export const EOD_GAMMA_FLIP_NOTE =
   'Coarse-grid level from the stored end-of-day snapshot, with no search status or resolution. '
   + 'For a repriced flip as of now, with how it was found, use get_live_dealer_positioning.';
 
+/**
+ * Beside a null flip the level note described a level that is not there
+ * (APT 2026-09-17). The producer (proxy/lib/exposure-compute.ts
+ * computeRepricedGammaFlip) returns null for no zero crossing, for a
+ * profile that is zero at every sampled price, or for nothing to sweep.
+ * On a row this tool can show, the last is ruled out: the route serves a
+ * session only with dealer_regime set, which the producer sets only when
+ * the near-term universe had a strike with open interest and a valid gamma
+ * (SnapshotComputeService hasNearExposure), and that strike enters the
+ * sweep held or repriced. The other two the row cannot tell apart, and no
+ * pick from the listed strikes can: calls at 95 and puts at 105 under one
+ * held gamma list as +10,000 and -10,000 and sweep to zero at every price,
+ * and a far strike with a minute left reprices to zero everywhere. The
+ * producer stores no search status, so the note says both.
+ */
+export const EOD_GAMMA_FLIP_NULL_NOTE =
+  'No level is stored for this session: the coarse-grid sweep within 20% of spot found no zero crossing, '
+  + 'or its net gamma profile was zero at every price it sampled; the stored row does not say which. '
+  + 'A session with no near-term open interest at all is not served. '
+  + 'That is not a level of zero and says nothing about a crossing beyond that range. '
+  + 'For a repriced flip as of now, with its search status, use get_live_dealer_positioning.';
+
 export function summarizeEodDealerPositioning(
   response: EodExposureResponse,
   options: ShapeEodDealerPositioningOptions = {},
@@ -57,7 +79,7 @@ export function summarizeEodDealerPositioning(
     netGex: num(row.netGex),
     netDex: num(row.netDex),
     gammaFlip: num(row.gammaFlip),
-    gammaFlipNote: EOD_GAMMA_FLIP_NOTE,
+    gammaFlipNote: num(row.gammaFlip) === null ? EOD_GAMMA_FLIP_NULL_NOTE : EOD_GAMMA_FLIP_NOTE,
     callWall: num(row.callWall),
     putWall: num(row.putWall),
     gammaMagnet: num(row.gammaMagnet),

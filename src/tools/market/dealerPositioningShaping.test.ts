@@ -63,6 +63,17 @@ describe('summarizeDealerPositioning', () => {
     expect(shaped.strikes.nearSpot).toHaveLength(3);
     expect(shaped.strikes.total).toBe(5);
     expect(shaped.strikes.nearSpot.map((row) => row.strike)).toEqual([118, 120, 122]);
+    // Twelfth run: the walls are chosen per side and the rows carried net
+    // gamma only, so a reader could not check a wall against them. Each
+    // row now carries the two sides under the gamma coverage the net has.
+    expect(shaped.strikes.nearSpot[1]).toMatchObject({ strike: 120, netGex: 90, callGex: 90, putGex: -45 });
+    // Empty coverage supports a zero on each side and nothing else.
+    const empty = summarizeDealerPositioning(live({ byStrike: [
+      { ...strikeRow(120, 0), callGamma: 0, putGamma: 0, coverage: { ...coverage(0), gamma: { total: 0, included: 0 } } },
+      { ...strikeRow(121, 0), callGamma: 5, putGamma: 0, coverage: { ...coverage(0), gamma: { total: 0, included: 0 } } },
+    ] }));
+    expect(empty.strikes.nearSpot[0]).toMatchObject({ callGex: 0, putGex: 0 });
+    expect(empty.strikes.nearSpot[1]).toMatchObject({ callGex: null, putGex: 0 });
     // Untouched by the trim.
     expect(shaped.exposure.netGex).toBe(140_000);
   });
@@ -239,8 +250,13 @@ describe('summarizeDealerPositioning', () => {
       { ...strikeRow(110, 20), coverage: { ...coverage(2), gamma: { total: 2, included: 1 } } },
       { ...strikeRow(120, 0), coverage: undefined },
     ] }));
-    expect(shaped.strikes.nearSpot[0]).toMatchObject({ netGex: null, netDex: 0, netVega: null, status: { netGex: 'unmeasured', netDex: 'complete', netVega: 'unmeasured' } });
-    expect(shaped.strikes.nearSpot[1]).toMatchObject({ netGex: 20, status: { netGex: 'partial' }, coverage: { gamma: { total: 2, included: 1 } } });
+    expect(shaped.strikes.nearSpot[0]).toMatchObject({ netGex: null, callGex: null, putGex: null, netDex: 0, netVega: null, status: { netGex: 'unmeasured', netDex: 'complete', netVega: 'unmeasured' } });
+    // review: the route's gamma coverage is combined across the
+    // two sides, so under partial coverage a side can be an unmeasured zero
+    // (four expirations with no call gammas and usable put gammas: callGex
+    // 0, putGex -40000, coverage 4/8). The sides go out only when the
+    // row's gamma coverage is complete or empty; the partial net stays.
+    expect(shaped.strikes.nearSpot[1]).toMatchObject({ netGex: 20, callGex: null, putGex: null, status: { netGex: 'partial' }, coverage: { gamma: { total: 2, included: 1 } } });
     expect(shaped.strikes.nearSpot[2]).toMatchObject({ netGex: null, netDex: null, netVega: null, status: { netGex: 'unknown' } });
   });
 

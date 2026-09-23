@@ -20,22 +20,17 @@ import {
  * tool. Each type keeps its own shaping, dedupe, and response shape.
  */
 
-const GEX_KEY_HUMANIZE: Record<string, string> = {
-  callWall: 'call wall',
-  putWall: 'put wall',
-  gammaFlip: 'gamma flip',
-  absGamma: 'abs gamma',
-  gammaTilt: 'gamma tilt',
-  secondaryFlips: 'secondary flips',
+const GEX_KEY_RENAMES: Record<string, string> = {
+  absGamma: 'gammaMagnet',
 };
 
-/** Rename camelCase wall/flip/tilt keys on a GEX record block to space-separated
- *  equivalents so the LLM doesn't surface backend identifiers verbatim. Mutates
- *  in place; only rewrites keys that appear in GEX_KEY_HUMANIZE. */
-function humanizeGexLevels(target: unknown): void {
+/** Field names stay camelCase like every other field; absGamma is published as
+ *  gammaMagnet, the name get_regime and both positioning tools use for the
+ *  strike with the largest absolute gamma. Mutates in place. */
+function normalizeGexLevelKeys(target: unknown): void {
   if (!target || typeof target !== 'object' || Array.isArray(target)) return;
   const obj = target as Record<string, unknown>;
-  for (const [k, humanK] of Object.entries(GEX_KEY_HUMANIZE)) {
+  for (const [k, humanK] of Object.entries(GEX_KEY_RENAMES)) {
     if (k in obj) {
       obj[humanK] = obj[k];
       delete obj[k];
@@ -114,7 +109,7 @@ function replaceDuplicatedDetailsInSnapshotRows(res: any): void {
 
 const SNAPSHOT_DESCRIPTION = `Get the user's synced snapshot history by type. Each type serves a different question:
 
-• type="gex" — per-symbol Gamma Exposure snapshots. REQUIRED: \`symbol\`. Returns the 3 most recent snapshots (no dedupe — rows may be near-duplicates if recorded back-to-back). Includes per-expiration breakdown, call/put walls, gamma flip point, abs gamma anchor, unusual activity, expected move data, and raw vs in-wall visible combo-strike counts.
+• type="gex" — per-symbol Gamma Exposure snapshots. REQUIRED: \`symbol\`. Returns the 3 most recent snapshots (no dedupe — rows may be near-duplicates if recorded back-to-back). Includes per-expiration breakdown, call/put walls, gamma flip point, gamma magnet, unusual activity, expected move data, and raw vs in-wall visible combo-strike counts.
 • type="portfolio" — account-wide portfolio snapshots with market-scaled raw Greeks (no \$): first-order delta, gamma, theta/day, vega/1% IV, rho/1% rate; second-order vanna/1% IV, charm/day (delta decay), vomma/1% IV², veta/day (vega decay, sign-flipped for market convention). Default view collapses consecutive identical snapshots to surface the latest distinct states. For \$-impact views of the same Greeks, use type="risk".
 • type="risk" — account-wide risk-analysis snapshots: Value-at-Risk (95%/99%), Conditional VaR, portfolio beta, Sharpe ratio, maximum drawdown, volatility, stress test results, and aggregate Greek \$-impact exposure. \$-Greeks include first-order dollarDelta, dollarGamma (per 1% move), dollarTheta/day, dollarVega (per 1% IV), dollarRho (per 1% rate) and second-order dollarVanna (per 1% IV move), dollarCharm (daily \$Δ decay), dollarVomma (per 1% IV), dollarVeta (daily vega decay). Units & sign convention: var95/var99/cvar95/maxDrawdown/volatility are in PERCENT (e.g., 2.5 = 2.5%); volatility is annualized; var95/var99/cvar95/maxDrawdown are POSITIVE loss magnitudes (e.g., var95=2.5 means a 2.5% loss). beta/sharpeRatio are dimensionless. stressResults[].impact is signed \$ P&L; impactPercent is signed % of portfolio. details.historicalVarDetails: worstDay is POSITIVE magnitude of the worst single-day LOSS (worstDay=13.46 means a 13.46% loss, NOT a 13.46% gain); bestDay and avgReturn are SIGNED percent returns. Default view collapses consecutive identical snapshots. For raw-unit Greeks, use type="portfolio".`;
 
@@ -137,17 +132,16 @@ export function register(server: McpServer, client: ProxyClient): void {
       if (type === 'gex') {
         if (!symbol) throw new Error("type='gex' requires `symbol`");
         const res = await client.get('/sync/analysis-data', { type: 'gex', symbol, limit: String(limit) }) as any;
-        // Humanize wall/flip/tilt keys on every GEX record's data block (and the
+        // Normalize the level keys on every GEX record's data block (and the
         // record root, defensively) before either default shaping OR full-mode
-        // raw return so backend identifiers (callWall, gammaFlip, etc.) don't
-        // surface verbatim in user-facing summaries.
+        // raw return, so absGamma reads gammaMagnet on every path.
         if (res && Array.isArray(res.data)) {
           for (const record of res.data) {
             stripSyncRecordMetadata(record);
             enrichGexComboDetails(record);
-            humanizeGexLevels(record);
+            normalizeGexLevelKeys(record);
             if (record && typeof record === 'object' && record.data && typeof record.data === 'object') {
-              humanizeGexLevels(record.data);
+              normalizeGexLevelKeys(record.data);
             }
           }
         }

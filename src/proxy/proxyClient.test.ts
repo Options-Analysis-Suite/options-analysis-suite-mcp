@@ -10,7 +10,7 @@
  * in interpretUnauthorized so LiveApiClient cannot drift from it.
  */
 import { describe, it, expect, afterEach } from 'bun:test';
-import { AUTH_EXPIRED_MESSAGE, ProxyClient, interpretUnauthorized } from './proxyClient.js';
+import { AUTH_EXPIRED_MESSAGE, MAX_REASON_BYTES, ProxyClient, interpretUnauthorized } from './proxyClient.js';
 import { AuthError } from '../types.js';
 
 const realFetch = globalThis.fetch;
@@ -47,6 +47,55 @@ describe('interpretUnauthorized', () => {
     expect(outage.message).toMatch(/temporarily unavailable/i);
     expect(outage.message).toMatch(/may be retried/i);
     expect(outage.message).not.toMatch(/expired/i);
+  });
+});
+
+describe('ProxyClient on any other failure', () => {
+  it('carries the reason the proxy sent', async () => {
+    // Sixth live run: get_iv_surface on a Sunday came back "Request to
+    // /scanner/iv-surface/APT failed (HTTP 500)". The proxy had answered
+    // { error: 'No data for this date' } (getIVSurface; scannerReadErrorStatus
+    // maps it to 500) and the client dropped the body, so a date with no
+    // file read the same as an outage. LiveApiClient has carried
+    // message ?? error all along; this client reads the same two keys.
+    const noFile = await caught(client(500, { error: 'No data for this date' }).get('/scanner/iv-surface/APT')) as Error;
+    expect(noFile.message).toBe('Request to /scanner/iv-surface/APT failed (HTTP 500): No data for this date');
+    const tooLarge = await caught(client(400, { error: 'Options chain too large; please request a specific expiration (max 8000 rows)', code: 'options_chain_too_large' }).get('/scanner/options-chain')) as Error;
+    expect(tooLarge.message).toBe('Request to /scanner/options-chain failed (HTTP 400): Options chain too large; please request a specific expiration (max 8000 rows)');
+    // message wins over error where both are strings, as in LiveApiClient.
+    const both = await caught(client(503, { error: 'archive_manifest_missing', message: 'Archived options history is temporarily unavailable.' }).get('/x')) as Error;
+    expect(both.message).toBe('Request to /x failed (HTTP 503): Archived options history is temporarily unavailable.');
+  });
+
+  it('bounds the reason, because a tool may embed the message outside the helpers\' truncation', async () => {
+    // review: get_dark_pool_data catches ApiError and puts
+    // err.message into a partial-failure note, which the helpers' 2 KiB
+    // error truncation never sees. A 9,000-byte reason reached the model
+    // whole, and a 60,000-byte one beside healthy ATS data tripped the
+    // size guard and replaced the whole response with "Response too
+    // large". The client bounds the reason itself, UTF-8 safe.
+    const prefix = 'Request to /x failed (HTTP 500): ';
+    const long = await caught(client(500, { error: 'y'.repeat(9_000) }).get('/x')) as Error;
+    expect(long.message.startsWith(prefix)).toBe(true);
+    expect(new TextEncoder().encode(long.message).byteLength).toBeLessThanOrEqual(new TextEncoder().encode(prefix).byteLength + MAX_REASON_BYTES);
+    expect(long.message.endsWith('...')).toBe(true);
+    // Cut on a character boundary: no mojibake from the cut. (A lone
+    // surrogate the proxy itself sent is another matter: short, it passes
+    // through as JSON.parse produced it; long, TextEncoder replaces it with
+    // U+FFFD on the way in, as it would anywhere. The bound adds neither.)
+    const multi = await caught(client(500, { error: 'é'.repeat(9_000) }).get('/x')) as Error;
+    expect(multi.message).toMatch(/^Request to \/x failed \(HTTP 500\): é+\.\.\.$/);
+    expect(new TextEncoder().encode(multi.message).byteLength).toBeLessThanOrEqual(new TextEncoder().encode(prefix).byteLength + MAX_REASON_BYTES);
+    // A reason inside the bound is carried whole.
+    const short = await caught(client(500, { error: 'z'.repeat(MAX_REASON_BYTES) }).get('/x')) as Error;
+    expect(short.message).toBe(prefix + 'z'.repeat(MAX_REASON_BYTES));
+  });
+
+  it('says only the status when the body carries no reason', async () => {
+    for (const [status, body, raw] of [[500, '<html>edge error</html>', true], [502, {}, false], [500, { error: '' }, false], [500, { error: 42 }, false]] as const) {
+      const err = await caught(client(status, body, raw).get('/x')) as Error;
+      expect(err.message, JSON.stringify(body)).toBe(`Request to /x failed (HTTP ${status})`);
+    }
   });
 });
 

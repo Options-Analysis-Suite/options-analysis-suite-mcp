@@ -193,7 +193,12 @@ export function trimIvHistoryToRecent(payload: unknown, cap: number): unknown {
   if (!dataKey) return payload;
 
   const sorted = sortIvHistoryPoints(response[dataKey]);
-  const { data, history, ...rest } = response;
+  const { data, history, ...undated } = response;
+  // The proxy echoes the REQUESTED end, null for an open window; the summary
+  // path already names the newest row's date, so this path does too, and a
+  // requested end is kept as it is.
+  const newest = sorted.length > 0 ? getPointDate(sorted[0]) : undefined;
+  const rest = undated.endDate == null && newest !== undefined ? { ...undated, endDate: newest } : undated;
   if (sorted.length <= cap) {
     return {
       ...rest,

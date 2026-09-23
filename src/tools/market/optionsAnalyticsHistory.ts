@@ -14,14 +14,14 @@ export function register(server: McpServer, client: ProxyClient): void {
     'get_options_analytics_history',
     {
       title: 'Options Analytics History',
-      description: 'Get daily end-of-day options analytics snapshots for a symbol - historical trend data going back years. Covers ATM IV, HV, IV rank/percentile, VWIV, skew, GEX/DEX/VEX, net vanna/charm/vomma, put/call ratio, max pain, the 30-day expected move (expected_move_30d_fraction, a decimal fraction of spot: 0.018 = 1.8%), term structure, dividend yield, and risk-free rate. Best for trend analysis over time. For current authoritative Greek exposures and dealer-positioning levels like call wall, put wall, gamma flip, and abs gamma, use get_regime with scope="symbol" instead. Up to 5000 days. Large windows return a compact recent/trend summary by default.',
+      description: 'Get daily end-of-day options analytics snapshots for a symbol - historical trend data going back years. Covers ATM IV, HV, IV rank/percentile, VWIV, skew, GEX/DEX/VEX, net vanna/charm/vomma, put/call ratio, max pain, the 30-day expected move (`expectedMove30dFraction`, a decimal fraction of spot: 0.018 = 1.8%), term structure, and risk-free rate. Best for trend analysis over time. For current authoritative Greek exposures and dealer-positioning levels like call wall, put wall, gamma flip, and gamma magnet, use get_regime with scope="symbol" instead. Up to 5000 days. Large windows return a compact recent/trend summary by default. The raw shape lists every row in the window oldest first; the summary keeps the newest `dataMeta.recent` rows in `data`, newest first, and `count` is the rows in the whole window, not in `data`; `dataMeta.order` on either shape says which way it runs; summary points are compact: twenty fields, IVs and ratios rounded to four decimals, prices to two, the slope and rate to five, exposures to whole numbers, and `latest`, `earliest` and `trendSample` are the same compact shape.',
       inputSchema: {
         symbol: z.string().describe('Ticker symbol (e.g., AAPL, SPY)'),
         days: z.number().int().min(1).max(5000).default(30).describe('Days of history (default 30). Ignored if from/to are provided.'),
         from: z.string().optional().describe('Start date (YYYY-MM-DD). Overrides days parameter.'),
         to: z.string().optional().describe('End date (YYYY-MM-DD). Overrides days parameter.'),
         interval: z.enum(['daily', 'weekly', 'biweekly', 'monthly']).default('daily').describe('Sampling interval (default daily)'),
-        full: z.boolean().optional().describe('Return less-summarized data (raw shape, still subject to the MCP response budget). Use with narrow date ranges.'),
+        full: z.boolean().optional().describe('Return the raw row shape instead of the compact summary. Windows of 90 rows or fewer are already raw, so it changes nothing there; use it with narrow explicit ranges. Still subject to the MCP response budget.'),
       },
       outputSchema: marketDataOutputSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },

@@ -61,4 +61,29 @@ describe('registered live dealer-positioning tool', () => {
       await server.close();
     }
   });
+
+  it('describes every value coverage.gammaFlipMethod can carry', async () => {
+    // The engine (packages/shared exposure-compute) emits 'repriced',
+    // 'frozen-gamma' or 'mixed'. The description named the first two, defined
+    // "frozen-gamma" as "at least one leg had no IV" (that is `mixed`), and a
+    // model shown "mixed" against SPY had no idea what it meant.
+    const server = new McpServer({ name: 'dealer-positioning-test', version: '1' });
+    register(server, { get: async () => ({}) } as unknown as LiveApiClient);
+    const client = new Client({ name: 'dealer-positioning-consumer', version: '1' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const { tools } = await client.listTools();
+      const description = tools.find((t) => t.name === 'get_live_dealer_positioning')?.description ?? '';
+      for (const method of ['"repriced"', '"frozen-gamma"', '"mixed"']) expect(description).toContain(method);
+      expect(description).toMatch(/"frozen-gamma" means no leg had a usable IV/);
+      expect(description).toMatch(/"mixed" means some legs were repriced and the rest held constant/);
+      // And the band the engine uses, so "IV 0" and "IV 10" from a broker are
+      // read as absent, not as numbers.
+      expect(description).toMatch(/finite, above 0 and at most 5/);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
 });

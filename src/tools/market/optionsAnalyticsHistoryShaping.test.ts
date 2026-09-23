@@ -58,7 +58,6 @@ describe('summarizeOptionsAnalyticsHistory', () => {
       term_structure_slope: 0.01,
       iv_skew_25d: 0.05,
       vwiv: 0.26,
-      dividend_yield: 0.013,
       risk_free_rate: 0.045,
       net_gex: 300,
       net_dex: -500,
@@ -76,8 +75,6 @@ describe('summarizeOptionsAnalyticsHistory', () => {
       avgPutCallRatio: 1.1,
       avgExpectedMove30dFraction: 0.04,
       maxExpectedMove30dFraction: 0.05,
-      avgDividendYield: 0.0116,
-      latestDividendYield: 0.013,
       avgRiskFreeRate: 0.0435,
       latestRiskFreeRate: 0.045,
       spotChangePct: 5,
@@ -100,6 +97,7 @@ describe('summarizeOptionsAnalyticsHistory', () => {
     ]);
     expect(summary._data_meta).toEqual({
       summarized: true,
+      order: 'newest first',
       recent: 2,
       trend_samples: 2,
       total_snapshots: 5,
@@ -110,10 +108,38 @@ describe('summarizeOptionsAnalyticsHistory', () => {
     expect(summary.units.expectedMove30dFraction).toContain('decimal fraction');
     expect(summary.latest).not.toHaveProperty('expected_move_pct');
     expect(summary.summary).not.toHaveProperty('avgExpectedMovePct');
+    // The stored dividend_yield is 0 on every row the producer writes
+    // (scan_strikes.div_rate, the vendor's divRate, is 0 on all 1,009,414 rows of
+    // 2026-09-16), so a zero here read as "pays no dividend". Withheld from
+    // the point, the earliest/latest and both aggregates, on every path.
+    for (const point of [summary.latest, summary.earliest, ...summary.data, ...summary.trendSample]) {
+      expect(point).not.toHaveProperty('dividend_yield');
+    }
+    expect(summary.summary).not.toHaveProperty('avgDividendYield');
+    expect(summary.summary).not.toHaveProperty('latestDividendYield');
   });
 });
 
 describe('labelOptionsAnalyticsHistory', () => {
+  // Ninth run: the summary said `order: "newest first"` and the raw shape,
+  // which runs the other way (the proxy sorts ascending), said nothing.
+  // Every raw path ends here, so the marker goes here, beside the trim
+  // meta the 30-day default already writes.
+  test('says the raw shape runs oldest first, keeping any trim meta beside it', () => {
+    const bare: any = labelOptionsAnalyticsHistory({ data: [{ date: '2026-09-14' }, { date: '2026-09-15' }] });
+    expect(bare._data_meta).toEqual({ order: 'oldest first' });
+    const trimmed: any = labelOptionsAnalyticsHistory({
+      data: [{ date: '2026-09-15' }],
+      _data_meta: { trimmed: true, original_length: 40, returned: 30 },
+    });
+    expect(trimmed._data_meta).toEqual({ trimmed: true, original_length: 40, returned: 30, order: 'oldest first' });
+    const history: any = labelOptionsAnalyticsHistory({ history: [{ date: '2026-09-15' }] });
+    expect(history._history_meta).toEqual({ order: 'oldest first' });
+    expect(history._data_meta).toBeUndefined();
+    // Nothing to label, nothing to mark.
+    expect((labelOptionsAnalyticsHistory({ symbol: 'SPY' }) as any)._data_meta).toBeUndefined();
+  });
+
   // The summarizer only runs past 90 rows. A 30-day request, the default,
   // went out with the column name on every row and no units; this is the
   // shape those rows take on the short and `full` paths.
@@ -128,12 +154,81 @@ describe('labelOptionsAnalyticsHistory', () => {
       ],
     });
     expect(labelled.data[0]).toEqual({ date: '2026-09-15', spot_price: 650.12, expected_move_30d_fraction: 0.018, total_volume: 5 });
+    // The short and `full` paths carry raw rows: the unwritten dividend
+    // yield must not ride through here either.
+    const withYield: any = labelOptionsAnalyticsHistory({ data: [{ date: '2026-09-15', dividend_yield: 0, expected_move_pct: 0.018 }, { date: '2026-09-14', dividend_yield: 0 }] });
+    expect(withYield.data[0]).toEqual({ date: '2026-09-15', expected_move_30d_fraction: 0.018 });
+    expect(withYield.data[1]).toEqual({ date: '2026-09-14' });
     expect(labelled.data[0]).not.toHaveProperty('expected_move_pct');
     expect(labelled.data[1]).toEqual({ date: '2026-09-14', spot_price: 648.3 });
     expect(labelled.data[2]).toBeNull();
     expect(labelled.symbol).toBe('SPY');
     expect(labelled.source).toBe('option_ticker_snapshots');
     expect(labelled.units.expectedMove30dFraction).toContain('decimal fraction');
+  });
+
+  test('carries the provenance once, not three times', () => {
+    // The proxy's history route returns `{ ...provenance, metadata:
+    // provenance, provenance }`: the same fifteen keys at the top level, under
+    // `metadata` and under `provenance`, which a 20-row answer paid for three
+    // times. One copy stays, under `provenance`; the top-level twins and
+    // `metadata` go only where they are the same values, so a field the proxy
+    // sets differently at the top level is kept.
+    const provenance = {
+      provider: 'scanner-history', source: 'option_ticker_snapshots', historySnapshotId: 'h1',
+      fetchedAt: '2026-09-16T20:00:00.000Z', receivedAt: '2026-09-16T20:00:00.000Z', staleAfter: '2026-09-17T20:00:00.000Z',
+      fromCache: false, openInterestDate: '2026-09-16', openInterestSource: 'eod-vendor', volumeSource: 'eod-vendor', greeksSource: 'eod-vendor',
+    };
+    const labelled: any = labelOptionsAnalyticsHistory({
+      symbol: 'AAPL', count: 1, interval: 'daily',
+      ...provenance,
+      metadata: { ...provenance },
+      provenance: { ...provenance },
+      data: [{ date: '2026-09-16', expected_move_pct: 0.071 }],
+    });
+    expect(labelled.provenance).toEqual(provenance);
+    expect(labelled).not.toHaveProperty('metadata');
+    for (const key of Object.keys(provenance)) expect(labelled, key).not.toHaveProperty(key);
+    expect(labelled.symbol).toBe('AAPL');
+    expect(labelled.count).toBe(1);
+    expect(labelled.interval).toBe('daily');
+    expect(labelled.data[0]).toEqual({ date: '2026-09-16', expected_move_30d_fraction: 0.071 });
+
+    // A top-level value that differs from the provenance copy is not a twin
+    // and stays; a metadata block that differs stays too.
+    const differing: any = labelOptionsAnalyticsHistory({
+      ...provenance, fromCache: true,
+      metadata: { ...provenance, note: 'x' },
+      provenance: { ...provenance },
+      data: [],
+    });
+    expect(differing.fromCache).toBe(true);
+    expect(differing.metadata).toEqual({ ...provenance, note: 'x' });
+    expect(differing).not.toHaveProperty('fetchedAt');
+
+    // Without a `provenance` block nothing is touched.
+    const bare: any = labelOptionsAnalyticsHistory({ ...provenance, data: [] });
+    expect(bare.fetchedAt).toBe(provenance.fetchedAt);
+
+    // The summary shape too. Eighth run, SPY days: 400: the raw shape
+    // carried one provenance and the summary carried all three again,
+    // because summarizeOptionsAnalyticsHistory spread the proxy response
+    // untouched. And it says which way its rows run, since the raw shape
+    // is the proxy's ascending order and the summary's `data` is the
+    // newest rows newest first.
+    const rows = Array.from({ length: 120 }, (_, i) => ({ date: `2026-0${1 + Math.floor(i / 28)}-${String(1 + (i % 28)).padStart(2, '0')}`, spot_price: 100 + i, expected_move_pct: 0.02 }));
+    const summarized: any = summarizeOptionsAnalyticsHistory({
+      symbol: 'AAPL', count: rows.length, interval: 'daily',
+      ...provenance,
+      metadata: { ...provenance },
+      provenance: { ...provenance },
+      data: rows,
+    });
+    expect(summarized.provenance).toEqual(provenance);
+    expect(summarized).not.toHaveProperty('metadata');
+    for (const key of Object.keys(provenance)) expect(summarized, key).not.toHaveProperty(key);
+    expect(summarized._data_meta).toMatchObject({ summarized: true, order: 'newest first', total_snapshots: 120 });
+    expect(summarized.data[0].date > summarized.data[1].date).toBe(true);
   });
 
   test('reads the `history` key as well, and leaves a payload with no points alone', () => {

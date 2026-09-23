@@ -8,6 +8,7 @@ import {
   summarizeGreeksHistory,
   trimGreeksHistoryToRecent,
 } from './greeksHistoryShaping.js';
+import { collapseProvenance } from './provenanceShaping.js';
 
 export function register(server: McpServer, client: ProxyClient): void {
   server.registerTool(
@@ -28,13 +29,14 @@ export function register(server: McpServer, client: ProxyClient): void {
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     toolHandler(async ({ symbol, start, end, dteMin, dteMax, moneyness, full }) => {
-      const res = await client.get(`/scanner/greeks-history/${encodeURIComponent(symbol.toUpperCase())}`, {
+      // One provenance copy on every path, the raw one included (twenty-first run).
+      const res = collapseProvenance(await client.get(`/scanner/greeks-history/${encodeURIComponent(symbol.toUpperCase())}`, {
         start,
         end,
         dteMin: String(dteMin ?? 0),
         dteMax: String(dteMax ?? 999),
         moneyness: moneyness ?? 'all',
-      }) as any;
+      }) as any);
 
       if (full) return { _skipSizeGuard: true, data: res };
 

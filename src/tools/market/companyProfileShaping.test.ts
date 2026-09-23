@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { sanitizeMcpWireOutput } from '../helpers.js';
 import { shapeCompanyProfileResponse } from './companyProfileShaping.js';
 
 describe('shapeCompanyProfileResponse', () => {
@@ -44,7 +45,10 @@ describe('shapeCompanyProfileResponse', () => {
     expect(shaped.isEtf).toBe(false);
     expect(shaped.isActivelyTrading).toBe(true);
     expect(shaped.description.endsWith('...')).toBe(true);
-    expect(shaped._description_truncated).toBe(true);
+    // The audit found `_description_truncated` never reached a client: the
+    // wire sanitizer drops any other leading-underscore key.
+    expect(shaped.descriptionTruncated).toBe(true);
+    expect((sanitizeMcpWireOutput(shaped) as Record<string, unknown>).descriptionTruncated).toBe(true);
   });
 
   it('handles sparse or error payloads safely', () => {

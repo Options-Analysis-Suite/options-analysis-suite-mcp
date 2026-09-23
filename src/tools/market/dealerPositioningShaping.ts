@@ -1,8 +1,8 @@
 /**
  * Shape LIVE dealer positioning, computed from the caller's own broker chain.
  *
- * LIVE ONLY, deliberately. A last-close positioning exists too (the stored
- * snapshot's net GEX and dealer regime), but a live gamma flip and a last-close
+ * LIVE ONLY, deliberately. An end-of-day positioning exists too (the stored
+ * snapshot's net GEX and dealer regime), but a live gamma flip and an end-of-day
  * one are different claims, and folding the second into this tool as a
  * fallback would let a caller quote one as the other. Whatever tool carries
  * the end-of-day number carries its own name and its own caveats.
@@ -127,10 +127,12 @@ export function summarizeDealerPositioning(
     charm: metricCoverage(rawCoverage.charm),
     vomma: metricCoverage(rawCoverage.vomma),
     gammaFlip: metricCoverage(rawCoverage.gammaFlip),
-    // How the flip was produced. `frozen-gamma` means at least one leg had no
-    // IV, so its gamma was held constant across the repricing sweep instead of
-    // recomputed - an approximation that can turn "no flip" into a level. A
-    // reader quoting a regime-change price is entitled to know which they got.
+    // How the flip was produced (packages/shared exposure-compute
+    // GammaFlipMethod): `repriced` = every leg recomputed from IV;
+    // `frozen-gamma` = no leg had a usable IV, every published gamma held
+    // constant across the sweep; `mixed` = some of each. A held gamma is an
+    // approximation that can turn "no flip" into a level. A reader quoting a
+    // regime-change price is entitled to know which they got.
     gammaFlipMethod: typeof rawCoverage.gammaFlipMethod === 'string'
       ? rawCoverage.gammaFlipMethod : null,
     // The price step the flip search sampled at where it found the level. The
@@ -183,10 +185,23 @@ export function summarizeDealerPositioning(
     const raw = record(row.coverage);
     const coverage = { gamma: metricCoverage(raw.gamma), delta: metricCoverage(raw.delta), vega: metricCoverage(raw.vega) };
     const gamma = measuredValue(row.netGamma, coverage.gamma);
+    // The walls are chosen per side (largest positive call gamma, most
+    // negative put gamma) and a row carrying net gamma alone could not be
+    // checked against them. The route's gamma coverage counts both sides
+    // together, so under partial coverage a side can be an unmeasured zero
+    // (no call gammas, usable put gammas: callGex 0 beside a real putGex);
+    // the sides go out only when the coverage establishes them, complete
+    // or empty, and the partial net is published on its own.
+    const sideValue = (raw: unknown): number | null =>
+      (coverage.gamma.status === 'complete' || coverage.gamma.status === 'empty')
+        ? measuredValue(raw, coverage.gamma).value
+        : null;
+    const callGamma = { value: sideValue(row.callGamma) };
+    const putGamma = { value: sideValue(row.putGamma) };
     const delta = measuredValue(row.netDelta, coverage.delta);
     const vega = measuredValue(row.netVega, coverage.vega);
     return {
-      strike, netGex: gamma.value, netDex: delta.value, netVega: vega.value,
+      strike, netGex: gamma.value, callGex: callGamma.value, putGex: putGamma.value, netDex: delta.value, netVega: vega.value,
       status: { netGex: gamma.status, netDex: delta.status, netVega: vega.status },
       coverage,
     };

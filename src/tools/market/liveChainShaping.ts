@@ -1,3 +1,5 @@
+import { MAX_RESPONSE_BYTES, sanitizeMcpWireOutput, utf8ByteLength } from '../helpers.js';
+
 /**
  * Shape a LIVE single-expiration chain for a model.
  *
@@ -70,6 +72,23 @@ const num = (v: unknown): number | null =>
  * that reaches this file is a zero the market actually quoted.
  */
 
+/**
+ * The band inside which a published implied volatility is a volatility.
+ *
+ * The same rule as the exposure engine (packages/shared exposure-compute
+ * isUsableIV) and the proxy's capIv: finite, above 0, at most 5 (500%).
+ * Brokers publish sentinels for contracts their solver could not price: seen
+ * live on SPY after hours, a 0DTE deep-ITM call at `iv: 10, delta: 1` and
+ * deep-ITM puts at `iv: 0` beside real deltas (a mid below intrinsic has no
+ * IV). Those reached the model as a 1000% and a 0% vol. The delta and the
+ * quote beside them are real and stay; the IV is reported as absent, and the
+ * totals say how many were.
+ */
+export function usableIv(value: unknown): number | null {
+  const iv = num(value);
+  return iv !== null && iv > 0 && iv <= 5 ? iv : null;
+}
+
 /** One contract, trimmed to the fields a model can actually use. */
 function row(option: LiveOption) {
   return {
@@ -81,8 +100,17 @@ function row(option: LiveOption) {
     // one-sided market has no midpoint, and without this the model is told
     // there is no price for a contract the broker did in fact price.
     mark: num(option.mark),
-    iv: num(option.iv),
+    // The broker's last trade: never a stand-in for mid (the adapters keep it
+    // separate), and it can be hours old on a thin contract.
+    last: num(option.last),
+    iv: usableIv(option.iv),
     delta: num(option.delta),
+    // As published, in the broker's units. Nineteenth run: these were dropped
+    // here while every adapter mapped them, so the live chain's Greeks were
+    // delta alone.
+    gamma: num(option.gamma),
+    theta: num(option.theta),
+    vega: num(option.vega),
     volume: num(option.volume),
     openInterest: num(option.openInterest),
   };
@@ -101,12 +129,13 @@ function totals(options: LiveOption[]) {
   // side that genuinely traded nothing, and a put/call ratio built from it read
   // as a real 0. The sum still covers what was reported; how much that leaves
   // out travels beside it.
-  let volumeUnknown = 0; let openInterestUnknown = 0;
+  let volumeUnknown = 0; let openInterestUnknown = 0; let ivUnusable = 0;
   for (const option of options) {
     const optionVolume = num(option.volume);
     const optionOpenInterest = num(option.openInterest);
     if (optionVolume === null) volumeUnknown += 1; else volume += optionVolume;
     if (optionOpenInterest === null) openInterestUnknown += 1; else openInterest += optionOpenInterest;
+    if (usableIv(option.iv) === null) ivUnusable += 1;
     // A two-sided zero is NO quote, not a quote of zero. Counting those made
     // `quoted` equal to `contracts` on a chain with no quotes at all.
     if ((num(option.bid) ?? 0) > 0 || (num(option.ask) ?? 0) > 0) quoted += 1;
@@ -120,6 +149,8 @@ function totals(options: LiveOption[]) {
     openInterest: openInterestUnknown === options.length && options.length > 0 ? null : openInterest,
     contractsMissingVolume: volumeUnknown,
     contractsMissingOpenInterest: openInterestUnknown,
+    // Unpublished, or published outside the usable band (see usableIv).
+    contractsWithoutUsableIv: ivUnusable,
   };
 }
 
@@ -179,7 +210,7 @@ export function summarizeLiveChain(response: LiveChainResponse, options: ShapeOp
   const callTotals = totals(calls);
   const putTotals = totals(puts);
 
-  return {
+  const shape = (effective: number) => ({
     symbol: response.symbol ?? null,
     expiration: response.expiration ?? null,
     // PROVENANCE TRAVELS WITH THE SUMMARY. A model relaying a quote has to be
@@ -191,7 +222,9 @@ export function summarizeLiveChain(response: LiveChainResponse, options: ShapeOp
     spotPrice: spot,
     view: {
       shaped: true,
-      strikeRange: range,
+      strikeRange: effective,
+      requestedStrikeRange: range,
+      narrowedForSize: effective < range,
       note: `Near-the-money strikes plus 25-delta wings. ${callTotals.contracts + putTotals.contracts} contracts in the full chain.`,
     },
     totals: {
@@ -211,8 +244,25 @@ export function summarizeLiveChain(response: LiveChainResponse, options: ShapeOp
       put25Delta: nearestToDelta(puts, 0.25) ? row(nearestToDelta(puts, 0.25)!) : null,
     },
     nearTheMoney: spot === null ? { calls: [], puts: [] } : {
-      calls: aroundSpot(calls, spot, range),
-      puts: aroundSpot(puts, spot, range),
+      calls: aroundSpot(calls, spot, effective),
+      puts: aroundSpot(puts, spot, effective),
     },
-  };
+  });
+
+  // review: with gamma, theta, vega and last on every row, 81
+  // rows a side of full-precision decimals on a dense grid (475 to 525 in
+  // 0.5 steps) came to 53,291 bytes, and the generic size guard kept the
+  // FIRST rows of each array, 480 to 504.5 of a requested 480 to 520. So the
+  // window is narrowed here, evenly, to the widest range whose payload the
+  // guard will pass whole (it measures the same sanitized compact JSON), and
+  // `view` says so. A single row that cannot fit is left to the guard.
+  const fits = (payload: unknown) =>
+    utf8ByteLength(JSON.stringify(sanitizeMcpWireOutput(payload))) <= MAX_RESPONSE_BYTES;
+  let effective = range;
+  let payload = shape(effective);
+  while (effective > 0 && !fits(payload)) {
+    effective -= 1;
+    payload = shape(effective);
+  }
+  return payload;
 }

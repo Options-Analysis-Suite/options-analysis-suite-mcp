@@ -98,6 +98,71 @@ describe('applyResponseSizeGuard', () => {
   });
 });
 
+// Field names are camelCase on every tool. Proxy rows carry snake_case
+// columns (market_date, iv_rank, stress_score) and several tools pass them
+// through on raw and full paths, so the wire boundary converts pure
+// lowercase snake_case keys; anything else (a date, a tenor, a ticker, a
+// model or feature display name, a form type) is data and stays as it is.
+describe('sanitizeMcpWireOutput publishes camelCase field names', () => {
+  test('converts pure snake_case keys, nested and inside arrays', () => {
+    const sanitized = sanitizeMcpWireOutput({
+      market_date: '2026-09-22', atm_iv_30d: 0.3, expected_move_30d_fraction: 0.04, hv_20d: 0.2,
+      rows: [{ iv_rank: 40, put_call_ratio: 0.9 }],
+      company_profile: { company_name: 'Micron', free_float_pct: 99 },
+    });
+    expect(sanitized).toEqual({
+      marketDate: '2026-09-22', atmIv30d: 0.3, expectedMove30dFraction: 0.04, hv20d: 0.2,
+      rows: [{ ivRank: 40, putCallRatio: 0.9 }],
+      companyProfile: { companyName: 'Micron', freeFloatPct: 99 },
+    });
+  });
+
+  test('joins two adjacent number segments with "to", and names the curve spreads as the summary does', () => {
+    expect(sanitizeMcpWireOutput({ net_gex_0_60d: 1, net_dex_0_60d: 2, analysis: { spread_2_10: 0.5, spread_3m_10y: -0.2 } }))
+      .toEqual({ netGex0to60d: 1, netDex0to60d: 2, analysis: { twoTen: 0.5, threeMonthTenYear: -0.2 } });
+  });
+
+  test('leaves data keys, camelCase keys and every value alone', () => {
+    const data = {
+      keyRates: { '10Y': 4.1, '3M': 4.3 }, firms: { '2026-04-11': 3 }, models: { 'Monte Carlo - Heston': 1, Heston: 2 },
+      featureZScores: { 'Vol Level': 1.2 }, greeks: { Delta: 0.5 }, formCounts: { 'SC 13D/A': 1, '10-K': 2 },
+      prices: { 'BRK.B': 1, BRK_B: 2 }, labels: { Local_Vol: 1, '2Y_10Y': 2 },
+      // review: the pattern's anchors; a snake run inside a longer
+      // key is data, not a field name.
+      versions: { 'model_name.v2': 1, 'x-fixed_income': 2, 'fixed_income ': 3, ' atm_iv': 4 },
+      callWall: 510, x: 1, reason: 'below_average', source: 'scan_tickers',
+    };
+    expect(sanitizeMcpWireOutput(data)).toEqual(data);
+  });
+
+  test("keeps the regime tiers' own names as dictionary keys, and converts the fields inside them", () => {
+    const sanitized = sanitizeMcpWireOutput({
+      symbols: { fixed_income: [{ symbol: 'TLT', stress_score: 1.2, scan_time: '13:00' }] },
+      symbolCoverage: { tiers: { fixed_income: { total: 10, returned: 8 } } },
+    });
+    expect(sanitized).toEqual({
+      symbols: { fixed_income: [{ symbol: 'TLT', stressScore: 1.2, scanTime: '13:00' }] },
+      symbolCoverage: { tiers: { fixed_income: { total: 10, returned: 8 } } },
+    });
+    // A `symbols` ARRAY is a list of rows, not a dictionary of tiers.
+    expect(sanitizeMcpWireOutput({ symbols: [{ stress_score: 1 }] })).toEqual({ symbols: [{ stressScore: 1 }] });
+  });
+
+  test('never overwrites: a snake key whose camelCase twin is already present is left as it is', () => {
+    expect(sanitizeMcpWireOutput({ market_date: 'a', marketDate: 'b' })).toEqual({ market_date: 'a', marketDate: 'b' });
+  });
+
+  test('converts the base of a _<key>_meta block and the keys inside it', () => {
+    expect(sanitizeMcpWireOutput({ _trend_sample_meta: { total_rows: 90, evenly_spaced: true } }))
+      .toEqual({ trendSampleMeta: { totalRows: 90, evenlySpaced: true } });
+  });
+
+  test('still drops the sync plumbing keys by their stored names', () => {
+    expect(sanitizeMcpWireOutput({ id: 1, user_id: 2, run_key: 'r', created_at: 't', updated_at: 't', market_date: 'd' }))
+      .toEqual({ marketDate: 'd' });
+  });
+});
+
 describe('sanitizeMcpWireOutput dynamic _<key>_meta preservation', () => {
   test('preserves snake_case truncation metadata (e.g. _recent_history_meta from marketFlowShaping)', () => {
     // marketFlowShaping.ts:162 emits _recent_history_meta verbatim. The
@@ -108,8 +173,10 @@ describe('sanitizeMcpWireOutput dynamic _<key>_meta preservation', () => {
       _recent_history_meta: { showing: 2, total: 90, truncated: true },
     }) as Record<string, any>;
 
-    expect(sanitized.recent_history).toHaveLength(2);
-    expect(sanitized['recent_historyMeta']).toEqual({ showing: 2, total: 90, truncated: true });
+    expect(sanitized.recentHistory).toHaveLength(2);
+    expect(sanitized.recentHistoryMeta).toEqual({ showing: 2, total: 90, truncated: true });
+    expect(sanitized.recent_history).toBeUndefined();
+    expect(sanitized['recent_historyMeta']).toBeUndefined();
     expect(sanitized._recent_history_meta).toBeUndefined();
   });
 
@@ -357,6 +424,29 @@ describe('toolHandler — structuredContent', () => {
     expect(text).toContain('Retrying will not succeed.');
     expect(text).toContain('https://x.test/fix');
     expect((result.structuredContent as any)?.retryable).toBe(false);
+    // The code rides in the prefix, ahead of everything truncation can take.
+    expect(text.startsWith('API error (BROKER_CREDENTIAL_INVALID): ')).toBe(true);
+    // A truncated message ends in the suffix; no full stop is bolted onto it.
+    expect(text).toContain('... [truncated] Retrying will not succeed.');
+  });
+
+  test('the text names the code and separates the message from the guidance', async () => {
+    // A text-only client saw "not listed for SPY Retrying will not succeed."
+    // and never the code that was in structuredContent. The code goes in the
+    // prefix; a full stop is added only where the message brought none.
+    const bare = await toolHandler(async () => {
+      throw new LiveApiError('Expiration 2020-01-17 is not listed for SPY', 400, 'UNKNOWN_EXPIRATION', false, undefined, {});
+    })({});
+    expect(bare.content[0].text).toBe('API error (UNKNOWN_EXPIRATION): Expiration 2020-01-17 is not listed for SPY. Retrying will not succeed.');
+    const punctuated = await toolHandler(async () => {
+      throw new LiveApiError('Broker refused the credential.', 403, 'BROKER_CREDENTIAL_INVALID', false, undefined, {});
+    })({});
+    expect(punctuated.content[0].text).toBe('API error (BROKER_CREDENTIAL_INVALID): Broker refused the credential. Retrying will not succeed.');
+    // No code: the plain prefix, as before.
+    const uncoded = await toolHandler(async () => {
+      throw new LiveApiError('Upstream busy', 503, undefined as any, true, undefined, {});
+    })({});
+    expect(uncoded.content[0].text).toBe('API error: Upstream busy. This may be retried.');
   });
 
   test('the text budget counts UTF-8 bytes, suffix included', async () => {

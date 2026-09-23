@@ -30,7 +30,7 @@ Two tools read in real time from the broker connected to your account: `get_live
 - **Options Chain** (`get_options_chain`) - Latest available end-of-day chain summary with expirations, ATM term structure, skew, and representative near-money contracts
 - **Live Options Chain** (`get_live_options_chain`, Pro and above) - One expiration, fetched in real time from the broker connected to your account: near-the-money strikes, the ATM pair, 25-delta wings, whole-chain volume and open interest. Spends your own broker quota; 10 requests per minute
 - **EOD Options Snapshot** (`get_options_snapshot`) - Spot, max pain, net GEX/DEX, ATM IV term structure, IV rank and percentile, historical vol, volume and open interest for any symbol the platform holds an options snapshot for, with optional per-strike max-pain, GEX/DEX and skew curve summaries; up to 50 symbols compared in one request
-- **Options Analytics History** (`get_options_analytics_history`) - Daily analytics history including IV, skew, expected move, rates, dividend yield, GEX/DEX/VEX, and net vanna/charm/vomma
+- **Options Analytics History** (`get_options_analytics_history`) - Daily analytics history including IV, skew, expected move, the risk-free rate, GEX/DEX/VEX, and net vanna/charm/vomma
 - **Treasury Rates** (`get_rates`) - Unified Treasury view with `view='benchmark'` (current platform risk-free rate, 10Y-based) or `view='curve'` (full yield curve with key rates, inversion flags, and compact history)
 
 ### Flow, positioning, and market structure
@@ -44,10 +44,10 @@ Two tools read in real time from the broker connected to your account: `get_live
 
 ### Regime and exposure
 
-- **Regime** (`get_regime`) - Unified regime tool with three scopes: `scope='market'` (composite stress regime across SPY/QQQ/IWM/DIA with score bands and drivers), `scope='symbol'` (per-symbol daily regime + authoritative Greek exposures: net gamma/delta/vega/vanna/charm/vomma, call/put walls, gamma flip, abs gamma anchor, top 10 gamma strikes), or `scope='intraday'` (5 scans/day with stress scoring + Greek snapshots)
+- **Regime** (`get_regime`) - Unified regime tool with three scopes: `scope='market'` (composite stress regime across SPY/QQQ/IWM/DIA with score bands and drivers), `scope='symbol'` (per-symbol daily regime + authoritative Greek exposures: net gamma/delta/vega/vanna/charm/vomma, call/put walls, gamma flip, gamma magnet, top 10 gamma strikes), or `scope='intraday'` (5 scans/day with stress scoring + Greek snapshots)
 - **Live Dealer Positioning** (`get_live_dealer_positioning`, Pro and above) - Net GEX/DEX plus vega, vanna, charm and vomma, the gamma flip with its search status and resolution, call and put walls, gamma concentration and the gamma regime, computed in real time from your connected broker's chain over the nearest four expirations. Five weighted units per call against the 10-unit-per-minute live budget
-- **EOD Dealer Positioning** (`get_dealer_positioning`) - Last completed session's net GEX/DEX over 0-60 days, dealer regime, gamma flip (coarse-grid, no search status), call and put walls, gamma magnet, 30-day expected move and top contributing strikes, for roughly 5,500 listed equities and ETFs; a past session via `date`
-- **Model Calibration Fits** (`get_regime_fits`, Pro and above) - Calibrated parameters and fit quality (IV and price RMSE) for the eight pricing models on a symbol, with an error history; covers the regime universe of about 124 symbols
+- **EOD Dealer Positioning** (`get_dealer_positioning`) - Net GEX/DEX over 0-60 days, dealer regime, gamma flip (coarse-grid, no search status), call and put walls, gamma magnet, 30-day expected move and top contributing strikes from the most recent session on file (`date` in the result says which), for roughly 5,500 listed equities and ETFs; a past session via `date`
+- **Model Calibration Fits** (`get_regime_fits`, Pro and above) - Calibrated parameters and fit quality for the eight pricing models on a symbol (IV RMSE for every model, price RMSE for every model except eSSVI, an IV-surface fit that stores none), with an error history; covers the regime universe of about 124 symbols
 - **Black-Scholes Pricing** (`compute_black_scholes`, Pro and above) - Price, seventeen Greeks in the commercial API's convention, expected move and risk-neutral ITM probability from explicit inputs; `r` and `q` supplied or resolved from stored market data for a symbol, never defaulted. Black-Scholes only; the other models, calibration and multi-model runs are on the REST API and Python SDK
 
 ### Company, events, and filings
@@ -76,7 +76,7 @@ These require account sync to be enabled.
 - **Query Analysis** (`query_analysis`) - Filtered analysis-history queries by delta, volatility, and DTE
 - **Compute Runs** (`get_compute_runs`) - AI Compute Suite run history with compact run summaries, exposure levels, model-dispersion highlights, and representative position/model consensus summaries across multiple pricing models; `view='detailed'` exposes per-model outputs when exactly one run matches
 - **FFT Results** (`get_fft_results`) - FFT scanner mispricing signals and calibration data
-- **Snapshots** (`get_snapshot`) - Unified synced-snapshot tool: `type='gex'` (per-symbol Gamma Exposure - requires `symbol`; per-expiration breakdown, call/put walls, gamma flip, abs gamma anchor, unusual activity, expected move, raw vs in-wall visible combo counts), `type='portfolio'` (account-wide portfolio snapshots with market-scaled raw Greeks - 1st + 2nd order), or `type='risk'` (account-wide VaR, CVaR, beta, Sharpe, drawdown, stress tests + $-impact Greeks)
+- **Snapshots** (`get_snapshot`) - Unified synced-snapshot tool: `type='gex'` (per-symbol Gamma Exposure - requires `symbol`; per-expiration breakdown, call/put walls, gamma flip, gamma magnet, unusual activity, expected move, raw vs in-wall visible combo counts), `type='portfolio'` (account-wide portfolio snapshots with market-scaled raw Greeks - 1st + 2nd order), or `type='risk'` (account-wide VaR, CVaR, beta, Sharpe, drawdown, stress tests + $-impact Greeks)
 - **Analysis Rollups** (`get_analysis_rollups`) - Daily or weekly trend aggregates over your analysis activity
 
 ## Platform Context

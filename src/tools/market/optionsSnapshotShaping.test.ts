@@ -75,6 +75,12 @@ describe('summarizeOptionsSnapshot', () => {
     expect(shaped.metrics.expectedMove30dFraction).toBe(0.018);
     expect(shaped.metrics).not.toHaveProperty('expectedMovePct');
     expect(shaped.units.expectedMove30dFraction).toContain('decimal fraction');
+    // The stored dividend_yield is 0 on every row the producer has ever
+    // written (24 positive rows in 21.3 million on 2026-09-18), so the field
+    // is a zero nobody computed: AAPL read as "pays no dividend". Not
+    // published until the producer writes it; the live positioning tool
+    // resolves q from the company profile instead.
+    expect(shaped.metrics).not.toHaveProperty('dividendYield');
   });
 
   it('separates "no curve this session" from "no curve at all"', () => {
@@ -265,6 +271,19 @@ describe('summarizeMetricsBatch', () => {
   it('reports nothing missing when every symbol came back', () => {
     const shaped = summarizeMetricsBatch({ data: [{ symbol: 'SPY' }] }, ['SPY']);
     expect(shaped.missingSymbols).toEqual([]);
+  });
+
+  it('returns the rows in the order they were asked for', () => {
+    // The endpoint answers alphabetically. A model that asked for
+    // "AAPL, MSFT, NVDA, SPY, QQQ" to compare them got QQQ before SPY, and a
+    // table built row by row against the request came out misaligned. A
+    // symbol the endpoint returned that was not asked for goes last, kept.
+    const shaped = summarizeMetricsBatch(
+      { data: [{ symbol: 'AAPL' }, { symbol: 'MSFT' }, { symbol: 'NVDA' }, { symbol: 'QQQ' }, { symbol: 'SPY' }, { symbol: 'XYZ' }] },
+      ['SPY', 'QQQ', 'AAPL', 'NVDA', 'MSFT'],
+    );
+    expect(shaped.metrics.map((r) => r.symbol)).toEqual(['SPY', 'QQQ', 'AAPL', 'NVDA', 'MSFT', 'XYZ']);
+    expect(shaped.returned).toBe(6);
   });
 
   it('publishes the expected move as the 30-day fraction it is, never under a percent name', () => {
