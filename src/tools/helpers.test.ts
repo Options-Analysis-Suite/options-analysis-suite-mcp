@@ -645,3 +645,293 @@ describe('toolHandler — structuredContent', () => {
     });
   });
 });
+
+describe('no tool output names a data vendor', () => {
+  // A company profile's and a news item's `image` is a URL on the equity
+  // vendor's image host (12,914 of 12,957 profiles and 131,506 of 135,620
+  // news rows on 2026-09-23), and both tools pass the raw row through on
+  // `full`. Backend error text can quote a vendor too. Broker names are not
+  // data vendors and stay. The names are built from base64 so this file,
+  // which the public mirror ships, names no vendor itself.
+  const decode = (s: string) => Buffer.from(s, 'base64').toString('utf8');
+  const OPT = decode('T1JBVFM=');
+  const EQ = decode('Rk1Q');
+  const EQ_LONG = decode('RmluYW5jaWFsIE1vZGVsaW5nIFByZXA=').split(' ');
+  const EQ_HOST = `images.${EQ_LONG.join('').toLowerCase()}.com`;
+  const any = new RegExp(`${OPT}|${EQ}|${EQ_LONG.join('\\W*')}`, 'i');
+
+  test('drops a value that is a vendor URL, and keeps other URLs', () => {
+    const out = sanitizeMcpWireOutput({
+      symbol: 'ROIV', image: `https://${EQ_HOST}/symbol/ROIV.png`, website: 'https://roivant.com',
+      rows: [{ title: 'x', image: ` http://${EQ_HOST}/news/a.jpg ` }],
+    }) as any;
+    expect(out).toEqual({ symbol: 'ROIV', website: 'https://roivant.com', rows: [{ title: 'x' }] });
+  });
+
+  test('rewrites vendor names in text, in any case and spacing, and a vendor URL inside text', () => {
+    const out = sanitizeMcpWireOutput({
+      a: `${OPT} import success is for 2026-09-22`,
+      b: `data from ${EQ_LONG.join('  ')} and ${EQ_LONG.join('\n')}`,
+      c: `${EQ}_API_KEY not set; ${EQ.toLowerCase()} sync; [${EQ.charAt(0)}${EQ.slice(1).toLowerCase()}Sync]`,
+      d: `see https://${EQ_HOST}/x.png for the chart`,
+      e: [`${OPT.toLowerCase()}_strikes_not_clean`],
+    }) as any;
+    expect(JSON.stringify(out)).not.toMatch(any);
+    expect(out).toEqual({
+      a: 'VENDOR import success is for 2026-09-22',
+      b: 'data from Vendor and Vendor',
+      c: 'VENDOR_API_KEY not set; vendor sync; [VendorSync]',
+      d: 'see a removed link for the chart',
+      e: ['vendor_strikes_not_clean'],
+    });
+  });
+
+  test('rewrites vendor names in keys, data-keyed ones included', () => {
+    const out = sanitizeMcpWireOutput({
+      [`${EQ.toLowerCase()}_rating`]: 4,
+      [`${OPT.toLowerCase()}Iv`]: 0.3,
+      tiers: { [`${OPT.toLowerCase()}_tier`]: 1 },
+    }) as any;
+    expect(out).toEqual({ vendorRating: 4, vendorIv: 0.3, tiers: { vendor_tier: 1 } });
+  });
+
+  test('leaves broker names and ordinary words alone', () => {
+    const text = `Tradier, tastytrade, Schwab and Public.com; the platform formats moratorium decorators; hal${EQ.toLowerCase()}`;
+    expect(sanitizeMcpWireOutput({ text })).toEqual({ text });
+  });
+
+  test('scrubs below the recursion limit too', () => {
+    let deep: any = { note: `${OPT} feed`, image: `https://${EQ_HOST}/a.png` };
+    for (let i = 0; i < 30; i += 1) deep = { inner: deep };
+    expect(JSON.stringify(sanitizeMcpWireOutput(deep))).not.toMatch(any);
+    let inner: any = sanitizeMcpWireOutput(deep);
+    while (inner.inner) inner = inner.inner;
+    expect(inner).toEqual({ note: 'VENDOR feed' });
+  });
+
+  test('error text, codes, action URLs and details carry no vendor name', async () => {
+    const thrown = [
+      new ApiError(`${EQ} profile request failed`, 502),
+      new AuthError(`${OPT} says no`),
+      new SubscriptionError(`${OPT} tier`),
+      new Error(`Could not check ${OPT} sync_progress`),
+      new LiveApiError(`${EQ_LONG.join(' ')} down`, 503, `${EQ}_UPSTREAM_DOWN`, true, `https://${EQ_HOST}/fix`, {
+        source: OPT, [`${EQ.toLowerCase()}Status`]: 503,
+      }),
+    ];
+    for (const err of thrown) {
+      const res = await toolHandler(async () => { throw err; })({});
+      expect(res.isError, err.message).toBe(true);
+      expect(JSON.stringify(res), err.message).not.toMatch(any);
+    }
+  });
+
+  test('a form feed before "mp" is text, not a vendor name, and the call succeeds', async () => {
+    // Rewriting serialized JSON turned the escape \f followed by "mp" into
+    // an invalid escape and rejected the call outside the handler's catch.
+    const value = `\f${'mp'}, a form feed then "mp"`;
+    const res = await toolHandler(async () => ({ description: value }))({});
+    expect(res.isError).toBeUndefined();
+    expect((res.structuredContent as any).description).toBe(value);
+    let deep: any = { description: value };
+    for (let i = 0; i < 30; i += 1) deep = { inner: deep };
+    let inner: any = sanitizeMcpWireOutput(deep);
+    while (inner.inner) inner = inner.inner;
+    expect(inner.description).toBe(value);
+  });
+
+  test('a name across a line break is caught in structured errors and past the depth limit', async () => {
+    const res = await toolHandler(async () => {
+      throw new LiveApiError(`${EQ_LONG.join('\n')} failed`, 503, 'UPSTREAM', true, undefined, { note: `${EQ_LONG.join('\r\n')}` });
+    })({});
+    expect(JSON.parse(JSON.stringify(res.structuredContent)).error).toBe('Vendor failed');
+    expect((res.structuredContent as any).note).toBe('Vendor');
+    let deep: any = { note: `${EQ_LONG.join('\n')} feed` };
+    for (let i = 0; i < 30; i += 1) deep = { inner: deep };
+    let inner: any = sanitizeMcpWireOutput(deep);
+    while (inner.inner) inner = inner.inner;
+    expect(inner.note).toBe('Vendor feed');
+  });
+
+  test('the acronym is caught as a camelCase or snake_case segment and in the plural', () => {
+    const lower = EQ.toLowerCase();
+    const out = sanitizeMcpWireOutput({
+      [`source_${lower}`]: 'quarterly',
+      [`source${EQ}`]: 1,
+      [`_source_${lower}_meta`]: { a: 1 },
+      text: `two ${EQ}s and ${EQ}S; ${lower}s`,
+    }) as any;
+    expect(out).toEqual({ sourceVendor: 'quarterly', sourceVENDOR: 1, sourceVendorMeta: { a: 1 }, text: 'two VENDORs and VENDORS; vendors' });
+  });
+
+  test('a key renamed for a vendor never overwrites another key', () => {
+    const opt = OPT.toLowerCase();
+    const eq = EQ.toLowerCase();
+    expect(sanitizeMcpWireOutput({ ratings: { [opt]: 1, [eq]: 2 } })).toEqual({ ratings: { vendor: 1, vendor2: 2 } });
+    expect(sanitizeMcpWireOutput({ [opt]: 1, vendor: 2 })).toEqual({ vendor2: 1, vendor: 2 });
+    expect(sanitizeMcpWireOutput({ [opt]: 1, [eq]: 2, vendor2: 3 })).toEqual({ vendor: 1, vendor3: 2, vendor2: 3 });
+    expect(sanitizeMcpWireOutput({ [`${opt}_x`]: 1, vendor_x: 2 })).toEqual({ vendorX2: 1, vendorX: 2 });
+  });
+
+  test('scrubbing stays inside the error budgets', async () => {
+    // The replacement is longer than the acronym, and it ran after
+    // truncation: a structured error reached 11,515 bytes against 8,192.
+    const long = `${EQ} `.repeat(3_000);
+    const bytes = (x: string) => new TextEncoder().encode(x).byteLength;
+    for (const err of [
+      new LiveApiError(long, 503, 'UPSTREAM', true, undefined, { note: long.slice(0, 3_000) }),
+      new ApiError(long, 502),
+      new Error(long),
+    ]) {
+      const res = await toolHandler(async () => { throw err; })({});
+      expect(bytes(res.content[0].text)).toBeLessThanOrEqual(8 * 1024);
+      expect(JSON.stringify(res)).not.toMatch(any);
+      const structured = res.structuredContent as any;
+      if (structured) {
+        expect(bytes(structured.error)).toBeLessThanOrEqual(2 * 1024);
+        expect(bytes(JSON.stringify(structured.note ?? ''))).toBeLessThanOrEqual(4 * 1024);
+      }
+    }
+  });
+
+  test('an action URL on a vendor host is withheld', async () => {
+    const res = await toolHandler(async () => {
+      throw new LiveApiError('down', 503, 'UPSTREAM', false, `https://${EQ_HOST}/status`, {});
+    })({});
+    expect((res.structuredContent as any).actionUrl).toBeUndefined();
+    expect(res.content[0].text).toBe('API error (UPSTREAM): down. Retrying will not succeed.');
+  });
+
+  test("a URL on any vendor host is dropped, the cloud product's name included", () => {
+    const cloud = `${EQ.toLowerCase()}cloud.io`;
+    const out = sanitizeMcpWireOutput({
+      a: `https://${cloud}/api/v3/profile/AAPL`,
+      b: `https://api.${OPT.toLowerCase()}.io/datav2/strikes`,
+      // Percent-encoded, in the host and in the path.
+      e: `https://%${OPT.toLowerCase().charCodeAt(0).toString(16)}${OPT.toLowerCase().slice(1)}.io/datav2/strikes`,
+      f: `https://%${EQ.toLowerCase().charCodeAt(0).toString(16)}${EQ.toLowerCase().slice(1)}cloud.io/api/v3/profile/AAPL`,
+      g: `https://example.com/%${OPT.toLowerCase().charCodeAt(0).toString(16)}${OPT.toLowerCase().slice(1)}/x`,
+      // Full-width letters, which the URL parser folds to the ASCII host.
+      h: `https://${[...OPT.toLowerCase()].map((c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).join('')}.io/x`,
+      // A host that merely contains a short name is not a vendor's.
+      breeder: `https://www.k${OPT.toLowerCase()}.com/`,
+      c: `see https://${cloud}/x and https://example.com/y`,
+      d: `${EQ} Cloud and ${EQ.toLowerCase()}cloud`,
+      keep: 'https://example.com/y',
+    });
+    expect(out).toEqual({
+      c: 'see a removed link and https://example.com/y', d: 'Vendor and vendor',
+      breeder: `https://www.k${OPT.toLowerCase()}.com/`, keep: 'https://example.com/y',
+    });
+  });
+
+  test('a name in full-width letters is a name, and nothing else in the string changes', () => {
+    const wide = (x: string) => [...x].map((c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).join('');
+    expect(sanitizeMcpWireOutput({ a: `per ${wide(OPT)}`, [wide(EQ.toLowerCase())]: 1, b: `${wide('ABC')} fund` }))
+      .toEqual({ a: 'per VENDOR', vendor: 1, b: `${wide('ABC')} fund` });
+    // Mixed with an ASCII name, and beside notation a whole-string fold
+    // would rewrite (10 to the sixth became 106).
+    expect(sanitizeMcpWireOutput({
+      mixed: `${EQ} and ${wide(OPT)} supply data.`,
+      notation: `Shares outstanding: 10\u2076. ${wide('ABC')} fund. Source: ${wide(OPT)}.`,
+      // A ligature folds to two letters; the name after it is still the span
+      // that changes.
+      ligature: `\ufb01nance and ${wide(OPT)} and ${wide('X')}`,
+      spaced: `${EQ_LONG.join('\u3000')} feed`,
+      url: `see https://example.com/${wide('ABC')} and https://${wide(OPT.toLowerCase())}.io/x`,
+    })).toEqual({
+      mixed: 'VENDOR and VENDOR supply data.',
+      notation: `Shares outstanding: 10\u2076. ${wide('ABC')} fund. Source: VENDOR.`,
+      ligature: `\ufb01nance and VENDOR and ${wide('X')}`,
+      spaced: 'Vendor feed',
+      url: `see https://example.com/${wide('ABC')} and a removed link`,
+    });
+  });
+
+  test('error text and details fold full-width names too', async () => {
+    const wide = (x: string) => [...x].map((c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).join('');
+    const res = await toolHandler(async () => {
+      throw new LiveApiError(`${EQ} and ${wide(OPT)} down`, 503, 'UPSTREAM', true, undefined, { note: `${EQ} and ${wide(OPT)}` });
+    })({});
+    expect(res.content[0].text).not.toMatch(any);
+    expect(res.content[0].text).not.toContain(wide(OPT));
+    expect(JSON.stringify(res.structuredContent)).not.toContain(wide(OPT));
+    expect((res.structuredContent as any).error).toBe('VENDOR and VENDOR down');
+  });
+
+  test('a word that merely contains a short name is left alone', () => {
+    const text = `The company breeds K${OPT.toLowerCase()}. K${OPT} too.`;
+    expect(sanitizeMcpWireOutput({ description: text })).toEqual({ description: text });
+    expect(sanitizeMcpWireOutput({ description: `per ${OPT}, ${OPT.charAt(0)}${OPT.slice(1).toLowerCase()} and ${OPT.toLowerCase()}Iv` }))
+      .toEqual({ description: 'per VENDOR, Vendor and vendorIv' });
+  });
+
+  test('a key the camelCase conversion turns into a vendor name never overwrites another key', () => {
+    const spelled = EQ.toLowerCase().split('').join('_');
+    expect(sanitizeMcpWireOutput({ [`source_${spelled}`]: 1, sourceVENDOR: 2 })).toEqual({ sourceVENDOR2: 1, sourceVENDOR: 2 });
+  });
+
+  test('a __proto__ key past the depth limit stays a key', () => {
+    let deep: any = JSON.parse('{"__proto__":{"sentinel":1},"keep":2}');
+    for (let i = 0; i < 25; i += 1) deep = { inner: deep };
+    let inner: any = sanitizeMcpWireOutput(deep);
+    while (inner.inner) inner = inner.inner;
+    expect(Object.keys(inner)).toEqual(['__proto__', 'keep']);
+    expect(JSON.parse(JSON.stringify(inner))).toEqual(JSON.parse('{"__proto__":{"sentinel":1},"keep":2}'));
+    expect(Object.getPrototypeOf(inner)).toBe(Object.prototype);
+  });
+
+  test('a key named like an Object.prototype member is an ordinary key', () => {
+    // The rename tables were consulted with `in`, which also finds inherited
+    // members: {constructor: 1} came out under the key "function Object()...".
+    expect(sanitizeMcpWireOutput({ constructor: 1, toString: 2, valueOf: 3 })).toEqual({ constructor: 1, toString: 2, valueOf: 3 });
+  });
+
+  test('the value sanitized is what JSON.stringify publishes, and it is scrubbed', () => {
+    // toJSON, functions, boxed primitives and getters are settled by the
+    // native serializer, once, before anything is scrubbed.
+    const callable = Object.assign(() => {}, { toJSON: () => OPT });
+    const arrayWithToJSON = Object.assign([1, 2], { toJSON() { return this; } });
+    let reads = 0;
+    const getter = { get toJSON() { reads += 1; return () => `${OPT} once`; } };
+    const seen: string[] = [];
+    const keyed = { toJSON: (key: string) => { seen.push(key); return `${key}:${OPT}`; } };
+    const cases: unknown[] = [
+      { named: { toJSON: () => OPT } },
+      { payload: { toJSON: () => callable } },
+      { direct: callable },
+      [callable, { toJSON: () => callable }],
+      { list: arrayWithToJSON },
+      { n: new Number(42), b: new Boolean(false), s: new String(OPT) },
+      { gone: { toJSON: () => undefined }, price: keyed, list: [keyed] },
+      { date: new Date('2026-09-22T20:00:00Z') },
+    ];
+    for (const input of cases) {
+      const native = JSON.parse(JSON.stringify(input));
+      expect(sanitizeMcpWireOutput(input)).toEqual(sanitizeMcpWireOutput(native));
+      expect(JSON.stringify(sanitizeMcpWireOutput(input))).not.toMatch(any);
+    }
+    expect(sanitizeMcpWireOutput(cases[0])).toEqual({ named: 'VENDOR' });
+    expect(sanitizeMcpWireOutput(cases[1])).toEqual({});
+    expect(sanitizeMcpWireOutput(cases[4])).toEqual({ list: [1, 2] });
+    expect(sanitizeMcpWireOutput(cases[5])).toEqual({ n: 42, b: false, s: 'VENDOR' });
+    expect(sanitizeMcpWireOutput(cases[7])).toEqual({ date: '2026-09-22T20:00:00.000Z' });
+    expect(sanitizeMcpWireOutput(callable)).toBe('VENDOR');
+    expect(sanitizeMcpWireOutput(() => 1)).toBeUndefined();
+    reads = 0;
+    expect(sanitizeMcpWireOutput({ getter })).toEqual({ getter: 'VENDOR once' });
+    expect(reads).toBe(1);
+    seen.length = 0;
+    sanitizeMcpWireOutput(cases[6]);
+    expect(seen).toEqual(['price', '0']);
+  });
+
+  test('a full-path payload reaches the client without a vendor name', async () => {
+    const res = await toolHandler(async () => ({
+      _skipSizeGuard: true,
+      data: { symbol: 'ROIV', image: `https://${EQ_HOST}/symbol/ROIV.png`, description: `per ${OPT}` },
+    }))({});
+    expect(JSON.stringify(res)).not.toMatch(any);
+    expect(res.structuredContent).toEqual({ symbol: 'ROIV', description: 'per VENDOR' });
+  });
+});

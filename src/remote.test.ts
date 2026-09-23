@@ -76,7 +76,7 @@ describe('ownerKeyFor (session identity survives bearer rotation)', () => {
     // The refresh grant hands out a fresh JWT (new iat/exp) hourly, but the
     // session_id claim is stable for the life of the GoTrue session. Owner
     // identity must follow session_id, not the raw bearer string - otherwise a
-    // refreshed client gets locked out of its own MCP session (Codex finding 1).
+    // refreshed client gets locked out of its own MCP session.
     const first = `oauth-access:${jwt({ session_id: 'sess-abc', exp: 1000, iat: 1 })}`;
     const second = `oauth-access:${jwt({ session_id: 'sess-abc', exp: 5000, iat: 2 })}`;
     expect(ownerKeyFor(first)).toBe(ownerKeyFor(second));

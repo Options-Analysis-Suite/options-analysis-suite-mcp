@@ -50,7 +50,7 @@ const nextCalendarDate = (date: string): string => addDays(date, 1);
 // 2026-09-18. Retrying will not succeed." at 20:10Z on 2026-09-18, when that
 // file lands overnight and the same call succeeds the next morning. A
 // weekday date is not final until 09:30 New York on the next calendar day.
-// That cutoff is this tool's, not the producer's, which has none: the equity
+// That cutoff is this tool's, not the producer's, which has none: the options
 // import is scheduled 01:00 ET Tue-Sat and the regime cron's retry loop
 // re-pulls it in half-hour steps to about 06:00 ET
 // (proxy/services/ScannerCronJob.ts), and the exposure summary for every

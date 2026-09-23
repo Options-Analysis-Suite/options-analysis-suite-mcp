@@ -118,7 +118,8 @@ function isNestedSyncSnapshotPayload(obj: Record<string, unknown>): boolean {
 // pass them through on raw and full paths, so this boundary converts every
 // PURE lowercase snake_case key. Anything else is data or already a field
 // name and is left alone: a date, a tenor (10Y), a ticker, a model or feature
-// display name, a form type, a camelCase key. Values are never touched.
+// display name, a form type, a camelCase key. Values are not converted; the
+// vendor pass below is the one rewrite a value gets.
 const SNAKE_KEY_RE = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/;
 // The yield-curve summary already names these spreads; the raw analysis
 // block's columns take the same names.
@@ -131,6 +132,160 @@ const WIRE_KEY_OVERRIDES: Record<string, string> = {
 // children of an OBJECT under these keys are exempt; a `symbols` array is a
 // list of rows.
 const DATA_KEYED_PARENTS = new Set(['symbols', 'tiers']);
+
+// No tool output names a data vendor. Rows pass through on raw and full
+// paths (a company profile's and a news item's `image` is a URL on the
+// equity vendor's image host), and backend error text can quote one. So a
+// string value that is a URL on a vendor's host is dropped (a link inside
+// text reads "a removed link"), and a vendor name anywhere
+// else, in a value, a key or an error, reads "vendor". Broker names are not
+// data vendors and stay. Values are walked, never serialized text, so an
+// escape sequence can neither hide a name nor be broken by a rewrite. The
+// patterns are base64 so this file, which the public mirror ships, names no
+// vendor itself.
+const decodePattern = (encoded: string) => Buffer.from(encoded, 'base64').toString('utf8');
+// The equity vendor's full name and its cloud product, in any case and
+// spacing.
+const VENDOR_NAME_CI = decodePattern('ZmluYW5jaWFsW1xzXy4tXSptb2RlbGluZ1tcc18uLV0qcHJlcHxmbXBbXHNfLi1dKmNsb3Vk');
+// The two short names as a word or a camelCase/snake_case segment (lower
+// case with no letter before it, a capitalized form with no capital before
+// it), so a word that merely contains one is left alone. The acronym's
+// plural is included.
+const VENDOR_ACRONYM = decodePattern('KD88IVtBLVphLXpdKSg/OmZtcHM/fG9yYXRzKSg/IVthLXpdKXwoPzwhW0EtWl0pKD86Rk1QW3NTXT98Rm1wcz98T1JBVFN8T3JhdHMpKD8hW2Etel0p');
+const VENDOR_NAME_CI_RE = new RegExp(VENDOR_NAME_CI, 'gi');
+const VENDOR_ACRONYM_RE = new RegExp(VENDOR_ACRONYM, 'g');
+const VENDOR_NAME_TEST_RE = [new RegExp(VENDOR_NAME_CI, 'i'), new RegExp(VENDOR_ACRONYM)];
+const URL_RE = /\bhttps?:\/\/[^\s"'<>\\]+/gi;
+const BARE_URL_RE = /^\s*https?:\/\/\S+\s*$/i;
+
+// A URL names a vendor as written, percent-decoded, or in the host the URL
+// parser resolves (which decodes an encoded host).
+function vendorUrl(url: string): boolean {
+  if (namesVendor(url)) return true;
+  try {
+    if (namesVendor(decodeURIComponent(url))) return true;
+  } catch { /* malformed escapes: judged as written and by the host */ }
+  try {
+    return namesVendor(new URL(url.trim()).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function namesVendor(text: string): boolean {
+  return VENDOR_NAME_TEST_RE.some((re) => re.test(text));
+}
+
+function vendorLike(word: string): string {
+  if (/[A-Z]/.test(word) && word === word.toUpperCase()) return 'VENDOR';
+  return /^[A-Z]/.test(word) ? 'Vendor' : 'vendor';
+}
+
+// Full-width ASCII forms (U+FF01-U+FF5E) spell a name as well as ASCII does
+// (the ideographic space is already whitespace to the patterns). Each is one code unit, as its ASCII
+// counterpart is, so the folded copy lines up with the original index for
+// index: names are found in the copy and only those spans change in the
+// original. Nothing else in the string is folded.
+const FULL_WIDTH_RE = /[\uff01-\uff5e]/;
+
+function foldFullWidth(text: string): string {
+  return text.replace(/[\uff01-\uff5e]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
+}
+
+// Replaces each match of `re` found in `folded` at the same span of both
+// strings; `swap` returns null to leave a match as it is.
+function replaceAligned(
+  [original, folded]: [string, string],
+  re: RegExp,
+  swap: (match: string) => string | null,
+): [string, string] {
+  let outOriginal = '';
+  let outFolded = '';
+  let last = 0;
+  for (const match of folded.matchAll(re)) {
+    const start = match.index ?? 0;
+    const replacement = swap(match[0]);
+    if (replacement === null) continue;
+    outOriginal += original.slice(last, start) + replacement;
+    outFolded += folded.slice(last, start) + replacement;
+    last = start + match[0].length;
+  }
+  return [outOriginal + original.slice(last), outFolded + folded.slice(last)];
+}
+
+export function scrubVendorText(text: string): string {
+  const folded = FULL_WIDTH_RE.test(text) ? foldFullWidth(text) : text;
+  if (!/https?:\/\//i.test(folded) && !namesVendor(folded)) return text;
+  let pair: [string, string] = [text, folded];
+  pair = replaceAligned(pair, URL_RE, (url) => (vendorUrl(url) ? 'a removed link' : null));
+  pair = replaceAligned(pair, VENDOR_NAME_CI_RE, vendorLike);
+  // The acronym's plural keeps its s as written.
+  pair = replaceAligned(pair, VENDOR_ACRONYM_RE, (word) => (word.length === 4 ? vendorLike(word.slice(0, 3)) + word.slice(3) : vendorLike(word)));
+  return pair[0];
+}
+
+function isVendorUrl(value: unknown): boolean {
+  return typeof value === 'string' && BARE_URL_RE.test(value) && vendorUrl(value);
+}
+
+// An own property whatever its name: assigning "__proto__" into a plain
+// object would set its prototype and lose the key.
+function setOwn(target: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
+const hasOwn = (record: object, key: string) => Object.prototype.hasOwnProperty.call(record, key);
+
+/**
+ * A key renamed for a vendor never lands on a name another key of the same
+ * object publishes: it takes the first free numbered form (vendor, vendor2).
+ */
+function settleVendorKeys(entries: Array<{ outKey: string; vendor: boolean }>): void {
+  const taken = new Set(entries.filter((entry) => !entry.vendor).map((entry) => entry.outKey));
+  for (const entry of entries) {
+    if (!entry.vendor) continue;
+    let candidate = entry.outKey;
+    for (let n = 2; taken.has(candidate); n += 1) candidate = `${entry.outKey}${n}`;
+    taken.add(candidate);
+    entry.outKey = candidate;
+  }
+}
+
+/**
+ * The same rules with no depth limit and no recursion, for plain JSON data:
+ * what lies past the sanitizer's depth limit, and error details. Nothing
+ * else is renamed.
+ */
+function scrubVendorDeep(source: unknown): unknown {
+  if (typeof source === 'string') return scrubVendorText(source);
+  if (source == null || typeof source !== 'object') return source;
+  const root: unknown = Array.isArray(source) ? [] : {};
+  const stack: Array<[unknown, unknown]> = [[source, root]];
+  const place = (child: unknown): unknown => {
+    if (typeof child === 'string') return scrubVendorText(child);
+    if (child == null || typeof child !== 'object') return child;
+    const copy: unknown = Array.isArray(child) ? [] : {};
+    stack.push([child, copy]);
+    return copy;
+  };
+  while (stack.length > 0) {
+    const [from, to] = stack.pop()!;
+    if (Array.isArray(from)) {
+      for (const item of from) (to as unknown[]).push(place(item));
+      continue;
+    }
+    const record = from as Record<string, unknown>;
+    const entries = Object.keys(record)
+      .filter((name) => !isVendorUrl(record[name]))
+      .map((name) => {
+        const outKey = scrubVendorText(name);
+        return { name, outKey, vendor: outKey !== name };
+      });
+    settleVendorKeys(entries);
+    for (const { name, outKey } of entries) setOwn(to as Record<string, unknown>, outKey, place(record[name]));
+  }
+  return root;
+}
 
 function camelWireKey(key: string): string {
   if (!SNAKE_KEY_RE.test(key)) return key;
@@ -147,30 +302,46 @@ function camelWireKey(key: string): string {
 }
 
 export function sanitizeMcpWireOutput(data: unknown, depth = 0, dataKeyed = false): unknown {
-  if (depth > 20 || data == null || typeof data !== 'object') return data;
+  // What is published is what JSON.stringify makes of the value, so that is
+  // what is sanitized: toJSON methods, functions, boxed primitives and
+  // getters are settled once, natively, before anything is renamed or
+  // scrubbed, and a value that serializes to nothing stays nothing.
+  if (depth === 0 && data != null && (typeof data === 'object' || typeof data === 'function')) {
+    const serialized = JSON.stringify(data);
+    if (serialized === undefined) return undefined;
+    data = JSON.parse(serialized) as unknown;
+  }
+  if (typeof data === 'string') return scrubVendorText(data);
+  if (data == null || typeof data !== 'object') return data;
+  // Past the depth limit nothing is renamed or dropped, but no vendor name
+  // gets through.
+  if (depth > 20) return scrubVendorDeep(data);
   if (Array.isArray(data)) return data.map((item) => sanitizeMcpWireOutput(item, depth + 1));
 
   const obj = data as Record<string, unknown>;
   const syncBackedRow = isSyncBackedRow(obj);
   const nestedSyncSnapshotPayload = isNestedSyncSnapshotPayload(obj);
-  const out: Record<string, unknown> = {};
+  const entries: Array<{ outKey: string; value: unknown; vendor: boolean; keyedParent: boolean }> = [];
 
   for (const [key, value] of Object.entries(obj)) {
-    if (key in SAFE_UNDERSCORE_KEY_RENAMES) {
-      out[SAFE_UNDERSCORE_KEY_RENAMES[key]] = sanitizeMcpWireOutput(value, depth + 1);
+    if (hasOwn(SAFE_UNDERSCORE_KEY_RENAMES, key)) {
+      entries.push({ outKey: SAFE_UNDERSCORE_KEY_RENAMES[key], value, vendor: false, keyedParent: false });
       continue;
     }
-    if (key in READABLE_KEY_RENAMES) {
-      out[READABLE_KEY_RENAMES[key]] = sanitizeMcpWireOutput(value, depth + 1);
+    if (hasOwn(READABLE_KEY_RENAMES, key)) {
+      entries.push({ outKey: READABLE_KEY_RENAMES[key], value, vendor: false, keyedParent: false });
       continue;
     }
     const dynamicMetaMatch = key.match(DYNAMIC_META_KEY_RE);
     if (dynamicMetaMatch) {
       const [, base] = dynamicMetaMatch;
-      out[`${camelWireKey(base)}Meta`] = sanitizeMcpWireOutput(value, depth + 1);
+      const plain = `${camelWireKey(base)}Meta`;
+      const outKey = scrubVendorText(plain);
+      entries.push({ outKey, value, vendor: outKey !== plain, keyedParent: false });
       continue;
     }
     if (key.startsWith('_')) continue;
+    if (isVendorUrl(value)) continue;
     if (key === 'user_id' || key === 'created_at' || key === 'updated_at') continue;
     if (key === 'run_key') continue;
     if (INTERNAL_IDENTIFIER_KEYS.has(key)) continue;
@@ -179,10 +350,18 @@ export function sanitizeMcpWireOutput(data: unknown, depth = 0, dataKeyed = fals
     const camel = dataKeyed ? key : camelWireKey(key);
     // Never overwrite: a snake key whose camelCase twin is already present
     // stays as it is rather than replace a value.
-    const outKey = camel !== key && Object.prototype.hasOwnProperty.call(obj, camel) ? key : camel;
-    out[outKey] = sanitizeMcpWireOutput(value, depth + 1, DATA_KEYED_PARENTS.has(outKey));
+    const plain = camel !== key && hasOwn(obj, camel) ? key : camel;
+    // Renamed is whatever the scrub changed, however the name came to hold
+    // a vendor's (a camelCase conversion can assemble one).
+    const outKey = scrubVendorText(plain);
+    entries.push({ outKey, value, vendor: outKey !== plain, keyedParent: true });
   }
 
+  settleVendorKeys(entries);
+  const out: Record<string, unknown> = {};
+  for (const { outKey, value, keyedParent } of entries) {
+    out[outKey] = sanitizeMcpWireOutput(value, depth + 1, keyedParent && DATA_KEYED_PARENTS.has(outKey));
+  }
   return out;
 }
 
@@ -507,13 +686,13 @@ export function toolHandler<T extends Record<string, unknown>>(
       // that echoes a 100,000-character symbol was reaching the client whole.
       if (err instanceof AuthError) {
         return {
-          content: [{ type: 'text', text: truncateToBytes(String(err.message ?? ''), MAX_ERROR_MESSAGE_BYTES) }],
+          content: [{ type: 'text', text: truncateToBytes(scrubVendorText(String(err.message ?? '')), MAX_ERROR_MESSAGE_BYTES) }],
           isError: true,
         };
       }
       if (err instanceof SubscriptionError) {
         return {
-          content: [{ type: 'text', text: truncateToBytes(String(err.message ?? ''), MAX_ERROR_MESSAGE_BYTES) }],
+          content: [{ type: 'text', text: truncateToBytes(scrubVendorText(String(err.message ?? '')), MAX_ERROR_MESSAGE_BYTES) }],
           isError: true,
         };
       }
@@ -528,11 +707,12 @@ export function toolHandler<T extends Record<string, unknown>>(
         // repeated in the text because not every client reads both.
         const structured = err as { code?: string; retryable?: boolean; actionUrl?: string; details?: Record<string, unknown> };
         if (structured.code !== undefined || structured.retryable !== undefined || structured.details !== undefined) {
-          const message = truncateToBytes(String(err.message ?? ''), MAX_ERROR_MESSAGE_BYTES);
+          const message = truncateToBytes(scrubVendorText(String(err.message ?? '')), MAX_ERROR_MESSAGE_BYTES);
           const code = structured.code === undefined
-            ? undefined : truncateToBytes(String(structured.code), MAX_ERROR_FIELD_BYTES);
-          const actionUrl = structured.actionUrl
-            ? truncateToBytes(String(structured.actionUrl), MAX_ERROR_FIELD_BYTES) : undefined;
+            ? undefined : truncateToBytes(scrubVendorText(String(structured.code)), MAX_ERROR_FIELD_BYTES);
+          // A vendor's own page is no place to send the user.
+          const actionUrl = structured.actionUrl && !isVendorUrl(String(structured.actionUrl))
+            ? truncateToBytes(scrubVendorText(String(structured.actionUrl)), MAX_ERROR_FIELD_BYTES) : undefined;
           const hint = structured.retryable === false
             ? ' Retrying will not succeed.'
             : structured.retryable === true ? ' This may be retried.' : '';
@@ -546,7 +726,7 @@ export function toolHandler<T extends Record<string, unknown>>(
           // the details are what goes - and their absence is stated, because a
           // silent drop leaves a model believing it was told everything.
           const budgeted = budgetedJson(structured.details ?? {}, MAX_ERROR_DETAIL_BYTES);
-          const detailsFit = !budgeted.exceeded;
+          let detailsFit = !budgeted.exceeded;
           // Reparsed from the budgeted JSON rather than cloned a second time:
           // one traversal produces both the measurement and the depth-bounded
           // value, and reparsing proves it survives the serialization the MCP
@@ -554,6 +734,10 @@ export function toolHandler<T extends Record<string, unknown>>(
           let details: Record<string, unknown> = {};
           if (detailsFit) {
             try { details = JSON.parse(budgeted.json) as Record<string, unknown>; } catch { details = {}; }
+            // Scrubbed within the budget: a longer word in place of a vendor's
+            // name must not carry the details past it.
+            details = scrubVendorDeep(details) as Record<string, unknown>;
+            if (jsonUtf8ByteLength(details) > MAX_ERROR_DETAIL_BYTES) { detailsFit = false; details = {}; }
           }
           // Repeated IN THE TEXT, not only in structuredContent: a client that
           // renders text alone would otherwise be told its expiration was wrong
@@ -610,12 +794,12 @@ export function toolHandler<T extends Record<string, unknown>>(
           };
         }
         return {
-          content: [{ type: 'text', text: `API error: ${truncateToBytes(String(err.message ?? ''), MAX_ERROR_MESSAGE_BYTES)}` }],
+          content: [{ type: 'text', text: `API error: ${truncateToBytes(scrubVendorText(String(err.message ?? '')), MAX_ERROR_MESSAGE_BYTES)}` }],
           isError: true,
         };
       }
       return {
-        content: [{ type: 'text', text: `Error: ${truncateToBytes(String(err.message || 'Unknown error'), MAX_ERROR_MESSAGE_BYTES)}` }],
+        content: [{ type: 'text', text: `Error: ${truncateToBytes(scrubVendorText(String(err.message || 'Unknown error')), MAX_ERROR_MESSAGE_BYTES)}` }],
         isError: true,
       };
     }

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { z } from 'zod';
 import { registerPlatformInfo } from './platformInfo.js';
 import { registerAllTools } from './registry.js';
+import { getMcpServerInfo } from '../server.js';
 import { LiveApiClient, LiveApiError } from '../proxy/liveApiClient.js';
 
 const realFetch = globalThis.fetch;
@@ -327,7 +328,7 @@ describe('MCP tool output schemas', () => {
     // resolves the ticker identity covering that day (SupabaseService
     // getIVSurface -> resolveTickerSegments: META on 2022-05-16 reads FB's
     // ticker_id), and the chain reads the current ticker's rows directly
-    // (getOptionsChain -> strike_tickers by symbol). Codex ran both readers
+    // (getOptionsChain -> strike_tickers by symbol). Review ran both readers
     // over FB/META fixture rows and got spot 200 here and spot 10 there,
     // both labelled META, same date. And the chain reads the REQUESTED
     // ticker's rows, not "the current ticker's": asking for FB on that date
@@ -954,20 +955,81 @@ describe('MCP tool output schemas', () => {
     // all public: the connector serves them and the public mirror ships them.
     // The names are base64 here so this file, which the public mirror also
     // ships, names no vendor itself.
-    const vendor = new RegExp(Buffer.from('XGIob3JhdHN8Zm1wfGZpbmFuY2lhbCA/bW9kZWxpbmcgP3ByZXApXGI=', 'base64').toString('utf8'), 'i');
+    // Any spacing, underscores and line breaks included, and a name inside
+    // a word. Every string is checked as a string, never as serialized JSON,
+    // where a line break hides behind an escape.
+    const vendor = new RegExp(Buffer.from('b3JhdHN8Zm1wfGZpbmFuY2lhbFtcV19dKm1vZGVsaW5nW1xXX10qcHJlcA==', 'base64').toString('utf8'), 'i');
+    const strings = (value: unknown, path: string, out: Array<[string, string]> = []): Array<[string, string]> => {
+      if (typeof value === 'string') out.push([path, value]);
+      else if (Array.isArray(value)) value.forEach((item, i) => strings(item, `${path}[${i}]`, out));
+      else if (value && typeof value === 'object') {
+        for (const [key, item] of Object.entries(value)) {
+          out.push([`${path} key`, key]);
+          strings(item, `${path}.${key}`, out);
+        }
+      }
+      return out;
+    };
+    const schemaJson = (schema: unknown) => {
+      if (schema == null) return {};
+      const zod = schema instanceof z.ZodType ? schema : z.object(schema as z.ZodRawShape);
+      return z.toJSONSchema(zod, { unrepresentable: 'any' });
+    };
     const on = captureRegisteredTools();
     registerAllTools(on.server as any, stubClient(), stubTokens(), stubClient());
+    const published: Array<[string, string]> = strings(getMcpServerInfo(), 'server');
     for (const tool of on.tools) {
-      expect(String(tool.config.description), tool.name).not.toMatch(vendor);
-      for (const [param, schema] of Object.entries((tool.config.inputSchema ?? {}) as Record<string, { description?: string }>)) {
-        expect(String(schema?.description ?? ''), `${tool.name}.${param}`).not.toMatch(vendor);
-      }
+      const { inputSchema, outputSchema, ...rest } = tool.config;
+      strings(rest, tool.name, published);
+      strings(schemaJson(inputSchema), `${tool.name} input`, published);
+      strings(schemaJson(outputSchema), `${tool.name} output`, published);
     }
     const info: any = await on.tools.find((t) => t.name === 'get_platform_info')!.handler({ topic: 'all' });
-    expect(JSON.stringify(info)).not.toMatch(vendor);
-    const { readFileSync } = await import('node:fs');
-    for (const file of ['README.md', 'manifest.json']) {
-      expect(readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8'), file).not.toMatch(vendor);
+    strings(info, 'platform info', published);
+    expect(published.length).toBeGreaterThan(1_000);
+    for (const [where, text] of published) expect(text, where).not.toMatch(vendor);
+    // And every text file the package and the public mirror ship, source,
+    // tests and comments included.
+    const { readdirSync, readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const root = new URL('../../', import.meta.url).pathname;
+    const skip = new Set(['node_modules', 'dist', 'dist-remote', '.git', 'bun.lock']);
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (skip.has(entry.name)) continue;
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (!/\.(png|mcpb|ico|jpg)$/.test(entry.name)) files.push(full);
+      }
+    };
+    walk(root);
+    expect(files.some((f) => f.endsWith('helpers.ts'))).toBe(true);
+    expect(files.some((f) => f.endsWith('README.md'))).toBe(true);
+    for (const file of files) expect(readFileSync(file, 'utf8'), file).not.toMatch(vendor);
+  });
+
+  test('the raw profile and news paths reach the client without a vendor name', async () => {
+    // Both tools pass the proxy row through on `full`, and the row's `image`
+    // is a URL on the equity vendor's image host. The wire drops it.
+    const decode = (x: string) => Buffer.from(x, 'base64').toString('utf8');
+    const host = `https://images.${decode('ZmluYW5jaWFsbW9kZWxpbmdwcmVw')}.com`;
+    const vendor = new RegExp(decode('b3JhdHN8Zm1wfGZpbmFuY2lhbFxXKm1vZGVsaW5nXFcqcHJlcA=='), 'i');
+    const client = {
+      get: async (path: string) => (path.startsWith('/stock-news/')
+        ? [{ symbol: 'ROIV', title: 'Roivant rises', url: 'https://news.test/a', image: `${host}/news/a.jpg`, published_date: '2026-09-22' }]
+        : { symbol: 'ROIV', company_name: 'Roivant', image: `${host}/symbol/ROIV.png`, description: 'Biotech.' }),
+      post: async () => ({}),
+    } as any;
+    const on = captureRegisteredTools();
+    registerAllTools(on.server as any, client, stubTokens(), stubClient());
+    for (const name of ['get_company_profile', 'get_news']) {
+      const tool = on.tools.find((t) => t.name === name)!;
+      const args = z.object(tool.config.inputSchema as z.ZodRawShape).parse({ symbol: 'ROIV', full: true });
+      const res: any = await tool.handler(args);
+      expect(res.isError, name).toBeUndefined();
+      expect(JSON.stringify(res), name).not.toMatch(vendor);
+      expect(JSON.stringify(res), name).toContain('Roivant');
     }
   });
 
