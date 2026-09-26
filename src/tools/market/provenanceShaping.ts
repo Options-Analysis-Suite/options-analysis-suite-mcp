@@ -20,3 +20,11 @@ export function collapseProvenance<T>(response: T): T {
   }
   return out as T;
 }
+
+/**
+ * The history routes stamp fetchedAt at the close of the newest session in
+ * the answer (so old end-of-day data is labelled by its date), and
+ * receivedAt when the proxy answered.
+ */
+export const HISTORY_PROVENANCE_TIMES = ' Where the answer carries provenance, fetchedAt is the close (16:00 New York) of the newest session in it, the time the data describes, not when it was imported; receivedAt is when the proxy answered.';
+

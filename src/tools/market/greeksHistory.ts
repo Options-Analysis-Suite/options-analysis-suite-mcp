@@ -8,14 +8,14 @@ import {
   summarizeGreeksHistory,
   trimGreeksHistoryToRecent,
 } from './greeksHistoryShaping.js';
-import { collapseProvenance } from './provenanceShaping.js';
+import { collapseProvenance, HISTORY_PROVENANCE_TIMES } from './provenanceShaping.js';
 
 export function register(server: McpServer, client: ProxyClient): void {
   server.registerTool(
     'get_greeks_history',
     {
       title: 'Greeks History',
-      description: 'Get historical options Greeks (delta, gamma, theta, vega) for a symbol. Shows how sensitivity profiles and dealer hedging pressure have shifted over time. Large windows return a compact recent/trend summary by default.',
+      description: 'Get historical options Greeks (delta, gamma, theta, vega) for a symbol. Shows how sensitivity profiles and dealer hedging pressure have shifted over time. Large windows return a compact recent/trend summary by default.' + HISTORY_PROVENANCE_TIMES,
       inputSchema: {
         symbol: z.string().describe('Ticker symbol'),
         start: z.string().describe('Start date (YYYY-MM-DD)'),

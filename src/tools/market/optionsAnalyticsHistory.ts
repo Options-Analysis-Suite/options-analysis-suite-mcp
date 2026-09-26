@@ -8,13 +8,14 @@ import {
   shouldSummarizeOptionsAnalyticsHistory,
   summarizeOptionsAnalyticsHistory,
 } from './optionsAnalyticsHistoryShaping.js';
+import { HISTORY_PROVENANCE_TIMES } from './provenanceShaping.js';
 
 export function register(server: McpServer, client: ProxyClient): void {
   server.registerTool(
     'get_options_analytics_history',
     {
       title: 'Options Analytics History',
-      description: 'Get daily end-of-day options analytics snapshots for a symbol - historical trend data going back years. Covers ATM IV, HV, IV rank/percentile, VWIV, skew, GEX/DEX/VEX, net vanna/charm/vomma, put/call ratio, max pain, the 30-day expected move (`expectedMove30dFraction`, a decimal fraction of spot: 0.018 = 1.8%), term structure, and risk-free rate. Best for trend analysis over time. For current authoritative Greek exposures and dealer-positioning levels like call wall, put wall, gamma flip, and gamma magnet, use get_regime with scope="symbol" instead. Up to 5000 days. Large windows return a compact recent/trend summary by default. The raw shape lists every row in the window oldest first; the summary keeps the newest `dataMeta.recent` rows in `data`, newest first, and `count` is the rows in the whole window, not in `data`; `dataMeta.order` on either shape says which way it runs; summary points are compact: twenty fields, IVs and ratios rounded to four decimals, prices to two, the slope and rate to five, exposures to whole numbers, and `latest`, `earliest` and `trendSample` are the same compact shape.',
+      description: 'Get daily end-of-day options analytics snapshots for a symbol - historical trend data going back years. Covers ATM IV, HV, IV rank/percentile, VWIV, skew, GEX/DEX/VEX, net vanna/charm/vomma, put/call ratio, max pain, the 30-day expected move (`expectedMove30dFraction`, a decimal fraction of spot: 0.018 = 1.8%), term structure, and risk-free rate. Best for trend analysis over time. For current authoritative Greek exposures and dealer-positioning levels like call wall, put wall, gamma flip, and gamma magnet, use get_regime with scope="symbol" instead. Up to 5000 days. Large windows return a compact recent/trend summary by default. The raw shape lists every row in the window oldest first; the summary keeps the newest `dataMeta.recent` rows in `data`, newest first, and `count` is the rows in the whole window, not in `data`; `dataMeta.order` on either shape says which way it runs; summary points are compact: twenty fields, IVs and ratios rounded to four decimals, prices to two, the slope and rate to five, exposures to whole numbers, and `latest`, `earliest` and `trendSample` are the same compact shape.' + HISTORY_PROVENANCE_TIMES,
       inputSchema: {
         symbol: z.string().describe('Ticker symbol (e.g., AAPL, SPY)'),
         days: z.number().int().min(1).max(5000).default(30).describe('Days of history (default 30). Ignored if from/to are provided.'),

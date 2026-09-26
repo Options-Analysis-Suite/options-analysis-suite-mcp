@@ -609,3 +609,33 @@ describe('get_regime - model coverage and the exposures note ride the entries', 
     expect(alone.exposuresNote).toBeUndefined();
   });
 });
+
+describe('get_regime intraday prior label', () => {
+  // The intraday producer now records the prior its hysteresis kept
+  // (vector._meta.prevLabel / prevLabelSource); rows before that carry
+  // neither, and must not read as "no prior".
+  const scan = (meta: Record<string, unknown>, interval: string) => ({
+    date: '2026-09-24', scan_time: '13:00', interval, label: 'ELEVATED', scope: 'bellwether', vector: { _meta: meta },
+  });
+
+  test('each scan names its prior label and where it came from, and an older scan names neither', async () => {
+    const { handler } = createHarness({
+      symbol: 'SPY',
+      scans: [
+        scan({ prevLabel: 'NORMAL', prevLabelSource: 'earlier-scan' }, 'midday'),
+        scan({ prevLabel: 'ELEVATED', prevLabelSource: 'daily' }, 'afternoon'),
+        scan({ prevLabel: null, prevLabelSource: null }, 'open'),
+        scan({}, 'morning'),
+      ],
+    });
+    const parsed = JSON.parse((await handler({ scope: 'intraday', symbol: 'SPY' })).content[0].text);
+    const byInterval = Object.fromEntries(parsed.scans.map((s: any) => [s.interval, s]));
+    expect(byInterval.midday).toMatchObject({ priorLabel: 'NORMAL', priorLabelSource: 'earlier scan' });
+    expect(byInterval.afternoon).toMatchObject({ priorLabel: 'ELEVATED', priorLabelSource: 'daily label' });
+    expect(byInterval.open.priorLabel).toBeNull();
+    expect(byInterval.open.priorLabelSource).toBeNull();
+    expect('priorLabel' in byInterval.morning).toBe(false);
+    expect('priorLabelSource' in byInterval.morning).toBe(false);
+    expect(JSON.stringify(parsed)).not.toContain('prevLabel');
+  });
+});

@@ -17,12 +17,25 @@
  * measurement of the whole book.
  */
 
+import { MAX_RESPONSE_BYTES } from '../helpers.js';
+
 export interface DealerPositioningOptions {
-  /** Total per-strike rows kept nearest spot. */
+  /** Total per-strike rows kept nearest spot (the cap, with strikeWindowPct). */
   strikeRange?: number;
+  /** Every strike within this percent of spot, nearest first, up to the cap. */
+  strikeWindowPct?: number;
 }
 
 const DEFAULT_STRIKE_RANGE = 10;
+export const MAX_STRIKE_ROWS = 150;
+/**
+ * Room left under the response ceiling for the wire sanitizer's key
+ * renames and the envelope. The rows get whatever the rest of the answer
+ * leaves below MAX_RESPONSE_BYTES minus this, and past it are dropped
+ * farthest from spot first, and said to be, rather than left to the
+ * generic size guard, which trims arrays without saying which rows went.
+ */
+export const RESPONSE_MARGIN_BYTES = 2 * 1024;
 
 const num = (v: unknown): number | null =>
   (typeof v === 'number' && Number.isFinite(v) ? v : null);
@@ -31,6 +44,17 @@ const str = (v: unknown): string | null =>
 const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 const record = (v: unknown): Record<string, unknown> =>
   v !== null && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {};
+/** A YYYY-MM-DD string that names a real calendar day (not 2026-02-30). */
+const isoDate = (v: unknown): string | null => {
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
+  const parsed = new Date(`${v}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === v ? v : null;
+};
+const exDividend = (v: unknown): { date: string; amount: number | null; declared: boolean } | null => {
+  const raw = record(v);
+  const date = isoDate(raw.date);
+  return date === null ? null : { date, amount: num(raw.amount), declared: raw.declared === true };
+};
 const count = (v: unknown): number | null =>
   typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null;
 
@@ -75,6 +99,65 @@ function measuredLevel(raw: unknown, status: FieldStatus): { value: number | nul
   return { value, status: value === null ? 'unavailable' : status };
 }
 
+/**
+ * One side of spot. Net GEX and each open interest carry their coverage the
+ * way the window totals do (a partial sum is published and labelled partial);
+ * the call and put GEX go out only under complete or empty gamma coverage,
+ * for the reason the per-strike sides do.
+ */
+function spotSide(value: unknown) {
+  const raw = record(value);
+  const gammaCoverage = metricCoverage(raw.gammaCoverage);
+  const callOiCoverage = metricCoverage(raw.callOpenInterestCoverage);
+  const putOiCoverage = metricCoverage(raw.putOpenInterestCoverage);
+  const gamma = measuredValue(raw.netGamma, gammaCoverage);
+  const established = gammaCoverage.status === 'complete' || gammaCoverage.status === 'empty';
+  const side = (v: unknown) => (established ? measuredValue(v, gammaCoverage).value : null);
+  const callOi = measuredValue(raw.callOpenInterest, callOiCoverage);
+  const putOi = measuredValue(raw.putOpenInterest, putOiCoverage);
+  return {
+    strikes: count(raw.strikes),
+    netGex: gamma.value,
+    callGex: side(raw.callGamma),
+    putGex: side(raw.putGamma),
+    callOpenInterest: callOi.value,
+    putOpenInterest: putOi.value,
+    status: { netGex: gamma.status, callOpenInterest: callOi.status, putOpenInterest: putOi.status },
+    coverage: { gamma: gammaCoverage, callOpenInterest: callOiCoverage, putOpenInterest: putOiCoverage },
+  };
+}
+
+/** A finite number as the decimal it prints as: n x 10^-scale, exactly. */
+function decimalOf(x: number): { n: bigint; scale: number } {
+  const [mantissa, exponent = '0'] = String(x).toLowerCase().split('e');
+  const negative = mantissa.startsWith('-');
+  const [whole, fraction = ''] = (negative ? mantissa.slice(1) : mantissa).split('.');
+  let n = BigInt(whole + fraction);
+  let scale = fraction.length - Number(exponent);
+  if (scale < 0) { n *= 10n ** BigInt(-scale); scale = 0; }
+  return { n: negative ? -n : n, scale };
+}
+
+/**
+ * |strike - spot| <= spot x pct / 100, decided on the decimals the numbers
+ * print as, exactly. Binary floating point cannot decide it: 6 - 4.8 is
+ * 1.2000000000000002, past a 25% edge of 1.2, and the float nearest 4.8 is
+ * below 4.8, so even exact binary arithmetic puts strike 6 outside. A
+ * tolerance cannot fix it either, because the edge need not sit on the cent
+ * grid (100 at 9.99999995% ends at 109.99999995, and 110 is outside).
+ */
+export function withinPercent(strike: number, spot: number, pct: number): boolean {
+  const k = decimalOf(strike);
+  const s = decimalOf(spot);
+  const p = decimalOf(pct);
+  const scale = Math.max(k.scale, s.scale);
+  const at = (d: { n: bigint; scale: number }) => d.n * 10n ** BigInt(scale - d.scale);
+  let distance = at(k) - at(s);
+  if (distance < 0n) distance = -distance;
+  // 100 x distance / 10^scale <= s.n x p.n / 10^(s.scale + p.scale)
+  return 100n * distance * 10n ** BigInt(s.scale + p.scale) <= s.n * p.n * 10n ** BigInt(scale);
+}
+
 /** The `limit` rows nearest `centre`, returned in ascending strike order. */
 function nearestStrikes<T extends { strike: number | null }>(
   rows: T[], centre: number | null, limit: number,
@@ -106,7 +189,11 @@ export function summarizeDealerPositioning(
   response: Record<string, unknown>,
   options: DealerPositioningOptions = {},
 ) {
-  const limit = Math.min(40, Math.max(1, Math.trunc(num(options.strikeRange) ?? DEFAULT_STRIKE_RANGE)));
+  const windowPct = num(options.strikeWindowPct);
+  const requestedWindowPct = windowPct !== null && windowPct > 0 && windowPct <= 50 ? windowPct : null;
+  const limit = Math.min(MAX_STRIKE_ROWS, Math.max(1, Math.trunc(
+    num(options.strikeRange) ?? (requestedWindowPct !== null ? MAX_STRIKE_ROWS : DEFAULT_STRIKE_RANGE),
+  )));
   const body = response ?? {};
   const snapshot = record(body.snapshot);
 
@@ -181,7 +268,12 @@ export function summarizeDealerPositioning(
     const row = record(value);
     return { strike: num(row.strike), row };
   }).filter((row) => row.strike !== null);
-  const nearSpot = nearestStrikes(rows, spotPrice, limit).map(({ strike, row }) => {
+  // A percent window keeps the strikes within it, nearest first up to the
+  // cap; without spot there is no window to take.
+  const candidates = requestedWindowPct !== null && spotPrice !== null
+    ? rows.filter((row) => withinPercent(row.strike as number, spotPrice, requestedWindowPct))
+    : rows;
+  const shapeRow = ({ strike, row }: { strike: number | null; row: Record<string, unknown> }) => {
     const raw = record(row.coverage);
     const coverage = { gamma: metricCoverage(raw.gamma), delta: metricCoverage(raw.delta), vega: metricCoverage(raw.vega) };
     const gamma = measuredValue(row.netGamma, coverage.gamma);
@@ -202,10 +294,82 @@ export function summarizeDealerPositioning(
     const vega = measuredValue(row.netVega, coverage.vega);
     return {
       strike, netGex: gamma.value, callGex: callGamma.value, putGex: putGamma.value, netDex: delta.value, netVega: vega.value,
+      // Summed over the window's expirations; null when the broker did not
+      // publish a size for some leg at this strike.
+      callOpenInterest: count(row.callOpenInterest), putOpenInterest: count(row.putOpenInterest),
       status: { netGex: gamma.status, netDex: delta.status, netVega: vega.status },
-      coverage,
+      // Only when some status is not complete: a complete row's counts add
+      // nothing its status does not say, and dropping them is what lets the
+      // cap reach MAX_STRIKE_ROWS inside the response budget.
+      ...(gamma.status === 'complete' && delta.status === 'complete' && vega.status === 'complete'
+        ? {} : { coverage }),
     };
-  });
+  };
+  let nearSpot = nearestStrikes(candidates, spotPrice, limit).map(shapeRow);
+
+  // The walls and the magnet are chosen over every strike in the window, so
+  // they can sit outside the rows above; their rows go out beside them.
+  const levelStrikes = new Map<number, string[]>();
+  for (const [level, field] of [['callWall', levelFields.callWall], ['putWall', levelFields.putWall], ['gammaMagnet', levelFields.gammaMagnet]] as const) {
+    if (field.value === null) continue;
+    levelStrikes.set(field.value, [...(levelStrikes.get(field.value) ?? []), level]);
+  }
+  const shapeLevels = (kept: ReadonlyArray<{ strike: number | null }>) => {
+    const shown = new Set(kept.map((row) => row.strike));
+    return rows
+      .filter((row) => levelStrikes.has(row.strike as number) && !shown.has(row.strike))
+      .map((row) => ({ levels: levelStrikes.get(row.strike as number)!, ...shapeRow(row) }));
+  };
+  let atLevels = shapeLevels(nearSpot);
+
+  // Each expiration computed alone on the window's own rows (the route's
+  // expirationBreakdown). The sides and the gross go out only under complete
+  // or empty gamma coverage, for the reason the per-strike sides do; the share
+  // only when the route published one (it requires every expiration complete).
+  const byExpiration = arr(body.byExpiration).map((value) => {
+    const entry = record(value);
+    const raw = record(entry.coverage);
+    const gammaCoverage = metricCoverage(raw.gamma);
+    const deltaCoverage = metricCoverage(raw.delta);
+    const gamma = measuredValue(entry.netGamma, gammaCoverage);
+    const delta = measuredValue(entry.netDelta, deltaCoverage);
+    const established = gammaCoverage.status === 'complete' || gammaCoverage.status === 'empty';
+    const side = (v: unknown) => (established ? measuredValue(v, gammaCoverage).value : null);
+    const share = num(entry.shareOfGrossGamma);
+    const move = record(entry.expectedMove);
+    const straddle = num(move.straddle);
+    // Null when the route's calendar read failed (or it sent none); the
+    // three fields are then unknown, not "no event".
+    const rawEvents = entry.events !== null && typeof entry.events === 'object' ? record(entry.events) : null;
+    return {
+      expiration: str(entry.expiration),
+      daysToExpiration: Number.isSafeInteger(entry.daysToExpiration) ? entry.daysToExpiration as number : null,
+      netGex: gamma.value,
+      netDex: delta.value,
+      callGex: side(entry.callGamma),
+      putGex: side(entry.putGamma),
+      grossGex: side(entry.grossGamma),
+      shareOfGrossGex: share !== null && share >= 0 && share <= 1 ? share : null,
+      status: { netGex: gamma.status, netDex: delta.status },
+      expectedMove: straddle === null ? null : {
+        strike: num(move.strike),
+        callMid: num(move.callMid),
+        putMid: num(move.putMid),
+        straddle,
+        pctOfSpot: num(move.pctOfSpot),
+        lower: num(move.lower),
+        upper: num(move.upper),
+        atmIv: num(move.atmIv),
+        ivOneSigma: num(move.ivOneSigma),
+      },
+      expectedMoveUnavailable: str(entry.expectedMoveUnavailable),
+      events: rawEvents === null ? null : {
+        earningsOnOrBefore: isoDate(rawEvents.earningsOnOrBefore),
+        exDividendOnOrBefore: exDividend(rawEvents.exDividendOnOrBefore),
+      },
+    };
+  }).filter((entry) => entry.expiration !== null);
+
   const limitations = [
     'Totals cover the selected expirations, not every listed expiration. Metric coverage counts active option legs; per-strike coverage combines those expirations.',
     'Partial sums include only supported contributions and are not whole-book measurements. Levels are withheld when their required coverage is incomplete.',
@@ -226,7 +390,7 @@ export function summarizeDealerPositioning(
     limitations.push('Some reported totals are missing or invalid despite available input coverage.');
   }
 
-  return {
+  const shaped = {
     symbol: str(body.symbol),
     // Never omitted and never inferred from the absence of an error: a reader
     // relaying a gamma flip has to be able to say how old it is.
@@ -261,18 +425,72 @@ export function summarizeDealerPositioning(
     // they cover the same book.
     window: {
       expirations: arr(body.expirations).map(str).filter((exp) => exp !== null),
+      // "requested": the caller named the one expiration. "nearest": the first
+      // four the broker lists. Null from a route that did not say.
+      expirationSelection: body.expirationSelection === 'requested' || body.expirationSelection === 'nearest'
+        ? body.expirationSelection : null,
       expirationsAvailable: num(body.expirationsAvailable),
       strikesUsed: num(body.strikesUsed),
     },
 
+    byExpiration,
+    events: (() => {
+      if (body.events === null || typeof body.events !== 'object') return null;
+      const raw = record(body.events);
+      return {
+        from: isoDate(raw.from),
+        through: isoDate(raw.through),
+        earnings: arr(raw.earnings).map(isoDate).filter((date) => date !== null),
+        exDividends: arr(raw.exDividends).map(exDividend).filter((ex) => ex !== null),
+      };
+    })(),
+
+    // The book split at spot (strictly above, strictly below; a strike exactly
+    // at spot in neither). Measurements for a squeeze argument, not a signal:
+    // the GEX signs assume dealers are long the calls.
+    spotSides: (() => {
+      if (body.spotSides === null || typeof body.spotSides !== 'object') return null;
+      const raw = record(body.spotSides);
+      const share = num(raw.callOpenInterestShareAbove);
+      return {
+        atSpotStrike: num(raw.atSpotStrike),
+        above: spotSide(raw.above),
+        below: spotSide(raw.below),
+        callOpenInterestShareAbove: share !== null && share >= 0 && share <= 1 ? share : null,
+      };
+    })(),
+
     strikes: {
       returned: nearSpot.length,
       total: rows.length,
-      nearSpot,
+      // With strikeWindowPct: the percent asked for and how many strikes lie
+      // within it, which exceeds `returned` when the cap or the size budget
+      // cut the window.
+      windowPct: requestedWindowPct !== null && spotPrice !== null ? requestedWindowPct : null,
+      inWindow: requestedWindowPct !== null && spotPrice !== null ? candidates.length : null,
+      limitedBySize: false,
+      nearSpot: [] as typeof nearSpot,
+      atLevels: [] as typeof atLevels,
     },
 
     // Which rate and dividend yield the gamma flip was repriced with. The flip
     // is a repricing across spot levels, so it is only as good as these.
     resolved: body.resolved ?? null,
   };
+
+  // The rows take what the rest of the answer leaves under the ceiling,
+  // dropped farthest from spot first until they fit.
+  const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
+  const rowBudget = MAX_RESPONSE_BYTES - RESPONSE_MARGIN_BYTES - bytes(shaped);
+  while (nearSpot.length > 1 && bytes(nearSpot) + bytes(atLevels) > rowBudget) {
+    shaped.strikes.limitedBySize = true;
+    const farthest = spotPrice === null ? nearSpot.length - 1 : nearSpot.reduce((far, row, index) =>
+      (Math.abs((row.strike as number) - spotPrice) >= Math.abs((nearSpot[far].strike as number) - spotPrice) ? index : far), 0);
+    nearSpot = nearSpot.filter((_, index) => index !== farthest);
+    atLevels = shapeLevels(nearSpot);
+  }
+  shaped.strikes.returned = nearSpot.length;
+  shaped.strikes.nearSpot = nearSpot;
+  shaped.strikes.atLevels = atLevels;
+  return shaped;
 }

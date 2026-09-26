@@ -124,4 +124,24 @@ describe('summarizeEodDealerPositioning', () => {
     expect(shaped.dteWindow).toEqual({ minDte: null, maxDte: null, unit: null });
     expect(() => summarizeEodDealerPositioning({} as any)).not.toThrow();
   });
+
+  it('carries the session before it on file, and keeps a missing block distinct from none on file', () => {
+    const since = {
+      status: 'found' as const, priorDate: '2026-09-11', sessionsSkipped: 1,
+      prior: { spotPrice: 640.12, netGex: 0.8e9, netDex: -3e9, gammaFlip: 638.25, callWall: 655, putWall: 640, gammaMagnet: 645, dealerRegime: 'negative_gamma' },
+      change: { spotPrice: 10, netGex: 0.4e9, netDex: -0.4e9, gammaFlip: 3.25, callWall: 5, putWall: 0, gammaMagnet: 5 },
+      dealerRegimeChanged: true,
+    };
+    expect(summarizeEodDealerPositioning(response({ sincePriorSession: since }) as any).sincePriorSession).toEqual(since);
+    // Absent (data-api's shape) or an unknown status: unknown, not "none on file".
+    expect(summarizeEodDealerPositioning(response() as any).sincePriorSession).toBeNull();
+    expect(summarizeEodDealerPositioning(response({ sincePriorSession: { ...since, status: 'maybe' } }) as any).sincePriorSession).toBeNull();
+    const odd = summarizeEodDealerPositioning(response({
+      sincePriorSession: { ...since, priorDate: 'yesterday', sessionsSkipped: -1, dealerRegimeChanged: 'yes', change: { ...since.change, netGex: 'lots' } },
+    }) as any).sincePriorSession!;
+    expect(odd).toMatchObject({ priorDate: null, sessionsSkipped: null, dealerRegimeChanged: null });
+    expect(odd.change!.netGex).toBeNull();
+    const none = { status: 'none-on-file' as const, priorDate: null, sessionsSkipped: null, prior: null, change: null, dealerRegimeChanged: null };
+    expect(summarizeEodDealerPositioning(response({ sincePriorSession: none }) as any).sincePriorSession).toEqual(none);
+  });
 });

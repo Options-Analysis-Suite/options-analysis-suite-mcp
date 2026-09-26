@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { summarizeDealerPositioning } from './dealerPositioningShaping.js';
+import { summarizeDealerPositioning, withinPercent } from './dealerPositioningShaping.js';
 import { sanitizeMcpWireOutput, toolHandler } from '../helpers.js';
 
 const coverage = (total = 824, included = total) => ({
@@ -85,6 +85,148 @@ describe('summarizeDealerPositioning', () => {
     expect(shaped.window.expirations).toEqual(['2026-09-18', '2026-09-25', '2026-10-16', '2026-11-20']);
     expect(shaped.window.expirationsAvailable).toBe(18);
     expect(shaped.window.strikesUsed).toBe(412);
+    // Whether the caller named the expiration or took the nearest four, and
+    // nothing invented when the route did not say.
+    expect(shaped.window.expirationSelection).toBeNull();
+    expect(summarizeDealerPositioning(live({ expirationSelection: 'requested', expirations: ['2026-09-25'] })).window)
+      .toMatchObject({ expirations: ['2026-09-25'], expirationSelection: 'requested' });
+    expect(summarizeDealerPositioning(live({ expirationSelection: 'nearest' })).window.expirationSelection).toBe('nearest');
+    expect(summarizeDealerPositioning(live({ expirationSelection: 'all' })).window.expirationSelection).toBeNull();
+  });
+
+  it('shapes each expiration alone, with its expected move, under its own coverage', () => {
+    const entry = (over: Record<string, unknown> = {}) => ({
+      expiration: '2026-09-18', daysToExpiration: 0,
+      netGamma: 90_000, netDelta: -1_000, callGamma: 120_000, putGamma: -30_000, grossGamma: 150_000,
+      shareOfGrossGamma: 0.6,
+      coverage: { gamma: { total: 10, included: 10 }, delta: { total: 10, included: 10 } },
+      expectedMove: {
+        strike: 120, callMid: 2.5, putMid: 2.1, straddle: 4.6, pctOfSpot: 4.6 / 120,
+        lower: 115.4, upper: 124.6, atmIv: 0.25, ivOneSigma: 1.6,
+      },
+      expectedMoveUnavailable: null,
+      ...over,
+    });
+    const shaped = summarizeDealerPositioning(live({ byExpiration: [
+      entry(),
+      entry({
+        expiration: '2026-09-25', daysToExpiration: 7, shareOfGrossGamma: 0.4,
+        expectedMove: null, expectedMoveUnavailable: 'atm-quote-missing',
+      }),
+      // Partial gamma coverage: the net stays, the sides and the gross go.
+      entry({ expiration: '2026-10-16', daysToExpiration: 28, shareOfGrossGamma: null,
+        coverage: { gamma: { total: 10, included: 7 }, delta: { total: 10, included: 10 } } }),
+      // A share outside [0, 1] is not a share.
+      entry({ expiration: '2026-11-20', shareOfGrossGamma: 1.2 }),
+      { daysToExpiration: 3 },
+    ] }));
+    expect(shaped.byExpiration).toHaveLength(4);
+    expect(shaped.byExpiration[0]).toMatchObject({
+      expiration: '2026-09-18', daysToExpiration: 0, netGex: 90_000, netDex: -1_000,
+      callGex: 120_000, putGex: -30_000, grossGex: 150_000, shareOfGrossGex: 0.6,
+      status: { netGex: 'complete', netDex: 'complete' },
+      expectedMove: { strike: 120, straddle: 4.6, lower: 115.4, upper: 124.6, atmIv: 0.25 },
+    });
+    expect(shaped.byExpiration[1]).toMatchObject({ expectedMove: null, expectedMoveUnavailable: 'atm-quote-missing' });
+    expect(shaped.byExpiration[2]).toMatchObject({
+      netGex: 90_000, callGex: null, putGex: null, grossGex: null, shareOfGrossGex: null,
+      status: { netGex: 'partial' },
+    });
+    expect(shaped.byExpiration[3].shareOfGrossGex).toBeNull();
+    // Coverage the engine did not report is unknown: no values, no sides.
+    const unreported = summarizeDealerPositioning(live({ byExpiration: [
+      entry({ shareOfGrossGamma: null, coverage: { gamma: null, delta: null } }),
+    ] })).byExpiration[0];
+    expect(unreported).toMatchObject({
+      netGex: null, netDex: null, callGex: null, putGex: null, grossGex: null,
+      status: { netGex: 'unknown', netDex: 'unknown' },
+    });
+    // A route that sent none: an empty list, nothing invented.
+    expect(summarizeDealerPositioning(live()).byExpiration).toEqual([]);
+    expect(summarizeDealerPositioning(live()).events).toBeNull();
+    // No events block means unknown, never "no event".
+    expect(shaped.byExpiration[0].events).toBeNull();
+  });
+
+  it('carries the event flags, and keeps a failed calendar read distinct from no event', () => {
+    const shaped = summarizeDealerPositioning(live({
+      byExpiration: [
+        { expiration: '2026-09-18', coverage: {}, events: {
+          earningsOnOrBefore: '2026-09-17',
+          exDividendOnOrBefore: { date: '2026-09-16', amount: 0.25, declared: true },
+        } },
+        { expiration: '2026-11-20', coverage: {}, events: {
+          earningsOnOrBefore: null, exDividendOnOrBefore: { date: 'soon', amount: 1, declared: true },
+        } },
+        { expiration: '2026-12-18', coverage: {}, events: null },
+        { expiration: '2027-01-15', coverage: {}, events: {
+          earningsOnOrBefore: '2026-02-30', exDividendOnOrBefore: { date: '2026-99-99', amount: 1, declared: true },
+        } },
+      ],
+      events: {
+        from: '2026-09-15', through: '2026-12-18', earnings: ['2026-09-17', 'bad', '2026-02-30', '2026-13-01'],
+        exDividends: [{ date: '2026-09-16', amount: 0.25, declared: true }, { amount: 3 }, { date: '2026-10-01', amount: 0.3, declared: 'yes' }],
+      },
+    }));
+    expect(shaped.byExpiration.map((e) => e.events)).toEqual([
+      { earningsOnOrBefore: '2026-09-17', exDividendOnOrBefore: { date: '2026-09-16', amount: 0.25, declared: true } },
+      // A malformed date is dropped.
+      { earningsOnOrBefore: null, exDividendOnOrBefore: null },
+      null,
+      // So is a well-formed string that is no calendar day.
+      { earningsOnOrBefore: null, exDividendOnOrBefore: null },
+    ]);
+    expect(shaped.events).toEqual({
+      from: '2026-09-15', through: '2026-12-18', earnings: ['2026-09-17'],
+      // Only `true` is declared.
+      exDividends: [{ date: '2026-09-16', amount: 0.25, declared: true }, { date: '2026-10-01', amount: 0.3, declared: false }],
+    });
+  });
+
+  it('carries the book split at spot, gating each value on its coverage', () => {
+    const side = (over: Record<string, unknown> = {}) => ({
+      strikes: 3, netGamma: 5_000, callGamma: 8_000, putGamma: -3_000,
+      gammaCoverage: { total: 6, included: 6 },
+      callOpenInterest: 1_200, callOpenInterestCoverage: { total: 3, included: 3 },
+      putOpenInterest: 400, putOpenInterestCoverage: { total: 3, included: 3 },
+      ...over,
+    });
+    const shaped = summarizeDealerPositioning(live({
+      spotSides: {
+        atSpotStrike: 120,
+        above: side(),
+        // Partial gamma: no sides. One call leg unsized: a labelled partial sum.
+        below: side({ gammaCoverage: { total: 6, included: 5 }, callOpenInterestCoverage: { total: 3, included: 2 } }),
+        callOpenInterestShareAbove: 0.6,
+      },
+    }));
+    expect(shaped.spotSides!.atSpotStrike).toBe(120);
+    expect(shaped.spotSides!.callOpenInterestShareAbove).toBe(0.6);
+    expect(shaped.spotSides!.above).toMatchObject({
+      strikes: 3, netGex: 5_000, callGex: 8_000, putGex: -3_000, callOpenInterest: 1_200, putOpenInterest: 400,
+      status: { netGex: 'complete', callOpenInterest: 'complete', putOpenInterest: 'complete' },
+    });
+    expect(shaped.spotSides!.below).toMatchObject({
+      netGex: 5_000, callGex: null, putGex: null, callOpenInterest: 1_200,
+      status: { netGex: 'partial', callOpenInterest: 'partial', putOpenInterest: 'complete' },
+    });
+    expect(shaped.spotSides!.below.coverage.callOpenInterest).toEqual({ total: 3, included: 2, status: 'partial' });
+
+    // A share outside [0, 1] is not a share; no block is unknown, not empty.
+    expect(summarizeDealerPositioning(live({ spotSides: { above: side(), below: side(), callOpenInterestShareAbove: 1.5 } }))
+      .spotSides!.callOpenInterestShareAbove).toBeNull();
+    expect(summarizeDealerPositioning(live()).spotSides).toBeNull();
+  });
+
+  it('carries each strike\'s open interest, and null where a size was not published', () => {
+    const shaped = summarizeDealerPositioning(live({
+      byStrike: [
+        { ...strikeRow(118, 50), callOpenInterest: 900, putOpenInterest: null },
+        { ...strikeRow(120, 90), callOpenInterest: 12.5, putOpenInterest: 300 },
+      ],
+    }));
+    expect(shaped.strikes.nearSpot.map((r) => [r.strike, r.callOpenInterest, r.putOpenInterest]))
+      .toEqual([[118, 900, null], [120, null, 300]]);
   });
 
   it('carries the rate the gamma flip was repriced with', () => {
@@ -276,7 +418,93 @@ describe('summarizeDealerPositioning', () => {
     expect(wire.strikes.nearSpot[0].status.netGex).toBe('partial');
     expect(wire.coverage.gamma).toMatchObject({ status: 'complete' });
     expect((wire as any).responseBudget).toBeUndefined();
-    expect(summarizeDealerPositioning(live({ byStrike }), { strikeRange: 5_000 }).strikes.nearSpot).toHaveLength(40);
+  });
+
+  it('caps at 150 rows and drops the farthest to fit the row budget, saying so, on the worst-case rows', async () => {
+    // Partial coverage keeps every row's counts, and long decimals: the
+    // largest rows this shaper emits. 5,000 asks past the cap.
+    const byStrike = Array.from({ length: 1_600 }, (_, i) => ({
+      ...strikeRow(50 + i * 0.5, i * Math.PI * 1e10),
+      netDelta: -i * Math.PI * 1e11, netVega: i * Math.PI * 1e8,
+      callOpenInterest: 123_456, putOpenInterest: 654_321,
+      coverage: coverage(824, 823),
+    }));
+    const shaped = summarizeDealerPositioning(live({ byStrike }), { strikeRange: 5_000 });
+    expect(shaped.strikes.limitedBySize).toBe(true);
+    expect(shaped.strikes.nearSpot.length).toBeLessThan(150);
+    expect(new TextEncoder().encode(JSON.stringify(shaped)).byteLength).toBeLessThanOrEqual(50 * 1024 - 2 * 1024);
+    // What is kept is the nearest to spot (120): a contiguous run around it.
+    const kept = shaped.strikes.nearSpot.map((r) => r.strike as number);
+    const farthestKept = Math.max(...kept.map((k) => Math.abs(k - 120)));
+    const nearerDropped = byStrike.filter((r) => Math.abs(r.strike - 120) < farthestKept && !kept.includes(r.strike));
+    expect(nearerDropped).toEqual([]);
+    const result = await toolHandler(async () => shaped)({});
+    expect((result.structuredContent as any).responseBudget).toBeUndefined();
+    expect((result.structuredContent as any).strikes.nearSpot).toHaveLength(shaped.strikes.nearSpot.length);
+
+    // Complete rows drop their counts, so the full 150 fit.
+    const complete = byStrike.map((r) => ({ ...r, strike: r.strike, netGamma: 1234.5, netDelta: -2345.6, netVega: 34.5, coverage: coverage(4, 4) }));
+    const wide = summarizeDealerPositioning(live({ byStrike: complete }), { strikeRange: 5_000 });
+    expect(wide.strikes.nearSpot).toHaveLength(150);
+    expect(wide.strikes.limitedBySize).toBe(false);
+    expect(wide.strikes.nearSpot[0]).not.toHaveProperty('coverage');
+  });
+
+  it('takes every strike within a percent of spot, up to the cap', () => {
+    const byStrike = Array.from({ length: 81 }, (_, i) => strikeRow(100 + i * 0.5, 10));
+    // Spot 120, 5%: 114 to 126, 25 strikes at 0.5 apart.
+    const shaped = summarizeDealerPositioning(live({ byStrike }), { strikeWindowPct: 5 });
+    expect(shaped.strikes.inWindow).toBe(25);
+    expect(shaped.strikes.windowPct).toBe(5);
+    expect(shaped.strikes.nearSpot.map((r) => r.strike)).toEqual(Array.from({ length: 25 }, (_, i) => 114 + i * 0.5));
+    const capped = summarizeDealerPositioning(live({ byStrike }), { strikeWindowPct: 5, strikeRange: 5 });
+    expect(capped.strikes.nearSpot.map((r) => r.strike)).toEqual([119, 119.5, 120, 120.5, 121]);
+    expect(capped.strikes.inWindow).toBe(25);
+    // Without it, no window is reported.
+    expect(summarizeDealerPositioning(live({ byStrike })).strikes).toMatchObject({ windowPct: null, inWindow: null });
+ 
+    // A strike exactly on the edge is inside, whatever the subtraction
+    // rounds to (6 - 4.8 is 1.2000000000000002 > 1.2).
+    // And a strike just past an edge that is not on the cent grid stays out
+    // (100 at 9.99999995% ends at 109.99999995, short of 110).
+    for (const [spot, strikes, pct, inside] of [
+      [4.8, [5, 6], 25, [5, 6]],
+      [10.2, [10, 15.3, 15.31], 50, [10, 15.3]],
+      [100, [100, 110], 9.99999995, [100]],
+      [100, [100, 110], 10, [100, 110]],
+      [0.35, [0.3, 0.4, 0.45], 14.285714285714286, [0.3, 0.4]],
+      [5123.45, [4611.1, 4611.11, 5635.79, 5635.8], 10, [4611.11, 5635.79]],
+    ] as const) {
+      const edge = summarizeDealerPositioning(
+        live({ snapshot: { ...live().snapshot, spotPrice: spot }, byStrike: strikes.map((k) => strikeRow(k, 10)) }),
+        { strikeWindowPct: pct },
+      );
+      expect(edge.strikes.nearSpot.map((r) => r.strike)).toEqual([...inside]);
+      expect(edge.strikes.inWindow).toBe(inside.length);
+    }
+  });
+
+  it('decides the window on the decimals, including ones that print in exponent form', () => {
+    // String(1e-7) is '1e-7'; 1e-7 percent of 100 is 1e-7.
+    expect(withinPercent(100.0000001, 100, 1e-7)).toBe(true);
+    expect(withinPercent(100.0000002, 100, 1e-7)).toBe(false);
+    expect(withinPercent(99.9999999, 100, 1e-7)).toBe(true);
+    expect(withinPercent(6, 4.8, 25)).toBe(true);
+    expect(withinPercent(110, 100, 9.99999995)).toBe(false);
+  });
+
+  it('returns the walls\' and the magnet\'s own rows when they sit outside the returned rows', () => {
+    // live(): call wall 130, put wall 110, magnet (absGamma) 125, spot 120.
+    const byStrike = [100, 110, 118, 120, 122, 125, 130, 140].map((k) => strikeRow(k, 10));
+    const shaped = summarizeDealerPositioning(live({ byStrike }), { strikeRange: 3 });
+    expect(shaped.strikes.nearSpot.map((r) => r.strike)).toEqual([118, 120, 122]);
+    expect(shaped.strikes.atLevels.map((r) => [r.strike, r.levels])).toEqual([
+      [110, ['putWall']], [125, ['gammaMagnet']], [130, ['callWall']],
+    ]);
+    expect(shaped.strikes.atLevels[2]).toMatchObject({ callGex: 10, putGex: -5 });
+    // A level already among the rows is not repeated.
+    const wider = summarizeDealerPositioning(live({ byStrike }), { strikeRange: 8 });
+    expect(wider.strikes.atLevels).toEqual([]);
   });
 
   it('survives an empty or malformed response without throwing', () => {

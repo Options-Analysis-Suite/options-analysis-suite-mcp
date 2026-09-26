@@ -51,6 +51,52 @@ export const EOD_GAMMA_FLIP_NULL_NOTE =
   + 'That is not a level of zero and says nothing about a crossing beyond that range. '
   + 'For a repriced flip as of now, with its search status, use get_live_dealer_positioning.';
 
+const PRIOR_STATUSES = new Set(['found', 'none-on-file', 'unavailable']);
+const sessionDate = (v: unknown): string | null =>
+  typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+
+/**
+ * Null when the route sent none or an unknown status, so a missing block is
+ * never read as "no earlier session". Changes are passed through, not
+ * recomputed: they are this session minus the prior, null where either
+ * side is missing.
+ */
+function sincePriorSession(value: unknown) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.status !== 'string' || !PRIOR_STATUSES.has(raw.status)) return null;
+  const record = (v: unknown): Record<string, unknown> | null =>
+    v !== null && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : null;
+  const prior = record(raw.prior);
+  const change = record(raw.change);
+  const skipped = raw.sessionsSkipped;
+  return {
+    status: raw.status as 'found' | 'none-on-file' | 'unavailable',
+    priorDate: sessionDate(raw.priorDate),
+    sessionsSkipped: typeof skipped === 'number' && Number.isSafeInteger(skipped) && skipped >= 0 ? skipped : null,
+    prior: prior === null ? null : {
+      spotPrice: num(prior.spotPrice),
+      netGex: num(prior.netGex),
+      netDex: num(prior.netDex),
+      gammaFlip: num(prior.gammaFlip),
+      callWall: num(prior.callWall),
+      putWall: num(prior.putWall),
+      gammaMagnet: num(prior.gammaMagnet),
+      dealerRegime: str(prior.dealerRegime),
+    },
+    change: change === null ? null : {
+      spotPrice: num(change.spotPrice),
+      netGex: num(change.netGex),
+      netDex: num(change.netDex),
+      gammaFlip: num(change.gammaFlip),
+      callWall: num(change.callWall),
+      putWall: num(change.putWall),
+      gammaMagnet: num(change.gammaMagnet),
+    },
+    dealerRegimeChanged: typeof raw.dealerRegimeChanged === 'boolean' ? raw.dealerRegimeChanged : null,
+  };
+}
+
 export function summarizeEodDealerPositioning(
   response: EodExposureResponse,
   options: ShapeEodDealerPositioningOptions = {},
@@ -93,6 +139,8 @@ export function summarizeEodDealerPositioning(
     },
     topContributingStrikes: strikes.slice(0, limit),
     topContributingStrikesAvailable: strikes.length,
+    // The session before this one on file, same computation and window.
+    sincePriorSession: sincePriorSession(row.sincePriorSession),
     // The units describe THIS summary's keys. The row's block names
     // expectedMovePct30d, a key this summary does not emit, so passing it
     // through whole labelled a field the reader could not find.
