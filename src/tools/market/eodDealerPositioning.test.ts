@@ -32,7 +32,7 @@ const notFound = (message: string) => ({
 } as any);
 
 const NOT_ON_FILE_YET = 'API error (NOT_FOUND): No exposure data found for KBE on 2026-09-18. That session is not on file. If 2026-09-18 is a trading session, its equity import is scheduled for 01:00 US Eastern the next day and usually lands about 02:30, so ask again after that; this tool treats the answer as not final until 09:30 US Eastern that day. A market holiday has no session, and a symbol with no exposure summary (a futures contract, or one with no near-term options) stays not-found. This may be retried.';
-const FINAL = 'API error (NOT_FOUND): No exposure data found for KBE on 2026-09-18. Retrying will not succeed.';
+const FINAL = 'API error (NOT_FOUND): No exposure data found for KBE on 2026-09-18. Retrying the same request will not succeed.';
 
 describe('newYorkDate', () => {
   test('is the calendar date in New York, across the UTC midnight and both offsets', () => {
@@ -128,7 +128,7 @@ describe('get_dealer_positioning - a session not on file yet is retryable, a ses
     for (const args of [{ symbol: 'KBE', date: '2026-09-20' }, { symbol: 'KBE', date: '2026-09-13' }, { symbol: 'KBE', date: '2026-09-11' }, { symbol: 'KBE' }]) {
       const result: any = await tools[0].handler(args);
       expect(result.structuredContent, JSON.stringify(args)).toMatchObject({ code: 'NOT_FOUND', retryable: false });
-      expect(result.content[0].text, JSON.stringify(args)).toContain('Retrying will not succeed.');
+      expect(result.content[0].text, JSON.stringify(args)).toContain('Retrying the same request will not succeed.');
       expect(result.content[0].text, JSON.stringify(args)).not.toContain('is a trading session');
     }
     // A weekend date inside its own window is still never a session.
@@ -198,7 +198,7 @@ describe('get_dealer_positioning - a session not on file yet is retryable, a ses
     for (const date of ['2026-09-20', '2026-09-26', '1989-12-31']) {
       const result: any = await tools[0].handler({ symbol: 'KBE', date });
       expect(result.structuredContent, date).toMatchObject({ code: 'INVALID_REQUEST', retryable: false });
-      expect(result.content[0].text, date).toBe('API error (INVALID_REQUEST): date must fall inside the available data window 1990-01-01..2026-09-19. Retrying will not succeed.');
+      expect(result.content[0].text, date).toBe('API error (INVALID_REQUEST): date must fall inside the available data window 1990-01-01..2026-09-19. Retrying the same request will not succeed.');
     }
     // A rejection whose own bound already covers the date cannot come from
     // the proxy's validator; if it ever did, the message and the decision
@@ -212,7 +212,7 @@ describe('get_dealer_positioning - a session not on file yet is retryable, a ses
     register(unreal.server as any, { get: async () => { throw new LiveApiError('date must be a real calendar date (YYYY-MM-DD)', 400, 'INVALID_REQUEST', false, undefined, undefined); } } as any, at('2026-09-18T20:46:30Z'));
     const result: any = await unreal.tools[0].handler({ symbol: 'KBE', date: '2026-13-45' });
     expect(result.structuredContent).toMatchObject({ code: 'INVALID_REQUEST', retryable: false });
-    expect(result.content[0].text).toBe('API error (INVALID_REQUEST): date must be a real calendar date (YYYY-MM-DD). Retrying will not succeed.');
+    expect(result.content[0].text).toBe('API error (INVALID_REQUEST): date must be a real calendar date (YYYY-MM-DD). Retrying the same request will not succeed.');
   });
 
   test('another code with today\'s date is untouched', async () => {

@@ -714,7 +714,7 @@ export function toolHandler<T extends Record<string, unknown>>(
           const actionUrl = structured.actionUrl && !isVendorUrl(String(structured.actionUrl))
             ? truncateToBytes(scrubVendorText(String(structured.actionUrl)), MAX_ERROR_FIELD_BYTES) : undefined;
           const hint = structured.retryable === false
-            ? ' Retrying will not succeed.'
+            ? ' Retrying the same request will not succeed.'
             : structured.retryable === true ? ' This may be retried.' : '';
           const action = actionUrl ? ` Fix it at ${actionUrl}` : '';
           // Repeated IN THE TEXT, not only in structuredContent: a client that

@@ -824,7 +824,7 @@ describe('MCP tool output schemas', () => {
       actionUrl: 'https://x/account?tab=broker',
     });
     // Repeated in the text, because not every client reads structuredContent.
-    expect(result.content[0].text).toContain('Retrying will not succeed');
+    expect(result.content[0].text).toContain('Retrying the same request will not succeed');
     expect(result.content[0].text).toContain('https://x/account?tab=broker');
   });
 
@@ -847,7 +847,7 @@ describe('MCP tool output schemas', () => {
     // rendering text alone was shown "...for SPY Retrying will not succeed."
     // and never the code UNKNOWN_EXPIRATION that was in structuredContent.
     expect(result.content[0].text).toBe(
-      'API error (UNKNOWN_EXPIRATION): Expiration 2026-09-19 is not listed for SPY. Retrying will not succeed. availableExpirations: 2026-09-18, 2026-09-25.',
+      'API error (UNKNOWN_EXPIRATION): Expiration 2026-09-19 is not listed for SPY. Retrying the same request will not succeed. availableExpirations: 2026-09-18, 2026-09-25.',
     );
   });
 
@@ -1005,11 +1005,13 @@ describe('MCP tool output schemas', () => {
     const text = String(tools.find((t) => t.name === 'scan_option_strategies')!.config.description);
     expect(text).toMatch(/A covered call or cash-secured put is the short_call or short_put here, without the stock or cash leg, which is not modelled\./);
     expect(text).toMatch(/Unset, it defaults by strategy: 0\.15 to 0\.35 for short options and credit spreads, 0\.3 to 0\.6 for long options, 0\.4 to 0\.6 for debit spreads, straddles and butterflies, 0\.1 to 0\.25 for iron condors and short strangles, 0\.15 to 0\.35 for long strangles\./);
-    expect(text).toMatch(/when that exact strike is not listed, the nearest within a quarter of the width is used and the candidate's `width` says what was listed\./);
+    expect(text).toMatch(/when that exact strike is not listed, the nearest within a quarter of the width is used and the candidate's `width` says what was listed \(for an iron condor or butterfly, the wider of its two wings; the legs' strikes show both\)\./);
+    expect(text).toMatch(/a two-anchor candidate's `anchorDelta` is the mean of its two\./);
+    expect(text).toMatch(/`expectedMove` is this expiration's at-the-money straddle, with `pctOfSpot` its fraction of spot as get_live_dealer_positioning gives it,/);
     expect(text).toMatch(/Every leg needs a two-sided quote, and a sold leg a bid above zero; a candidate missing one is counted in `skipped` by reason, never priced from a last trade or a mark, and a spread whose credit or debit reaches its width is skipped as not a real price\./);
     expect(text).toMatch(/`probabilityOfProfit` is the risk-neutral probability, under a lognormal model, that the price at expiration ends where the position makes money at the mid, each breakeven read at the implied volatility the chain's own smile gives at that price, with the resolved rate and dividend yield;/);
     expect(text).toMatch(/They are model values, not forecasts: they take no view on direction, implied volatility has tended to run above realized so short-premium outcomes have tended to beat them, and they ignore early assignment, fills and costs\. Delta is not used as a probability\./);
-    expect(text).toMatch(/each is withheld under incomplete coverage as that tool withholds it\. Every strike, breakeven and level carries its distance from spot in percent\./);
+    expect(text).toMatch(/each is withheld under incomplete coverage as that tool withholds it, and they carry that tool's `gammaFlipMethod`, `gammaFlipResolution` and `dealerRegime` \(the sign of gamma at spot, not of net GEX\)\. Every strike, breakeven and level carries its distance from spot in percent\./);
     expect(text).toMatch(/these orderings do not rank trades as better or worse\./);
     expect(text).toMatch(/EXPENSIVE: a scan is charged two weighted units against the 10-unit-per-minute live-broker limit, so at most five a minute, and five units with `levels: "window"`\./);
     expect(text).toMatch(/so another scan of the same expiration within 15 seconds, with any other strategy or filters, re-scans the cached chain with the same `asOf` and is still charged in full\./);

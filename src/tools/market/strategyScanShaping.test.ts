@@ -6,7 +6,7 @@ import { toolHandler } from '../helpers.js';
 const full = (n: number) => ({ total: n, included: n });
 const coverage = (over: Record<string, unknown> = {}) => ({
   gamma: full(20), delta: full(20), vega: full(20), vanna: full(20), charm: full(20), vomma: full(20), gammaFlip: full(20),
-  gammaFlipSearchStatus: 'found', ...over,
+  gammaFlipSearchStatus: 'found', gammaFlipMethod: 'mixed', gammaFlipResolution: 0.154, ...over,
 });
 
 const leg = (action: 'sell' | 'buy', type: 'put' | 'call', strike: number) => ({
@@ -30,7 +30,7 @@ const scan = (over: Record<string, unknown> = {}) => ({
   request: { strategy: 'bull_put_spread', deltaMin: 0.15, deltaMax: 0.35, width: 5, minOpenInterest: null, maxSpreadPct: null, minCredit: null, sortBy: 'delta', maxResults: 10, levels: 'expiration' },
   expectedMove: { strike: 100, callMid: 2.5, putMid: 2.4, straddle: 4.9, pctOfSpot: 0.049, lower: 95.1, upper: 104.9, atmIv: 0.3, ivOneSigma: 5.2 },
   expectedMoveUnavailable: null,
-  levels: { scope: 'expiration', expirations: ['2026-10-16'], gammaFlip: 97.5, callWall: 110, putWall: 90, gammaMagnet: 100, coverage: coverage() },
+  levels: { scope: 'expiration', expirations: ['2026-10-16'], gammaFlip: 97.5, callWall: 110, putWall: 90, gammaMagnet: 100, netGex: -5.5e8, regime: 'positive', coverage: coverage() },
   matched: 3, skipped: { 'missing-quote': 2, 'no-wing-strike': 0 },
   candidates: [candidate()],
   ...over,
@@ -43,11 +43,15 @@ describe('summarizeStrategyScan', () => {
       scope: 'expiration', gammaFlip: 97.5, callWall: 110, putWall: 90, gammaMagnet: 100,
       pctFromSpot: { gammaFlip: -2.5, callWall: 10, putWall: -10, gammaMagnet: 0 },
       status: { gammaFlip: 'complete', callWall: 'complete' },
+      // As get_live_dealer_positioning reports them: how the flip was found,
+      // its search step, and the regime (gamma at spot, not the net's sign).
+      gammaFlipMethod: 'mixed', gammaFlipResolution: 0.154, dealerRegime: 'positive',
     });
     const [c] = shaped.candidates;
     expect(c.legs.map((l) => l.pctFromSpot)).toEqual([-5, -10]);
     expect(c.breakevens).toEqual([{ price: 94, pctFromSpot: -6, outsideExpectedMove: true }]);
-    expect(shaped.expectedMove!.pctOfSpot).toBeCloseTo(4.9, 12);
+    // A fraction of spot, as get_live_dealer_positioning publishes it.
+    expect(shaped.expectedMove!.pctOfSpot).toBe(0.049);
     // A zero count is not a reason to show.
     expect(shaped.skipped).toEqual({ 'missing-quote': 2 });
     expect(shaped).toMatchObject({ matched: 3, returned: 1, limitedBySize: false, strategy: 'bull_put_spread' });
@@ -55,13 +59,22 @@ describe('summarizeStrategyScan', () => {
 
   it('withholds levels on incomplete coverage, as the live positioning tool does', () => {
     const partial = summarizeStrategyScan(scan({ levels: { ...scan().levels, coverage: coverage({ gamma: { total: 20, included: 19 } }) } }));
-    expect(partial.levels).toMatchObject({ callWall: null, putWall: null, gammaMagnet: null, gammaFlip: 97.5, status: { callWall: 'partial' } });
+    expect(partial.levels).toMatchObject({ callWall: null, putWall: null, gammaMagnet: null, gammaFlip: 97.5, status: { callWall: 'partial' }, dealerRegime: null });
     const noFlip = summarizeStrategyScan(scan({
       levels: { ...scan().levels, gammaFlip: null, coverage: coverage({ gammaFlipSearchStatus: 'not-found' }) },
     }));
     expect(noFlip.levels).toMatchObject({ gammaFlip: null, gammaFlipSearchStatus: 'not-found' });
     const flipPartial = summarizeStrategyScan(scan({ levels: { ...scan().levels, coverage: coverage({ gammaFlip: { total: 20, included: 10 } }) } }));
-    expect(flipPartial.levels).toMatchObject({ gammaFlip: null, status: { gammaFlip: 'partial' } });
+    expect(flipPartial.levels).toMatchObject({ gammaFlip: null, status: { gammaFlip: 'partial' }, gammaFlipResolution: null });
+    // Without a regime from the route, the net's sign stands in, as the live tool does.
+    const noRegime = summarizeStrategyScan(scan({ levels: { ...scan().levels, regime: undefined } }));
+    expect(noRegime.levels.dealerRegime).toBe('negative');
+    // Review's input: complete coverage but no finite net gamma (an overflow
+    // serialized as null) is no measured book, so no regime, as the live tool.
+    for (const scope of ['expiration', 'window']) {
+      const unmeasured = summarizeStrategyScan(scan({ levels: { ...scan().levels, scope, netGex: null, regime: 'positive', coverage: coverage({ gamma: { total: 1, included: 1 } }) } }));
+      expect(unmeasured.levels.dealerRegime, scope).toBeNull();
+    }
   });
 
   it('a breakeven inside the expected move says so, and none is claimed without one', () => {

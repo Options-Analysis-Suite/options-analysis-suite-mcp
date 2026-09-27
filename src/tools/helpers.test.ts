@@ -365,7 +365,7 @@ describe('toolHandler — structuredContent', () => {
     const text = result.content[0].text;
     expect(text).not.toContain('Maximum call stack size exceeded');
     expect(text).toContain('Validation failed');
-    expect(text).toContain('Retrying will not succeed.');
+    expect(text).toContain('Retrying the same request will not succeed.');
     expect((result.structuredContent as any)?.code).toBe('VALIDATION');
     expect((result.structuredContent as any)?.retryable).toBe(false);
     // The whole result must survive the serialization the MCP SDK performs
@@ -421,13 +421,13 @@ describe('toolHandler — structuredContent', () => {
     })({});
 
     const text = result.content[0].text;
-    expect(text).toContain('Retrying will not succeed.');
+    expect(text).toContain('Retrying the same request will not succeed.');
     expect(text).toContain('https://x.test/fix');
     expect((result.structuredContent as any)?.retryable).toBe(false);
     // The code rides in the prefix, ahead of everything truncation can take.
     expect(text.startsWith('API error (BROKER_CREDENTIAL_INVALID): ')).toBe(true);
     // A truncated message ends in the suffix; no full stop is bolted onto it.
-    expect(text).toContain('... [truncated] Retrying will not succeed.');
+    expect(text).toContain('... [truncated] Retrying the same request will not succeed.');
   });
 
   test('the text names the code and separates the message from the guidance', async () => {
@@ -437,11 +437,11 @@ describe('toolHandler — structuredContent', () => {
     const bare = await toolHandler(async () => {
       throw new LiveApiError('Expiration 2020-01-17 is not listed for SPY', 400, 'UNKNOWN_EXPIRATION', false, undefined, {});
     })({});
-    expect(bare.content[0].text).toBe('API error (UNKNOWN_EXPIRATION): Expiration 2020-01-17 is not listed for SPY. Retrying will not succeed.');
+    expect(bare.content[0].text).toBe('API error (UNKNOWN_EXPIRATION): Expiration 2020-01-17 is not listed for SPY. Retrying the same request will not succeed.');
     const punctuated = await toolHandler(async () => {
       throw new LiveApiError('Broker refused the credential.', 403, 'BROKER_CREDENTIAL_INVALID', false, undefined, {});
     })({});
-    expect(punctuated.content[0].text).toBe('API error (BROKER_CREDENTIAL_INVALID): Broker refused the credential. Retrying will not succeed.');
+    expect(punctuated.content[0].text).toBe('API error (BROKER_CREDENTIAL_INVALID): Broker refused the credential. Retrying the same request will not succeed.');
     // No code: the plain prefix, as before.
     const uncoded = await toolHandler(async () => {
       throw new LiveApiError('Upstream busy', 503, undefined as any, true, undefined, {});
@@ -799,7 +799,7 @@ describe('no tool output names a data vendor', () => {
       throw new LiveApiError('down', 503, 'UPSTREAM', false, `https://${EQ_HOST}/status`, {});
     })({});
     expect((res.structuredContent as any).actionUrl).toBeUndefined();
-    expect(res.content[0].text).toBe('API error (UPSTREAM): down. Retrying will not succeed.');
+    expect(res.content[0].text).toBe('API error (UPSTREAM): down. Retrying the same request will not succeed.');
   });
 
   test("a URL on any vendor host is dropped, the cloud product's name included", () => {

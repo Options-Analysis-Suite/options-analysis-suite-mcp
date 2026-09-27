@@ -9,7 +9,7 @@
  */
 
 import { MAX_RESPONSE_BYTES } from '../helpers.js';
-import { measuredLevel, metricCoverage, RESPONSE_MARGIN_BYTES } from './dealerPositioningShaping.js';
+import { measuredLevel, measuredValue, metricCoverage, readRegime, RESPONSE_MARGIN_BYTES } from './dealerPositioningShaping.js';
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
@@ -37,7 +37,8 @@ export function summarizeStrategyScan(response: Record<string, unknown>) {
     straddle: num(move.straddle),
     lower,
     upper,
-    pctOfSpot: num(move.pctOfSpot) === null ? null : num(move.pctOfSpot)! * 100,
+    // A fraction of spot, as get_live_dealer_positioning publishes it.
+    pctOfSpot: num(move.pctOfSpot),
     atmIv: num(move.atmIv),
     ivOneSigma: num(move.ivOneSigma),
   } : null;
@@ -48,11 +49,13 @@ export function summarizeStrategyScan(response: Record<string, unknown>) {
   const cov = record(rawLevels.coverage);
   const gammaCoverage = metricCoverage(cov.gamma);
   const flipCoverage = metricCoverage(cov.gammaFlip);
+  const netGex = measuredValue(rawLevels.netGex, gammaCoverage);
   const flip = measuredLevel(rawLevels.gammaFlip, flipCoverage.status);
   const callWall = measuredLevel(rawLevels.callWall, gammaCoverage.status);
   const putWall = measuredLevel(rawLevels.putWall, gammaCoverage.status);
   const magnet = measuredLevel(rawLevels.gammaMagnet, gammaCoverage.status);
   const searchStatus = cov.gammaFlipSearchStatus;
+  const resolution = num(cov.gammaFlipResolution);
   const levels = {
     scope: rawLevels.scope === 'expiration' || rawLevels.scope === 'window' ? rawLevels.scope : null,
     expirations: arr(rawLevels.expirations).filter((e): e is string => typeof e === 'string'),
@@ -67,6 +70,15 @@ export function summarizeStrategyScan(response: Record<string, unknown>) {
       gammaMagnet: pctFromSpot(magnet.value),
     },
     status: { gammaFlip: flip.status, callWall: callWall.status, putWall: putWall.status, gammaMagnet: magnet.status },
+    // How the flip was found and the step its search sampled at, the
+    // resolution only with a flip to belong to.
+    gammaFlipMethod: cov.gammaFlipMethod === 'repriced' || cov.gammaFlipMethod === 'frozen-gamma' || cov.gammaFlipMethod === 'mixed'
+      ? cov.gammaFlipMethod : null,
+    gammaFlipResolution: flip.value !== null && resolution !== null && resolution > 0 ? resolution : null,
+    // The sign of gamma at spot, published only with a measured net gamma
+    // under complete coverage, the live tool's own gate: complete coverage
+    // with no finite net (an overflow serializes as null) is no measured book.
+    dealerRegime: netGex.status === 'complete' ? readRegime(rawLevels.regime, netGex.value) : null,
     gammaFlipSearchStatus: flip.value === null && (searchStatus === 'found' || searchStatus === 'not-found' || searchStatus === 'unresolved')
       ? searchStatus
       : flip.value !== null ? 'found' : null,

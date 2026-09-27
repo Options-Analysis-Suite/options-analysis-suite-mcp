@@ -79,7 +79,7 @@ export function metricCoverage(value: unknown): MetricCoverage {
   return { total, included, status };
 }
 
-function measuredValue(raw: unknown, coverage: MetricCoverage): { value: number | null; status: FieldStatus } {
+export function measuredValue(raw: unknown, coverage: MetricCoverage): { value: number | null; status: FieldStatus } {
   const value = num(raw);
   if (coverage.status === 'unknown' || coverage.status === 'unmeasured') {
     return { value: null, status: coverage.status };
@@ -177,7 +177,7 @@ function nearestStrikes<T extends { strike: number | null }>(
  * about how the market will behave, so it is never invented from a missing
  * number - no net gamma means no regime, not "neutral".
  */
-function readRegime(explicit: unknown, netGex: number | null): string | null {
+export function readRegime(explicit: unknown, netGex: number | null): string | null {
   if (explicit === 'positive' || explicit === 'negative' || explicit === 'neutral') return explicit;
   if (netGex === null) return null;
   if (netGex > 0) return 'positive';
