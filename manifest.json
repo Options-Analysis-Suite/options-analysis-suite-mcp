@@ -171,6 +171,10 @@
       "description": "Get LIVE dealer positioning from your connected broker's chain (Pro and above): net GEX/DEX, vega, vanna, charm and vomma, the gamma flip, call and put walls, and the gamma regime over the nearest four expirations"
     },
     {
+      "name": "scan_option_strategies",
+      "description": "Scan one expiration of your connected broker's live chain for option strategy candidates (Pro and above): single options, vertical spreads, iron condors and butterflies, straddles and strangles, priced from two-sided quotes with payoff, risk-neutral model probabilities, position Greeks and distances to the expected move and dealer levels"
+    },
+    {
       "name": "get_options_snapshot",
       "description": "Get the end-of-day options snapshot for a symbol (spot, max pain, net GEX/DEX, ATM IV term structure, IV rank and percentile, historical vol, volume and open interest), with optional per-strike curve summaries; pass several symbols to compare headline metrics in one request"
     },

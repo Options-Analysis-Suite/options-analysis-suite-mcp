@@ -37,6 +37,7 @@ import { register as liveOptionsChain } from './market/liveOptionsChain.js';
 import { register as optionsSnapshot } from './market/optionsSnapshot.js';
 import { register as regimeFits } from './market/regimeFits.js';
 import { register as dealerPositioning } from './market/dealerPositioning.js';
+import { register as strategyScan } from './market/strategyScan.js';
 import { register as eodDealerPositioning } from './market/eodDealerPositioning.js';
 import { register as blackScholes } from './market/blackScholes.js';
 
@@ -108,6 +109,8 @@ export function registerAllTools(
   optionsSnapshot(server, liveClient);
   regimeFits(server, liveClient);
   dealerPositioning(server, liveClient);
+  // Strategy candidates from one live expiration: a broker call, openWorldHint true.
+  strategyScan(server, liveClient);
   // The end-of-day twin of the live positioning tool (no Pro requirement, no
   // broker) and Black-Scholes from explicit inputs (Pro, no broker). Separate tools,
   // never a fallback inside the live one: an end-of-day gamma flip and a live

@@ -27,7 +27,7 @@ describe('MCP tool output schemas', () => {
 
     registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
 
-    expect(tools).toHaveLength(38);
+    expect(tools).toHaveLength(39);
     expect(tools.map((tool) => tool.name).sort()).toEqual([...new Set(tools.map((tool) => tool.name))].sort());
     for (const tool of tools) {
       expect(tool.config.outputSchema, `${tool.name} outputSchema`).toBeTruthy();
@@ -997,12 +997,35 @@ describe('MCP tool output schemas', () => {
     expect(text).not.toContain('{symbol, date, time, ...}');
   });
 
+  test('scan_option_strategies says what its candidates, probabilities and costs are', () => {
+    // packages/shared/src/broker/strategyScan.ts, proxy/lib/strategyScanParams.ts,
+    // proxy/routes/live-broker.ts /live/strategy-scan.
+    const { tools, server } = captureRegisteredTools();
+    registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
+    const text = String(tools.find((t) => t.name === 'scan_option_strategies')!.config.description);
+    expect(text).toMatch(/A covered call or cash-secured put is the short_call or short_put here, without the stock or cash leg, which is not modelled\./);
+    expect(text).toMatch(/Unset, it defaults by strategy: 0\.15 to 0\.35 for short options and credit spreads, 0\.3 to 0\.6 for long options, 0\.4 to 0\.6 for debit spreads, straddles and butterflies, 0\.1 to 0\.25 for iron condors and short strangles, 0\.15 to 0\.35 for long strangles\./);
+    expect(text).toMatch(/when that exact strike is not listed, the nearest within a quarter of the width is used and the candidate's `width` says what was listed\./);
+    expect(text).toMatch(/Every leg needs a two-sided quote, and a sold leg a bid above zero; a candidate missing one is counted in `skipped` by reason, never priced from a last trade or a mark, and a spread whose credit or debit reaches its width is skipped as not a real price\./);
+    expect(text).toMatch(/`probabilityOfProfit` is the risk-neutral probability, under a lognormal model, that the price at expiration ends where the position makes money at the mid, each breakeven read at the implied volatility the chain's own smile gives at that price, with the resolved rate and dividend yield;/);
+    expect(text).toMatch(/They are model values, not forecasts: they take no view on direction, implied volatility has tended to run above realized so short-premium outcomes have tended to beat them, and they ignore early assignment, fills and costs\. Delta is not used as a probability\./);
+    expect(text).toMatch(/each is withheld under incomplete coverage as that tool withholds it\. Every strike, breakeven and level carries its distance from spot in percent\./);
+    expect(text).toMatch(/these orderings do not rank trades as better or worse\./);
+    expect(text).toMatch(/EXPENSIVE: a scan is charged two weighted units against the 10-unit-per-minute live-broker limit, so at most five a minute, and five units with `levels: "window"`\./);
+    expect(text).toMatch(/so another scan of the same expiration within 15 seconds, with any other strategy or filters, re-scans the cached chain with the same `asOf` and is still charged in full\./);
+    expect(text).toMatch(/It refuses rather than defaulting a rate or dividend yield it cannot source \(RESOLUTION_FAILED\) and an expiration the broker does not list \(UNKNOWN_EXPIRATION, naming the listed ones\); a malformed parameter \(INVALID_REQUEST\), symbol \(INVALID_SYMBOL\) or provider \(UNKNOWN_PROVIDER\) is refused before it is charged\./);
+    // strategyScan.ts MAX_PAIRS and twoWings.
+    expect(text).toMatch(/a band giving more than 10,000 pairs is refused \(SCAN_TOO_LARGE, naming the count\) after the chain is read and charged; a narrower band within 15 seconds re-scans the cached chain\./);
+    expect(text).toMatch(/\(an iron condor or butterfly whose credit exceeds one wing keeps money on that whole side, so it has no breakeven there and its max loss is on the wider wing\)/);
+    expect(text).not.toMatch(/probability of (?:success|winning)|best trade|recommend/i);
+  });
+
   test('the live tools name the credential store they read', () => {
     // A user whose account page said Connected (a browser connection) got
     // BROKER_NOT_CONNECTED; the tools read only the opt-in stored credential.
     const { tools, server } = captureRegisteredTools();
     registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
-    for (const name of ['get_live_options_chain', 'get_live_dealer_positioning']) {
+    for (const name of ['get_live_options_chain', 'get_live_dealer_positioning', 'scan_option_strategies']) {
       const text = String(tools.find((t) => t.name === name)!.config.description);
       expect(text, name).toContain('Requires a Pro subscription or above and a broker credential saved to the account under Account -> Broker -> Stored broker credentials; a broker connected only in the browser on the website is not visible to this tool.');
       expect(text, name).not.toContain('a broker connected under Account -> Broker.');

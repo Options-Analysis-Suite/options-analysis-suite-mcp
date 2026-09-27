@@ -58,15 +58,15 @@ const exDividend = (v: unknown): { date: string; amount: number | null; declared
 const count = (v: unknown): number | null =>
   typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null;
 
-type CoverageStatus = 'complete' | 'partial' | 'unmeasured' | 'empty' | 'unknown';
-type FieldStatus = CoverageStatus | 'unavailable';
-interface MetricCoverage {
+export type CoverageStatus = 'complete' | 'partial' | 'unmeasured' | 'empty' | 'unknown';
+export type FieldStatus = CoverageStatus | 'unavailable';
+export interface MetricCoverage {
   total: number | null;
   included: number | null;
   status: CoverageStatus;
 }
 
-function metricCoverage(value: unknown): MetricCoverage {
+export function metricCoverage(value: unknown): MetricCoverage {
   const raw = record(value);
   const total = count(raw.total);
   const included = count(raw.included);
@@ -91,7 +91,7 @@ function measuredValue(raw: unknown, coverage: MetricCoverage): { value: number 
   return { value, status: value === null ? 'unavailable' : coverage.status };
 }
 
-function measuredLevel(raw: unknown, status: FieldStatus): { value: number | null; status: FieldStatus } {
+export function measuredLevel(raw: unknown, status: FieldStatus): { value: number | null; status: FieldStatus } {
   if (status !== 'complete') return { value: null, status };
   // A reported null means no level was found; absence or an invalid value does not.
   if (raw === null) return { value: null, status };

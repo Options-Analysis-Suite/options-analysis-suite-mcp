@@ -12,13 +12,13 @@ MCP server that gives Claude, ChatGPT, Perplexity, and Grok direct access to you
 
 ## Current Tool Surface
 
-The MCP currently exposes **38 tools** - consolidated into enum-driven unified tools where tool shapes are a clean family match (calendars, regime views, Treasury rates, FINRA short-side series, user snapshots, and options-market screeners).
+The MCP currently exposes **39 tools** - consolidated into enum-driven unified tools where tool shapes are a clean family match (calendars, regime views, Treasury rates, FINRA short-side series, user snapshots, and options-market screeners).
 
-- **31 market, research and pricing tools**, two of them live
+- **32 market, research and pricing tools**, three of them live
 - **6 synced user-data tools**
 - **1 platform-context tool**
 
-Two tools read in real time from the broker connected to your account: `get_live_options_chain` and `get_live_dealer_positioning` (Pro and above). The other market tools answer from the platform's stored data - end-of-day snapshots and history, plus the intraday regime scans behind `get_regime` with `scope='intraday'` - and the synced tools from your own account data. `compute_black_scholes` prices from the inputs you give it. `get_regime_fits` and `compute_black_scholes` also need Pro; neither needs a broker. A tool that needs more than the account has says so, with the upgrade link, rather than being hidden.
+Three tools read in real time from the broker connected to your account: `get_live_options_chain`, `get_live_dealer_positioning` and `scan_option_strategies` (Pro and above). The other market tools answer from the platform's stored data - end-of-day snapshots and history, plus the intraday regime scans behind `get_regime` with `scope='intraday'` - and the synced tools from your own account data. `compute_black_scholes` prices from the inputs you give it. `get_regime_fits` and `compute_black_scholes` also need Pro; neither needs a broker. A tool that needs more than the account has says so, with the upgrade link, rather than being hidden.
 
 ## Market And Research Tools
 
@@ -46,6 +46,7 @@ Two tools read in real time from the broker connected to your account: `get_live
 
 - **Regime** (`get_regime`) - Unified regime tool with three scopes: `scope='market'` (composite stress regime across SPY/QQQ/IWM/DIA with score bands and drivers), `scope='symbol'` (per-symbol daily regime + authoritative Greek exposures: net gamma/delta/vega/vanna/charm/vomma, call/put walls, gamma flip, gamma magnet, top 10 gamma strikes), or `scope='intraday'` (5 scans/day with stress scoring + Greek snapshots)
 - **Live Dealer Positioning** (`get_live_dealer_positioning`, Pro and above) - Net GEX/DEX plus vega, vanna, charm and vomma, the gamma flip with its search status and resolution, call and put walls, gamma concentration and the gamma regime, computed in real time from your connected broker's chain over the nearest four expirations. Five weighted units per call against the 10-unit-per-minute live budget
+- **Live Strategy Scan** (`scan_option_strategies`, Pro and above) - Candidate trades for one strategy (single options, the four vertical spreads, iron condors and butterflies, straddles and strangles) from one expiration of the live chain, priced from two-sided quotes: every leg's quote, spread, IV, Greeks, open interest and volume; net mid and natural price; max profit and loss, breakevens and return on risk; risk-neutral model probabilities of profit and of max profit; position Greeks; and each strike's, breakeven's and dealer level's distance from spot, with the expiration's expected move. Filters for open interest, spread width and credit; two units of the live-broker limit, five with four-expiration levels
 - **EOD Dealer Positioning** (`get_dealer_positioning`) - Net GEX/DEX over 0-60 days, dealer regime, gamma flip (coarse-grid, no search status), call and put walls, gamma magnet, 30-day expected move and top contributing strikes from the most recent session on file (`date` in the result says which), for roughly 5,500 listed equities and ETFs; a past session via `date`
 - **Model Calibration Fits** (`get_regime_fits`, Pro and above) - Calibrated parameters and fit quality for the eight pricing models on a symbol (IV RMSE for every model, price RMSE for every model except eSSVI, an IV-surface fit that stores none), with an error history; covers the regime universe of about 124 symbols
 - **Black-Scholes Pricing** (`compute_black_scholes`, Pro and above) - Price, seventeen Greeks in the commercial API's convention, expected move and risk-neutral ITM probability from explicit inputs; `r` and `q` supplied or resolved from stored market data for a symbol, never defaulted. Black-Scholes only; the other models, calibration and multi-model runs are on the REST API and Python SDK
