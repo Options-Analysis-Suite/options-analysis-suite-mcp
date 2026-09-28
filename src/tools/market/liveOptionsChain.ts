@@ -1,9 +1,10 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { LiveApiClient } from '../../proxy/liveApiClient.js';
+import type { LiveApiClient, LiveRateLimit } from '../../proxy/liveApiClient.js';
 import { toolHandler } from '../helpers.js';
 import { marketDataOutputSchema } from '../outputSchemas.js';
 import { summarizeLiveChain } from './liveChainShaping.js';
+import { significantDeep } from './dealerPositioningShaping.js';
 
 /**
  * The only tool that returns option-chain prices newer than the most recent
@@ -32,13 +33,15 @@ export function register(server: McpServer, client: LiveApiClient): void {
         + '`iv` is the broker\'s published implied volatility where it is usable (finite, above 0 and at most 5, that is 500%); a published 0 or a value above that band is a solver sentinel, not a volatility (brokers emit them for deep in-the-money contracts near expiration and after the close), and is reported as null and counted in totals.<side>.contractsWithoutUsableIv. The delta and the quote beside it are still the broker\'s and are kept. '
         + 'The Greeks are the broker\'s as published and are not checked against the quote or the IV beside them. Delta, gamma, theta and vega are in the units the broker publishes; this tool does not rescale them or compare them across brokers. A delta of exactly 0 or 1 can be a genuine limit deep in or out of the money, and it can be the broker\'s solver (a 755 put quoted 0.63 with iv 0.164 carried delta 0); this tool applies no check that tells the two apart, so treat such a delta as suspect and read it with the quote and IV beside it. '
         + '`asOf` is when the chain was FETCHED, not a quote time: outside regular trading hours the quotes are the last ones the broker holds, and this tool does not date the quotes individually. A bid can sit below intrinsic value against `spotPrice` during trading hours too (MU\'s same-day 1030 call bid 39.10 at 15:10 ET on 2026-09-23 with `spotPrice` 1070.45, intrinsic 40.45). '
-        + 'Omit `expiration` for the front month; an unlisted expiration returns the available dates. '
-        + 'Rate limited to 10 requests per minute because each call spends your own broker quota. A repeat for the same symbol and expiration within 15 seconds can be answered from a short in-memory cache, with the same `asOf`, and still counts as a request; the cache is per proxy instance, so a repeat can also be fetched afresh. '
+        + 'Omit `expiration` for the nearest listed expiration that may still trade: from 4:15 PM New York time on an expiration day, when no expiring series trades any longer (some expiring ETF options, including SPY, trade until then; expiring stock options stop at 4:00 in regular hours, and at 4:15 for a class Cboe trades in its curb session; PM-settled index options stop at 4:00), that day\'s is passed over for the next one (early closes are not known here, so on those days it stays until 4:15, and it is kept if the broker lists nothing else); name it to see it. An unlisted expiration returns the available dates; one not written YYYY-MM-DD is refused by this tool\'s input check before any request, and a well-formed date that is not a calendar date (2026-02-30) by the proxy as INVALID_EXPIRATION, before it is charged. '
+        + 'Rate limited to 10 weighted units a minute, shared with the other live tools, because each call spends your own broker quota; a chain costs 1. A repeat for the same symbol and expiration within 15 seconds can be answered from a short in-memory cache, with the same `asOf`, and still counts as a request; the cache is per proxy instance, so a repeat can also be fetched afresh. '
+        + '`rateLimit` is the live-broker budget after this call as the proxy reported it: `remaining` of `limit` units, resetting in `resetSeconds`, or null when it reported none; an error answered after the live-broker limiter ran carries it as `rateLimit` beside `code`, whether one it charged for (an unlisted expiration, a broker failure) or its own rate-limit refusal, which charges nothing, and one refused before it (the Pro tier gate, a malformed date) carries none. '
+        + 'Every number goes out at 15 significant digits at most, which drops binary noise such as 11.190000000000001 in a computed mid or ratio, while a decimal the broker printed with 15 or fewer digits and a whole number such as an open-interest count pass unchanged. '
         + 'There is no end-of-day fallback: if the broker cannot answer, this reports the failure and whether retrying can help.',
       inputSchema: {
         symbol: z.string().describe('Ticker symbol (e.g., AAPL, SPY)'),
         expiration: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()
-          .describe('Expiration in YYYY-MM-DD. Defaults to the front month. An expiration the broker does not list returns the available ones.'),
+          .describe('Expiration in YYYY-MM-DD. Defaults to the nearest listed expiration that may still trade (the next one from 4:15 PM New York time on an expiration day). An expiration the broker does not list returns the available ones.'),
         // Every provider a stored credential may name. It must match the
         // server's list: automatic selection can pick any of them, so a
         // narrower enum here refuses by name the very broker the same call
@@ -56,12 +59,14 @@ export function register(server: McpServer, client: LiveApiClient): void {
       if (expiration) params.expiration = expiration;
       if (provider) params.provider = provider;
 
+      const budget: { rateLimit: LiveRateLimit | null } = { rateLimit: null };
       const res = await client.get(
         `/live/options-chain/${encodeURIComponent(symbol.toUpperCase())}`,
         params,
+        (rateLimit) => { budget.rateLimit = rateLimit; },
       ) as any;
 
-      return summarizeLiveChain(res, { strikeRange });
+      return significantDeep({ ...summarizeLiveChain(res, { strikeRange }), rateLimit: budget.rateLimit });
     }),
   );
 }

@@ -752,7 +752,7 @@ export function toolHandler<T extends Record<string, unknown>>(
                     return path ? `${path}: ${item.message}` : item.message;
                   }
                   return item;
-                }).join(', ') : String(value);
+                }).join(', ') : value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value);
                 return ` ${key}: ${rendered}.`;
               })
               .join('')

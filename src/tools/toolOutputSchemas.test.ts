@@ -610,7 +610,7 @@ describe('MCP tool output schemas', () => {
     // 09-18 (option_ticker_snapshots.net_gex_0_60d, landed 02:34 ET on
     // 09-19) and +248,246 for 09-17. Nothing said the window rolls, or
     // that the two tools' signs can differ.
-    expect(live).toMatch(/With `expiration`, every total, level and row is computed over that one listed expiration alone, which is how to see a same-day \(0DTE\) or single-week book, and `window\.expirationSelection` is "requested"; a date the broker does not list is refused with the listed ones, never replaced by the nearest\. /);
+    expect(live).toMatch(/With `expiration`, every total, level and row is computed over that one listed expiration alone, which is how to see a same-day \(0DTE\) or single-week book, and `window\.expirationSelection` is "requested"; a date the broker does not list is refused with the listed ones, never replaced by the nearest; one not written YYYY-MM-DD is refused by this tool's input check before any request, and a well-formed date that is not a calendar date \(2026-02-30\) by the proxy as INVALID_EXPIRATION, before it is charged\. /);
     // The per-expiration split and the straddle (expirationBreakdown.ts).
     expect(live).toMatch(/`shareOfGrossGex`, its share of the window's gross gamma, published only when every expiration's gamma coverage is complete/);
     // review: the helper takes the nearest strike listed on BOTH
@@ -640,7 +640,7 @@ describe('MCP tool output schemas', () => {
     expect(live).toMatch(/`callOpenInterestShareAbove` is the call open interest above spot over the window's call open interest, the at-spot strike included in the whole, and is null unless every call leg's size is known\./);
     expect(live).toMatch(/These are what a squeeze argument reads, not a squeeze signal: GEX here counts call gamma as positive and put gamma as negative, the convention that dealers are long the calls and short the puts, while a squeeze reading of out-of-the-money calls assumes customers bought them and dealers are short, and open interest does not say who holds a contract\./);
     expect(live).not.toMatch(/squeeze (score|risk|probability)/i);
-    expect(live).toMatch(/Without `expiration`, computed over the first four expirations the broker lists for the live chain, which on a name with monthly listings can span months \(KBE on 2026-09-18: 09-18, 10-16, 11-20, 12-18, three months; on 2026-09-21, with the 09-18 listing gone, 10-16, 11-20, 12-18, 2027-01-15, nearly four\) against the EOD tools' 0-60 days; `window\.expirations` lists them\. The window moves with the broker's list, as a listing expires or a nearer one is added, so two answers across such a change cover different books \(KBE at 17:47Z on 2026-09-21: netGex -5,013,878, call wall 75, put wall 59, no flip found within 20% of spot, against 358,515, 70 and a flip at 66\.68 at 20:46Z on 09-18\), and the live figure can differ in sign from the 0-60 day figure on file, a different window on a different session \(KBE: \+184,861 on file for 09-18, \+248,246 for 09-17\)\. It reflects the current session rather than the most recent session on file\./);
+    expect(live).toMatch(/Without `expiration`, computed over the first four listed expirations that may still trade: from 4:15 PM New York time on an expiration day, when no expiring series trades any longer \(some expiring ETF options, including SPY, trade until then; expiring stock options stop at 4:00 in regular hours, and at 4:15 for a class Cboe trades in its curb session; PM-settled index options stop at 4:00\), that day's is left out, so after the close the window describes the next session's book \(early closes are not known here, so on those days it stays until 4:15, and it is kept if the broker lists nothing else\); name it with `expiration` to see the book as it closed\. On a name with monthly listings the window can span months \(KBE on 2026-09-18: 09-18, 10-16, 11-20, 12-18, three months; on 2026-09-21, with the 09-18 listing gone, 10-16, 11-20, 12-18, 2027-01-15, nearly four\) against the EOD tools' 0-60 days; `window\.expirations` lists them\. The window moves with the broker's list and the clock, as a listing expires or reaches 4:15 PM on its day or a nearer one is added, so two answers across such a change cover different books \(KBE at 17:47Z on 2026-09-21: netGex -5,013,878, call wall 75, put wall 59, no flip found within 20% of spot, against 358,515, 70 and a flip at 66\.68 at 20:46Z on 09-18\), and the live figure can differ in sign from the 0-60 day figure on file, a different window on a different session \(KBE: \+184,861 on file for 09-18, \+248,246 for 09-17\)\. It reflects the current session rather than the most recent session on file\./);
     expect(live).not.toMatch(/spans three months|three months\) against/);
     // And `levelStatus.gammaFlip` read "complete" beside a null flip with
     // nothing saying what the status is (each level's required coverage,
@@ -671,7 +671,7 @@ describe('MCP tool output schemas', () => {
     // exposure-compute.ts:365 (above .01, at most 5, time left), and the
     // gamma, delta and vega sums only while that Greek is published, so
     // the summed set moves between calls and nothing names the legs.
-    expect(live).toMatch(/Partial values sum only supported option legs; they are not measurements of the whole book\. A leg counts toward vanna, charm and vomma only while the broker's implied volatility for it is above 1% and at most 500% and its expiration's close is more than a minute away, and toward gamma, delta and vega only while the broker publishes that Greek for it, so the included count of a partial total moves between calls, and two partial totals minutes apart can differ by which legs were summed rather than by the market \(KBE on 2026-09-18: netCharm \+4,387,168 over 80 of 106 legs at 18:56Z, -2,631,616 over 70 at 19:16Z\); the payload does not say which legs each summed\. Unmeasured or unknown values are null\. Gamma-derived levels require complete coverage\./);
+    expect(live).toMatch(/Partial values sum only supported option legs; they are not measurements of the whole book\. A leg counts toward vanna, charm and vomma only while the broker's implied volatility for it is above 1% and at most 500% and more than a minute remains before 4:00 PM New York on its expiration day, the engine's fixed close, and toward gamma, delta and vega only while the broker publishes that Greek for it, so the included count of a partial total moves between calls, and two partial totals minutes apart can differ by which legs were summed rather than by the market \(KBE on 2026-09-18: netCharm \+4,387,168 over 80 of 106 legs at 18:56Z, -2,631,616 over 70 at 19:16Z\); the payload does not say which legs each summed\. Unmeasured or unknown values are null\. Gamma-derived levels require complete coverage\./);
     expect(live).not.toMatch(/null\.Gamma/);
     // Fourteenth run: KBE's netCharm went from -2,631,616 at 19:16Z to
     // +8,063,999 at 19:39Z over 70 of 106 legs both times, so the leg set
@@ -696,7 +696,7 @@ describe('MCP tool output schemas', () => {
     // OI: vanna peaks at 53,233 within cents of the strike against a
     // one-month leg's 26,865, vomma 592 against 3,154, both near zero at
     // the money), so charm is the one that can own the book.
-    expect(live).toMatch(/The broker's Greeks and implied volatilities can be a snapshot older than `asOf`, which is the fetch time, and nothing in the payload dates them: Tradier's refresh about hourly \(KBE on 2026-09-18: every per-strike vega identical at 19:16Z and 19:39Z, different at 18:56Z\)\. Between refreshes the published Greeks are fixed, so with the resolved rate and yield, open interest and the summed leg set also unchanged, only spot and the clock move the totals: the per-strike gamma rows move with spot squared exactly and netGex to its rounding \(325,161 to 326,140 as spot went 66\.485 to 66\.585\)\. On an expiration day the same-day expiration stays in the window while the broker lists it \(Tradier still listed KBE's 2026-09-18 expiration 46 minutes after the close, and the route caches that list for 15 minutes, so it can be asked for that long after the listing ends\); its legs stay eligible for gamma, delta and vega under the engine's input checks \(a known open interest, finite and from 0 to 1e12; a finite gamma or delta of size at most 10, a finite vega of size at most 10,000; a finite contribution\), and drop out of vanna, charm and vomma a minute before its close\. Those three are computed from time to expiry, so on the same-day legs they change sharply with small spot moves and with the clock: charm near the money can be the largest term in the book \(a strike-66 leg with 1,000 open interest: charm 3\.3 million at 44 minutes to the close with spot 66\.485, 8,662 at 21 minutes with spot 66\.585; a one-month leg with the same open interest, in the low thousands\), and its vanna changes sign at the price where d2 is zero, 66\.0001 in the example \(higher implied volatility raises this crossing price\)\. On an expiration afternoon netCharm can be mostly the same-day legs and the clock \(KBE 2026-09-18: -2,631,616 at 19:16Z, \+8,063,999 at 19:39Z, over 70 of 106 legs both times\)\./);
+    expect(live).toMatch(/The broker's Greeks and implied volatilities can be a snapshot older than `asOf`, which is the fetch time, and nothing in the payload dates them: Tradier's refresh about hourly \(KBE on 2026-09-18: every per-strike vega identical at 19:16Z and 19:39Z, different at 18:56Z\)\. Between refreshes the published Greeks are fixed, so with the resolved rate and yield, open interest and the summed leg set also unchanged, only spot and the clock move the totals: the per-strike gamma rows move with spot squared exactly and netGex to its rounding \(325,161 to 326,140 as spot went 66\.485 to 66\.585\)\. On an expiration day the same-day expiration is in the default window until 4:15 PM New York time, and can be named with `expiration` while the broker lists it \(Tradier still listed KBE's 2026-09-18 expiration 46 minutes after the close, and the route caches that list for 15 minutes, so it can be asked for that long after the listing ends\); its legs stay eligible for gamma, delta and vega under the engine's input checks \(a known open interest, finite and from 0 to 1e12; a finite gamma or delta of size at most 10, a finite vega of size at most 10,000; a finite contribution\), and drop out of vanna, charm and vomma a minute before 4:00 PM New York on that day, the fixed close the engine measures time to expiry to whatever the series' own close, so from then until 4:15, while such an expiration is still in the default window, those three leave its legs out\. Those three are computed from time to expiry, so on the same-day legs they change sharply with small spot moves and with the clock: charm near the money can be the largest term in the book \(a strike-66 leg with 1,000 open interest: charm 3\.3 million at 44 minutes to the close with spot 66\.485, 8,662 at 21 minutes with spot 66\.585; a one-month leg with the same open interest, in the low thousands\), and its vanna changes sign at the price where d2 is zero, 66\.0001 in the example \(higher implied volatility raises this crossing price\)\. On an expiration afternoon netCharm can be mostly the same-day legs and the clock \(KBE 2026-09-18: -2,631,616 at 19:16Z, \+8,063,999 at 19:39Z, over 70 of 106 legs both times\)\./);
     expect(live).not.toMatch(/grow without bound|in the window until its close|only spot and the clock move the totals, and netGex|netVanna, netCharm and netVomma are dominated/);
     // review: "vomma stays smaller" fails pointwise (spot
     // 66.13: same-day -319.96 against +1.52 for 30 days) and by grid
@@ -725,7 +725,7 @@ describe('MCP tool output schemas', () => {
     // at spot x 5e-6, grows 1% a sample and caps at spot x 0.0002 after 371
     // samples, 1.955% from spot (observed-gamma-flip.ts:19-23, :303): the
     // 19:39Z flip sat 1.54% out, the 20:05Z one 2.81%.
-    expect(live).toMatch(/After the close the expired legs stay inside the totals and the levels while the expiration is listed, and `window\.expirations` beside `asOf` is the only sign of it\. The flip sweep reprices each leg from its implied volatility at its time to expiry floored at one minute, so on an expiration day the same-day legs' repriced gamma narrows onto their strikes through the afternoon and holds the one-minute shape after the close, and the flip moves with the clock \(KBE 2026-09-18: 65\.56 at 19:39Z, 64\.75 at 20:05Z, on one broker snapshot, spot 66\.585 to 66\.62\)\./);
+    expect(live).toMatch(/Named after the close, the expired legs are inside the totals and the levels, and `window\.expirations` beside `asOf` is the only sign of it\. The flip sweep reprices each leg from its implied volatility at its time to expiry floored at one minute, so on an expiration day the same-day legs' repriced gamma narrows onto their strikes through the afternoon and holds the one-minute shape after the close, and the flip moves with the clock \(KBE 2026-09-18: 65\.56 at 19:39Z, 64\.75 at 20:05Z, on one broker snapshot, spot 66\.585 to 66\.62\)\./);
     // review: the width is max(step, |sample - anchor|) at the
     // bracket (:281), clipped at the 20% edge (flip 120 at spot 100:
     // 0.0046, not 0.02), widened by zero-valued samples (a fixture: 0.04),
@@ -781,7 +781,7 @@ describe('MCP tool output schemas', () => {
     // and IV doubled net gamma and left every level identical, so a refresh
     // "moves" the levels was an overclaim; "can move" is the computation.
     expect(live).not.toMatch(/a refresh moves the levels/);
-    expect(live).toMatch(/On an expiration day the same-day expiration stays in the window while the broker lists it \(Tradier still listed KBE's 2026-09-18 expiration 46 minutes after the close, and the route caches that list for 15 minutes, so it can be asked for that long after the listing ends\); its legs stay eligible/);
+    expect(live).toMatch(/On an expiration day the same-day expiration is in the default window until 4:15 PM New York time, and can be named with `expiration` while the broker lists it \(Tradier still listed KBE's 2026-09-18 expiration 46 minutes after the close, and the route caches that list for 15 minutes, so it can be asked for that long after the listing ends\); its legs stay eligible/);
     expect(regime).not.toMatch(/on the market scope the share is symbols scored/);
   });
 
@@ -1015,7 +1015,7 @@ describe('MCP tool output schemas', () => {
       expect(String(tools.find((t) => t.name === name)!.config.description), name).not.toMatch(/profile_yield\" \(a fund/);
     }
     for (const name of ['scan_option_strategies', 'get_live_dealer_positioning']) {
-      expect(String(tools.find((t) => t.name === name)!.config.description), name).toContain('When `resolved.q.source` is "profile_yield" (no usable trailing yield was resolved for the symbol: none on file, as for most funds, or one that could not be read or used), q is its trailing annual dividend over the live spot, so it moves slightly with spot from call to call while `resolved.q.asOf` dates the dividend record, not the division.');
+      expect(String(tools.find((t) => t.name === name)!.config.description), name).toContain('When `resolved.q.source` is "profile_yield" (no usable trailing yield was resolved for the symbol: none on file, as for most funds, or one that could not be read or used), q is its trailing annual dividend over the live spot, so it moves slightly with spot from call to call while `resolved.q.asOf` is when the profile record holding that dividend was last updated, not when the division was made.');
     }
     expect(text).toMatch(/Every leg needs a two-sided quote, and a sold leg a bid above zero; a candidate missing one is counted in `skipped` by reason, never priced from a last trade or a mark, and a spread whose credit or debit reaches its width is skipped as not a real price\./);
     expect(text).toMatch(/`probabilityOfProfit` is the risk-neutral probability, under a lognormal model, that the price at expiration ends where the position makes money at the mid, each breakeven read at the implied volatility the chain's own smile gives at that price, with the resolved rate and dividend yield;/);
@@ -1029,6 +1029,85 @@ describe('MCP tool output schemas', () => {
     expect(text).toMatch(/a band giving more than 10,000 pairs is refused \(SCAN_TOO_LARGE, naming the count\) after the chain is read and charged; a narrower band within 15 seconds re-scans the cached chain\./);
     expect(text).toMatch(/\(an iron condor or butterfly whose credit exceeds one wing keeps money on that whole side, so it has no breakeven there and its max loss is on the wider wing\)/);
     expect(text).not.toMatch(/probability of (?:success|winning)|best trade|recommend/i);
+  });
+
+  test('each live tool reports the live-broker budget the proxy gave, and nothing when it gave none', async () => {
+    // proxy/lib/liveBrokerLimiter.ts sets RateLimit-* on every admitted request;
+    // LiveApiClient.get hands them to the tool.
+    const budget = { limit: 10, remaining: 8, resetSeconds: 43 };
+    for (const report of [true, false]) {
+      const live = {
+        get: async (_path: string, _params?: Record<string, string>, onRateLimit?: (r: typeof budget) => void) => {
+          if (report) onRateLimit?.(budget);
+          return {};
+        },
+        post: async () => ({}),
+      } as any;
+      const { tools, server } = captureRegisteredTools();
+      registerAllTools(server as any, stubClient(), stubTokens(), live);
+      for (const [name, args] of [
+        ['get_live_options_chain', { symbol: 'SPY' }],
+        ['get_live_dealer_positioning', { symbol: 'SPY' }],
+        ['scan_option_strategies', { symbol: 'SPY', expiration: '2026-11-20', strategy: 'short_put' }],
+      ] as const) {
+        const result = await tools.find((t) => t.name === name)!.handler(args);
+        expect((result.structuredContent as any).rateLimit, `${name} ${report}`).toEqual(report ? budget : null);
+      }
+    }
+  });
+
+  test('each live tool publishes every number at 15 significant digits at most', async () => {
+    // The whole output passes through one rounding: a tail anywhere in it,
+    // here in the budget the proxy reported, is dropped.
+    const live = {
+      get: async (_path: string, _params?: Record<string, string>, onRateLimit?: (r: unknown) => void) => {
+        onRateLimit?.({ limit: 10, remaining: 8.000000000000002, resetSeconds: 43 });
+        return {};
+      },
+      post: async () => ({}),
+    } as any;
+    const { tools, server } = captureRegisteredTools();
+    registerAllTools(server as any, stubClient(), stubTokens(), live);
+    for (const [name, args] of [
+      ['get_live_options_chain', { symbol: 'SPY' }],
+      ['get_live_dealer_positioning', { symbol: 'SPY' }],
+      ['scan_option_strategies', { symbol: 'SPY', expiration: '2026-11-20', strategy: 'short_put' }],
+    ] as const) {
+      const result = await tools.find((t) => t.name === name)!.handler(args);
+      expect((result.structuredContent as any).rateLimit, name).toEqual({ limit: 10, remaining: 8, resetSeconds: 43 });
+    }
+  });
+
+  test('the scan and live tools describe the new ordering, ladder, liquidity, model Greeks and budget', () => {
+    const { tools, server } = captureRegisteredTools();
+    registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
+    const text = (name: string) => String(tools.find((t) => t.name === name)!.config.description);
+    const scan = text('scan_option_strategies');
+    expect(scan).toContain('except that an iron butterfly or straddle body sorts nearest the money first, by its call delta\'s distance from 0.5, taken in the broker\'s decimals so 0.45 and 0.55 tie)');
+    expect(scan).toContain('ties in any of them going to the lower first-leg strike;');
+    expect(scan).toContain('walking the sorted candidates best first, it keeps one only while neither of its anchor strikes has been used, so each anchor strike appears once, though not always in its own best pair (a put strike whose best call was taken by an earlier candidate gets its best pair with a call still free, or none);');
+    expect(scan).toContain('on the four nearest expirations that may still trade (from 4:15 PM New York time on an expiration day, when no expiring series trades any longer, that day\'s is left out unless the broker lists nothing else)');
+    expect(scan).toContain('every number goes out at 15 significant digits at most');
+    const chain = text('get_live_options_chain');
+    expect(chain).toContain('Omit `expiration` for the nearest listed expiration that may still trade: from 4:15 PM New York time on an expiration day, when no expiring series trades any longer (some expiring ETF options, including SPY, trade until then; expiring stock options stop at 4:00 in regular hours, and at 4:15 for a class Cboe trades in its curb session; PM-settled index options stop at 4:00), that day\'s is passed over for the next one');
+    for (const name of ['get_live_options_chain', 'get_live_dealer_positioning']) {
+      expect(text(name), name).toContain('one not written YYYY-MM-DD is refused by this tool\'s input check before any request, and a well-formed date that is not a calendar date (2026-02-30) by the proxy as INVALID_EXPIRATION, before it is charged.');
+      // The input check the sentence names: a shape the proxy never sees.
+      const expiration = (tools.find((t) => t.name === name)!.config.inputSchema as Record<string, z.ZodTypeAny>).expiration;
+      expect(expiration.safeParse('2026-9-28').success, name).toBe(false);
+      expect(expiration.safeParse('2026-02-30').success, name).toBe(true);
+    }
+    expect(chain).toContain('Rate limited to 10 weighted units a minute, shared with the other live tools, because each call spends your own broker quota; a chain costs 1.');
+    expect(chain).toContain('Every number goes out at 15 significant digits at most');
+    expect(chain).not.toContain('front month');
+    expect(scan).toContain('the rest count in `skipped` as "shared-anchor-strike", and `distinct: false` returns every pair');
+    expect(scan).toContain('Each candidate\'s `liquidity` is its thinnest leg\'s open interest (null when any is unknown) and its widest leg\'s spread in percent.');
+    expect(scan).toContain('from the Black-Scholes model at each leg\'s own IV with the resolved rate and yield when every leg has a usable one (`source` "model"');
+    expect(scan).toContain('the near-term positioning that moves the market now, not this expiration\'s');
+    for (const name of ['get_live_options_chain', 'get_live_dealer_positioning', 'scan_option_strategies']) {
+      expect(text(name), name).toContain('`rateLimit` is the live-broker budget after this call as the proxy reported it: `remaining` of `limit` units, resetting in `resetSeconds`, or null when it reported none; ' + 'an error answered after the live-broker limiter ran carries it as `rateLimit` beside `code`, whether one it charged for (an unlisted expiration, a broker failure) or its own rate-limit refusal, which charges nothing, and one refused before it (the Pro tier gate, a malformed date) carries none.');
+    }
+    expect(text('get_live_dealer_positioning')).toContain('Every number goes out at 15 significant digits at most, which drops binary noise such as -27496.350000000002 in a computed sum, mid or ratio, while a decimal the broker printed with 15 or fewer digits and a whole number such as an open-interest count pass unchanged; `coverage.gammaFlipResolution`, a sampling step, at 6.');
   });
 
   test('the live tools name the credential store they read', () => {

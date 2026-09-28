@@ -79,8 +79,43 @@ export function metricCoverage(value: unknown): MetricCoverage {
   return { total, included, status };
 }
 
+/**
+ * A computed number at 15 significant digits, the most a double carries for
+ * every decimal: a sum of published Greeks times open interest comes out of
+ * binary arithmetic as -27496.350000000002, and this drops that noise. A
+ * whole number has none and passes exactly: an open-interest count of
+ * 1000000000000001 is not 1e15, and the largest double is not Infinity.
+ */
+export function significant(value: number, digits = 15): number {
+  return Number.isInteger(value) ? value : Number(value.toPrecision(digits));
+}
+
+/**
+ * Every number in a published payload through significant(): the live tools'
+ * one rounding, so a ratio, mid or spread computed anywhere upstream goes out
+ * at 15 significant digits at most. A decimal printed with 15 or fewer
+ * digits, and a whole number, pass unchanged; nothing but numbers changes.
+ */
+export function significantDeep<T>(value: T): T {
+  if (typeof value === 'number') return significant(value) as T;
+  if (Array.isArray(value)) return value.map(significantDeep) as T;
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, significantDeep(entry)])) as T;
+  }
+  return value;
+}
+
+/**
+ * The flip search's price step, which describes how finely it sampled and
+ * is not a measurement: the engine's step arithmetic leaves error well past
+ * the last bit (0.15312200000005305 for a step of 0.153122), so it goes out
+ * at 6 significant digits, finer than a cent at any price under $10,000.
+ */
+export const RESOLUTION_DIGITS = 6;
+
 export function measuredValue(raw: unknown, coverage: MetricCoverage): { value: number | null; status: FieldStatus } {
-  const value = num(raw);
+  const parsed = num(raw);
+  const value = parsed === null ? null : significant(parsed);
   if (coverage.status === 'unknown' || coverage.status === 'unmeasured') {
     return { value: null, status: coverage.status };
   }
@@ -228,7 +263,7 @@ export function summarizeDealerPositioning(
     // proof that nothing sits between it and spot. Left only in a comment on
     // the computation, no reader quoting the number could ever know that.
     gammaFlipResolution: reportedResolution !== null && reportedResolution > 0
-      ? reportedResolution : null,
+      ? significant(reportedResolution, RESOLUTION_DIGITS) : null,
     // This describes the search on supported legs, separately from whether
     // coverage permits quoting a whole-book level. Never infer it for legacy
     // responses: a null level alone cannot distinguish failure from no crossing.

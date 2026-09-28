@@ -45,7 +45,7 @@ export class LiveApiError extends ApiError {
     readonly retryable: boolean | undefined,
     readonly actionUrl: string | undefined,
     /** Extra fields the model needs to CORRECT the request, not just report it. */
-    readonly details: Record<string, unknown> | undefined,
+    public details: Record<string, unknown> | undefined,
   ) {
     super(message, status);
     this.name = 'LiveApiError';
@@ -128,20 +128,59 @@ const BODY_TRANSPORT_ERROR_CODES = new Set([
   'ERR_STREAM_PREMATURE_CLOSE', 'UND_ERR_SOCKET', 'UND_ERR_BODY_TIMEOUT',
 ]);
 
+/** The live-broker budget after an admitted request, from the proxy's RateLimit headers. */
+export interface LiveRateLimit {
+  limit: number;
+  /** Units left in the current window, after this request's charge. */
+  remaining: number;
+  /** Seconds until the window resets. */
+  resetSeconds: number;
+}
+
+/**
+ * proxy/lib/liveBrokerLimiter.ts marks its RateLimit-* headers with this. The
+ * global limiter sets RateLimit-* too (300 a minute), and a request refused
+ * before the live limiter runs (the tier gate, an MFA step-up, a malformed
+ * date) carries only those, which are not the live-broker budget.
+ */
+const LIVE_BROKER_SCOPE_HEADER = 'X-RateLimit-Scope';
+const LIVE_BROKER_SCOPE = 'live-broker';
+
+function readRateLimit(headers: Headers): LiveRateLimit | null {
+  if (headers.get(LIVE_BROKER_SCOPE_HEADER) !== LIVE_BROKER_SCOPE) return null;
+  const count = (name: string) => {
+    const raw = headers.get(name);
+    return raw !== null && /^\d+$/.test(raw) ? Number(raw) : null;
+  };
+  const limit = count('RateLimit-Limit');
+  const remaining = count('RateLimit-Remaining');
+  const resetSeconds = count('RateLimit-Reset');
+  return limit === null || remaining === null || resetSeconds === null ? null : { limit, remaining, resetSeconds };
+}
+
 export class LiveApiClient {
   constructor(
     private baseUrl: string,
     private tokenManager: AccessTokenProvider,
   ) {}
 
-  async get<T = any>(path: string, params?: Record<string, string>): Promise<T> {
+  /**
+   * `onRateLimit`, when given, receives the live-broker budget the proxy
+   * reported for a successful request, so a tool can say how many units
+   * remain. An error answered after the live limiter ran carries it as
+   * `details.rateLimit` instead, since the tool sees only the throw: the
+   * limiter charges before the route runs, so an unlisted expiration, a
+   * broker failure or a body that is not JSON has spent units, and its own
+   * refusal charges nothing and says what is left.
+   */
+  async get<T = any>(path: string, params?: Record<string, string>, onRateLimit?: (rateLimit: LiveRateLimit) => void): Promise<T> {
     const url = new URL(path, this.baseUrl);
     if (params) {
       for (const [key, value] of Object.entries(params)) {
         if (value != null && value !== '') url.searchParams.set(key, value);
       }
     }
-    return this.send<T>(url, path, { method: 'GET' });
+    return this.send<T>(url, path, { method: 'GET' }, onRateLimit);
   }
 
   /** JSON body in; the same envelope handling out. Used by the compute route. */
@@ -153,7 +192,10 @@ export class LiveApiClient {
     });
   }
 
-  private async send<T>(url: URL, path: string, init: RequestInit & { headers?: Record<string, string> }): Promise<T> {
+  private async send<T>(
+    url: URL, path: string, init: RequestInit & { headers?: Record<string, string> },
+    onRateLimit?: (rateLimit: LiveRateLimit) => void,
+  ): Promise<T> {
     const token = await this.tokenManager.getAccessToken();
 
     let response: Response;
@@ -175,7 +217,19 @@ export class LiveApiClient {
       );
     }
 
-    return this.handleResponse<T>(response, path);
+    const rateLimit = onRateLimit ? readRateLimit(response.headers) : null;
+    let result: T;
+    try {
+      result = await this.handleResponse<T>(response, path);
+    } catch (err) {
+      if (rateLimit && err instanceof LiveApiError) err.details = { ...err.details, rateLimit };
+      // A body that is not JSON after the charge: the same error, now able
+      // to carry the budget.
+      else if (rateLimit && err instanceof ApiError) throw new LiveApiError(err.message, err.statusCode, undefined, undefined, undefined, { rateLimit });
+      throw err;
+    }
+    if (rateLimit) onRateLimit!(rateLimit);
+    return result;
   }
 
   private async handleResponse<T>(response: Response, path: string): Promise<T> {

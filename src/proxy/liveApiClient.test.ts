@@ -26,6 +26,88 @@ function client(status: number, body: unknown) {
 const caught = (p: Promise<unknown>) => p.then(() => null, (e) => e);
 
 describe('LiveApiClient', () => {
+  it('reads the live-broker budget from the headers of an admitted request', async () => {
+    const withHeaders = (status: number, headers: Record<string, string>) => {
+      globalThis.fetch = (async () => new Response(JSON.stringify({ ok: true }), {
+        status, headers: { 'content-type': 'application/json', ...headers },
+      })) as unknown as typeof fetch;
+      return new LiveApiClient('https://proxy.example.com', { getAccessToken: async () => 'DUMMY_TOKEN' });
+    };
+    const seen: unknown[] = [];
+    await withHeaders(200, { 'RateLimit-Limit': '10', 'RateLimit-Remaining': '8', 'RateLimit-Reset': '43', 'X-RateLimit-Scope': 'live-broker' })
+      .get('/live/strategy-scan/SPY', {}, (r) => seen.push(r));
+    expect(seen).toEqual([{ limit: 10, remaining: 8, resetSeconds: 43 }]);
+    // Missing or malformed headers report nothing rather than a guess, and
+    // so do the global limiter's (300 a minute), which lack the live scope.
+    for (const headers of [{}, { 'RateLimit-Limit': '300', 'RateLimit-Remaining': '299', 'RateLimit-Reset': '60' }, { 'RateLimit-Limit': '10', 'RateLimit-Remaining': 'x', 'RateLimit-Reset': '43' }, { 'RateLimit-Limit': '10', 'RateLimit-Remaining': '-1', 'RateLimit-Reset': '43' }] as Array<Record<string, string>>) {
+      const none: unknown[] = [];
+      await withHeaders(200, headers).get('/live/strategy-scan/SPY', {}, (r) => none.push(r));
+      expect(none, JSON.stringify(headers)).toEqual([]);
+    }
+    // An error goes to the tool as a throw, so its budget rides in the
+    // error's details instead of the callback.
+    const refused: unknown[] = [];
+    await withHeaders(429, { 'RateLimit-Limit': '10', 'RateLimit-Remaining': '0', 'RateLimit-Reset': '43' })
+      .get('/live/strategy-scan/SPY', {}, (r) => refused.push(r)).catch(() => {});
+    expect(refused).toEqual([]);
+  });
+
+  it('carries the budget on an error the proxy answered after charging, for the callers that ask for it', async () => {
+    // The limiter charges before the route runs, so an unlisted expiration
+    // or a broker failure has spent units the caller should know about.
+    const answer = (status: number, body: unknown, headers: Record<string, string>) => {
+      globalThis.fetch = (async () => new Response(JSON.stringify(body), {
+        status, headers: { 'content-type': 'application/json', ...headers },
+      })) as unknown as typeof fetch;
+      return new LiveApiClient('https://proxy.example.com', { getAccessToken: async () => 'DUMMY_TOKEN' });
+    };
+    const budget = { 'RateLimit-Limit': '10', 'RateLimit-Remaining': '8', 'RateLimit-Reset': '60', 'X-RateLimit-Scope': 'live-broker' };
+    const unlisted = { error: 'Expiration 2026-09-19 is not listed for SPY', code: 'UNKNOWN_EXPIRATION', retryable: false, availableExpirations: ['2026-09-18'] };
+    const err = await caught(answer(400, unlisted, budget).get('/live/exposure/SPY', {}, () => {}));
+    expect(err).toBeInstanceOf(LiveApiError);
+    expect(err.details).toEqual({ availableExpirations: ['2026-09-18'], rateLimit: { limit: 10, remaining: 8, resetSeconds: 60 } });
+    // Through the tool handler: in structuredContent and in the text.
+    const result = await toolHandler(async () => answer(400, unlisted, budget).get('/live/exposure/SPY', {}, () => {}))({});
+    expect((result.structuredContent as any).rateLimit).toEqual({ limit: 10, remaining: 8, resetSeconds: 60 });
+    expect(result.content[0].text).toContain('rateLimit: {"limit":10,"remaining":8,"resetSeconds":60}.');
+    // A rate-limit refusal says the window is spent, beside when to retry.
+    // A live rate-limit refusal charges nothing and says what is left.
+    const limited = await caught(answer(429, { error: 'Too many', code: 'RATE_LIMITED', retryAfterSeconds: 43 },
+      { 'RateLimit-Limit': '10', 'RateLimit-Remaining': '2', 'RateLimit-Reset': '43', 'X-RateLimit-Scope': 'live-broker' }).get('/live/exposure/SPY', {}, () => {}));
+    expect(limited.details).toEqual({ retryAfterSeconds: 43, rateLimit: { limit: 10, remaining: 2, resetSeconds: 43 } });
+    // Refused before the live limiter ran: the tier gate answers under the
+    // global limiter's headers, and those are not the live budget.
+    const general = { 'RateLimit-Limit': '300', 'RateLimit-Remaining': '299', 'RateLimit-Reset': '60' };
+    const tier = await caught(answer(403, { error: 'Pro required', code: 'PRO_TIER_REQUIRED', retryable: false, upgradeUrl: 'https://x.example/upgrade' }, general)
+      .get('/live/exposure/SPY', {}, () => {}));
+    expect(tier.details).toBeUndefined();
+    // A body that is not JSON after a charge keeps the budget.
+    globalThis.fetch = (async () => new Response('{"schemaVersion":1,', { status: 200, headers: { 'content-type': 'application/json', ...budget } })) as unknown as typeof fetch;
+    const broken = await caught(new LiveApiClient('https://proxy.example.com', { getAccessToken: async () => 'DUMMY_TOKEN' })
+      .get('/live/exposure/SPY', {}, () => {}));
+    expect(broken).toBeInstanceOf(LiveApiError);
+    expect(broken.message).toBe('Invalid JSON response from /live/exposure/SPY');
+    expect(broken.statusCode).toBe(200);
+    expect(broken.details).toEqual({ rateLimit: { limit: 10, remaining: 8, resetSeconds: 60 } });
+    // Without a budget it stays the plain error it was.
+    globalThis.fetch = (async () => new Response('{"schemaVersion":1,', { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+    const plain = await caught(new LiveApiClient('https://proxy.example.com', { getAccessToken: async () => 'DUMMY_TOKEN' })
+      .get('/live/exposure/SPY', {}, () => {}));
+    expect(plain).toBeInstanceOf(ApiError);
+    expect(plain).not.toBeInstanceOf(LiveApiError);
+    // A 5xx after the charge too.
+    const down = await caught(answer(503, { error: 'Broker unavailable', code: 'BROKER_UNAVAILABLE', retryable: true }, budget)
+      .get('/live/exposure/SPY', {}, () => {}));
+    expect(down.details).toEqual({ rateLimit: { limit: 10, remaining: 8, resetSeconds: 60 } });
+    // No headers, or a caller that did not ask: the details are untouched.
+    expect((await caught(answer(400, unlisted, {}).get('/live/exposure/SPY', {}, () => {}))).details)
+      .toEqual({ availableExpirations: ['2026-09-18'] });
+    expect((await caught(answer(400, unlisted, budget).get('/regime/fits/SPY/history'))).details)
+      .toEqual({ availableExpirations: ['2026-09-18'] });
+    expect((await caught(answer(503, { error: 'Broker unavailable', code: 'BROKER_UNAVAILABLE', retryable: true }, {})
+      .get('/live/exposure/SPY', {}, () => {}))).details).toBeUndefined();
+  });
+
   it('returns the body on success', async () => {
     const c = client(200, { symbol: 'SPY', dataSource: 'live' });
     expect(await c.get('/live/options-chain/SPY')).toMatchObject({ dataSource: 'live' });

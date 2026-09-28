@@ -19,7 +19,8 @@ const candidate = (over: Record<string, unknown> = {}) => ({
   anchorDelta: 0.2, width: 5, netMid: 1, netNatural: 0.8, maxProfit: 1, maxLoss: 4,
   breakevens: [{ price: 94, pctFromSpot: -6 }], returnOnRisk: 0.25,
   probabilityOfProfit: 0.78, probabilityOfMaxProfit: 0.72,
-  position: { delta: 5, gamma: -1, theta: 2, vega: -3 },
+  liquidity: { minOpenInterest: 500, maxSpreadPct: 8 },
+  position: { delta: 5, gamma: -1, theta: 2, vega: -3, source: 'model' },
   ...over,
 });
 
@@ -90,6 +91,17 @@ describe('summarizeStrategyScan', () => {
     expect(noMove.candidates[0].breakevens[0].outsideExpectedMove).toBeNull();
   });
 
+  it('carries each candidate\'s liquidity and its position Greeks\' source, to 15 significant digits', () => {
+    const shaped = summarizeStrategyScan(scan({ candidates: [candidate({ position: { delta: 15.440000000000001, gamma: -1, theta: 2, vega: -65.64999999999999, source: 'broker' } })] }));
+    expect(shaped.candidates[0].liquidity).toEqual({ minOpenInterest: 500, maxSpreadPct: 8 });
+    expect(shaped.candidates[0].position).toEqual({ delta: 15.44, gamma: -1, theta: 2, vega: -65.65, source: 'broker' });
+    const flip = summarizeStrategyScan(scan({ levels: { ...scan().levels, coverage: coverage({ gammaFlipResolution: 0.15312200000005305 }) } }));
+    expect(flip.levels.gammaFlipResolution).toBe(0.153122);
+    const odd = summarizeStrategyScan(scan({ candidates: [candidate({ position: { delta: 1, source: 'guess' }, liquidity: { minOpenInterest: -1, maxSpreadPct: 'x' } })] }));
+    expect(odd.candidates[0].position.source).toBeNull();
+    expect(odd.candidates[0].liquidity).toEqual({ minOpenInterest: null, maxSpreadPct: null });
+  });
+
   it('a probability outside 0 to 1 is not a probability', () => {
     const odd = summarizeStrategyScan(scan({ candidates: [candidate({ probabilityOfProfit: 1.2, probabilityOfMaxProfit: -0.1 })] }));
     expect(odd.candidates[0]).toMatchObject({ probabilityOfProfit: null, probabilityOfMaxProfit: null });
@@ -139,10 +151,10 @@ describe('scan_option_strategies', () => {
 
   it('sends the parameters in plain decimals and only those given', async () => {
     const { calls, run } = capture();
-    await run({ symbol: 'spy', expiration: '2026-10-16', strategy: 'iron_condor', width: 5, deltaMin: 0.1, deltaMax: 0.25, maxSpreadPct: 12.5, levels: 'window' });
+    await run({ symbol: 'spy', expiration: '2026-10-16', strategy: 'iron_condor', width: 5, deltaMin: 0.1, deltaMax: 0.25, maxSpreadPct: 12.5, levels: 'window', distinct: false });
     expect(calls).toEqual([{
       path: '/live/strategy-scan/SPY',
-      params: { expiration: '2026-10-16', strategy: 'iron_condor', width: '5', deltaMin: '0.1', deltaMax: '0.25', maxSpreadPct: '12.5', levels: 'window' },
+      params: { expiration: '2026-10-16', strategy: 'iron_condor', width: '5', deltaMin: '0.1', deltaMax: '0.25', maxSpreadPct: '12.5', levels: 'window', distinct: 'false' },
     }]);
     await run({ symbol: 'SPY', expiration: '2026-10-16', strategy: 'short_put', minCredit: 1e-7, deltaMin: 0.30000000001, width: 1e-11 });
     expect(calls[1].params).toMatchObject({ minCredit: '0.0000001', deltaMin: '0.30000000001', width: '0.00000000001' });

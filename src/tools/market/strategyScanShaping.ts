@@ -9,7 +9,7 @@
  */
 
 import { MAX_RESPONSE_BYTES } from '../helpers.js';
-import { measuredLevel, measuredValue, metricCoverage, readRegime, RESPONSE_MARGIN_BYTES } from './dealerPositioningShaping.js';
+import { measuredLevel, measuredValue, metricCoverage, readRegime, RESOLUTION_DIGITS, RESPONSE_MARGIN_BYTES, significant } from './dealerPositioningShaping.js';
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
@@ -77,7 +77,7 @@ export function summarizeStrategyScan(response: Record<string, unknown>) {
     // resolution only with a flip to belong to.
     gammaFlipMethod: cov.gammaFlipMethod === 'repriced' || cov.gammaFlipMethod === 'frozen-gamma' || cov.gammaFlipMethod === 'mixed'
       ? cov.gammaFlipMethod : null,
-    gammaFlipResolution: flip.value !== null && resolution !== null && resolution > 0 ? resolution : null,
+    gammaFlipResolution: flip.value !== null && resolution !== null && resolution > 0 ? significant(resolution, RESOLUTION_DIGITS) : null,
     // The sign of gamma at spot, published only with a measured net gamma
     // under complete coverage, the live tool's own gate: complete coverage
     // with no finite net (an overflow serializes as null) is no measured book.
@@ -103,6 +103,8 @@ export function summarizeStrategyScan(response: Record<string, unknown>) {
       };
     });
     const position = record(c.position);
+    const liquidity = record(c.liquidity);
+    const greek = (v: unknown) => { const n = num(v); return n === null ? null : significant(n); };
     return {
       legs,
       anchorDelta: num(c.anchorDelta),
@@ -123,8 +125,14 @@ export function summarizeStrategyScan(response: Record<string, unknown>) {
       }),
       probabilityOfProfit: probability(c.probabilityOfProfit),
       probabilityOfMaxProfit: probability(c.probabilityOfMaxProfit),
+      // The thinnest leg's open interest and the widest leg's spread.
+      liquidity: {
+        minOpenInterest: count(liquidity.minOpenInterest),
+        maxSpreadPct: num(liquidity.maxSpreadPct) !== null && num(liquidity.maxSpreadPct)! >= 0 ? num(liquidity.maxSpreadPct) : null,
+      },
       position: {
-        delta: num(position.delta), gamma: num(position.gamma), theta: num(position.theta), vega: num(position.vega),
+        delta: greek(position.delta), gamma: greek(position.gamma), theta: greek(position.theta), vega: greek(position.vega),
+        source: position.source === 'model' || position.source === 'broker' ? position.source : null,
       },
     };
   });
@@ -160,7 +168,7 @@ export function summarizeStrategyScan(response: Record<string, unknown>) {
       prices: 'per share; one contract is 100 shares',
       netMid: 'sold mids minus bought mids: positive is a credit, negative a debit',
       netNatural: 'sold bids minus bought asks, the price crossing every leg',
-      position: 'one of each leg, times 100, signed for the position (sold legs negative), from the broker\'s published leg Greeks',
+      position: 'one of each leg, times 100, signed for the position (sold legs negative): theta per calendar day, vega per vol point; source "model" is Black-Scholes at each leg\'s IV, "broker" the legs\' published Greeks',
       pctFromSpot: 'percent of spotPrice, signed (below spot is negative)',
       probabilities: 'risk-neutral, lognormal, at the chain\'s own implied volatility at each boundary: model values, not forecasts',
     },

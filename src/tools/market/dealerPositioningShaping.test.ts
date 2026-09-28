@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { summarizeDealerPositioning, withinPercent } from './dealerPositioningShaping.js';
+import { significantDeep, summarizeDealerPositioning, withinPercent } from './dealerPositioningShaping.js';
 import { sanitizeMcpWireOutput, toolHandler } from '../helpers.js';
 
 const coverage = (total = 824, included = total) => ({
@@ -45,6 +45,52 @@ const live = (over: Record<string, unknown> = {}) => ({
 });
 
 describe('summarizeDealerPositioning', () => {
+  it('publishes computed sums and the flip step to 15 significant digits, dropping only binary noise', () => {
+    // SPY on 2026-09-28: a strike's summed vega came out -27496.350000000002
+    // and the flip step 0.15312200000005305.
+    const noisy = summarizeDealerPositioning(live({
+      coverage: { ...coverage(), gammaFlipResolution: 0.15312200000005305 },
+      snapshot: { ...live().snapshot, netVega: -84306.23000000001 },
+      byStrike: [{ ...strikeRow(120, 90), netVega: -27496.350000000002, netDelta: 1234.5678901234567 }],
+    }));
+    const row = noisy.strikes.nearSpot[0];
+    expect(row.netVega).toBe(-27496.35);
+    // Fifteen digits are kept: a value that has them is not rounded further.
+    expect(row.netDex).toBe(1234.56789012346);
+    expect(noisy.exposure.netVega).toBe(-84306.23);
+    expect(noisy.coverage.gammaFlipResolution).toBe(0.153122);
+    expect(JSON.stringify(noisy.limitations)).toContain('a step of 0.153122 in price');
+  });
+
+  it('publishes whole numbers exactly: a count is not noise, and the largest double stays finite', () => {
+    const side = {
+      strikes: 3, netGamma: 5_000, callGamma: 8_000, putGamma: -3_000,
+      gammaCoverage: { total: 6, included: 6 },
+      callOpenInterest: 1_000_000_000_000_001, callOpenInterestCoverage: { total: 3, included: 3 },
+      putOpenInterest: 400, putOpenInterestCoverage: { total: 3, included: 3 },
+    };
+    const shaped = summarizeDealerPositioning(live({
+      snapshot: { ...live().snapshot, netGamma: Number.MAX_VALUE },
+      spotSides: { atSpotStrike: 120, above: side, below: side, callOpenInterestShareAbove: 0.5 },
+    }));
+    expect(shaped.spotSides!.above.callOpenInterest).toBe(1_000_000_000_000_001);
+    expect(shaped.exposure.netGex).toBe(Number.MAX_VALUE);
+    expect(shaped.exposureStatus.netGex).toBe('complete');
+  });
+
+  it('rounds every number in a payload to 15 significant digits, leaving the rest as it is', () => {
+    const payload = {
+      ratio: 0.12531986276320103, mid: 11.190000000000001, count: 1_000_000_000_000_001, flag: true, name: 'SPY', none: null,
+      rows: [{ spread: 2.197802197802198, strike: 765 }, 17.994999999999997],
+      nested: { deeper: { iv: 0.13540000000000002, printed: 0.1234 } },
+    };
+    expect(significantDeep(payload)).toEqual({
+      ratio: 0.125319862763201, mid: 11.19, count: 1_000_000_000_000_001, flag: true, name: 'SPY', none: null,
+      rows: [{ spread: 2.1978021978022, strike: 765 }, 17.995],
+      nested: { deeper: { iv: 0.1354, printed: 0.1234 } },
+    });
+  });
+
   it('surfaces the levels a reader asks for by name', () => {
     const shaped = summarizeDealerPositioning(live());
     expect(shaped.levels).toMatchObject({
