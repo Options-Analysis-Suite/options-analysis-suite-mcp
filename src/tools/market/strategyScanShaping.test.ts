@@ -42,7 +42,7 @@ describe('summarizeStrategyScan', () => {
     expect(shaped.levels).toMatchObject({
       scope: 'expiration', gammaFlip: 97.5, callWall: 110, putWall: 90, gammaMagnet: 100,
       pctFromSpot: { gammaFlip: -2.5, callWall: 10, putWall: -10, gammaMagnet: 0 },
-      status: { gammaFlip: 'complete', callWall: 'complete' },
+      status: { gammaFlip: 'complete', callWall: 'complete', dealerRegime: 'complete' },
       // As get_live_dealer_positioning reports them: how the flip was found,
       // its search step, and the regime (gamma at spot, not the net's sign).
       gammaFlipMethod: 'mixed', gammaFlipResolution: 0.154, dealerRegime: 'positive',
@@ -50,8 +50,10 @@ describe('summarizeStrategyScan', () => {
     const [c] = shaped.candidates;
     expect(c.legs.map((l) => l.pctFromSpot)).toEqual([-5, -10]);
     expect(c.breakevens).toEqual([{ price: 94, pctFromSpot: -6, outsideExpectedMove: true }]);
-    // A fraction of spot, as get_live_dealer_positioning publishes it.
+    // A fraction of spot, as get_live_dealer_positioning publishes it, with
+    // the two mids the straddle sums.
     expect(shaped.expectedMove!.pctOfSpot).toBe(0.049);
+    expect(shaped.expectedMove).toMatchObject({ callMid: 2.5, putMid: 2.4, straddle: 4.9 });
     // A zero count is not a reason to show.
     expect(shaped.skipped).toEqual({ 'missing-quote': 2 });
     expect(shaped).toMatchObject({ matched: 3, returned: 1, limitedBySize: false, strategy: 'bull_put_spread' });
@@ -59,7 +61,7 @@ describe('summarizeStrategyScan', () => {
 
   it('withholds levels on incomplete coverage, as the live positioning tool does', () => {
     const partial = summarizeStrategyScan(scan({ levels: { ...scan().levels, coverage: coverage({ gamma: { total: 20, included: 19 } }) } }));
-    expect(partial.levels).toMatchObject({ callWall: null, putWall: null, gammaMagnet: null, gammaFlip: 97.5, status: { callWall: 'partial' }, dealerRegime: null });
+    expect(partial.levels).toMatchObject({ callWall: null, putWall: null, gammaMagnet: null, gammaFlip: 97.5, status: { callWall: 'partial', dealerRegime: 'partial' }, dealerRegime: null });
     const noFlip = summarizeStrategyScan(scan({
       levels: { ...scan().levels, gammaFlip: null, coverage: coverage({ gammaFlipSearchStatus: 'not-found' }) },
     }));
@@ -74,6 +76,8 @@ describe('summarizeStrategyScan', () => {
     for (const scope of ['expiration', 'window']) {
       const unmeasured = summarizeStrategyScan(scan({ levels: { ...scan().levels, scope, netGex: null, regime: 'positive', coverage: coverage({ gamma: { total: 1, included: 1 } }) } }));
       expect(unmeasured.levels.dealerRegime, scope).toBeNull();
+      // Its status says why, as the live tool's levelStatus does.
+      expect(unmeasured.levels.status.dealerRegime, scope).toBe('unavailable');
     }
   });
 

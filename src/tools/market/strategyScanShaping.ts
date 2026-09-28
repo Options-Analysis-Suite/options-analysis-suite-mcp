@@ -34,6 +34,8 @@ export function summarizeStrategyScan(response: Record<string, unknown>) {
   const upper = num(move.upper);
   const expectedMove = body.expectedMove && typeof body.expectedMove === 'object' ? {
     strike: num(move.strike),
+    callMid: num(move.callMid),
+    putMid: num(move.putMid),
     straddle: num(move.straddle),
     lower,
     upper,
@@ -69,7 +71,8 @@ export function summarizeStrategyScan(response: Record<string, unknown>) {
       putWall: pctFromSpot(putWall.value),
       gammaMagnet: pctFromSpot(magnet.value),
     },
-    status: { gammaFlip: flip.status, callWall: callWall.status, putWall: putWall.status, gammaMagnet: magnet.status },
+    // dealerRegime's is its net gamma's, as the live tool's levelStatus.
+    status: { gammaFlip: flip.status, callWall: callWall.status, putWall: putWall.status, gammaMagnet: magnet.status, dealerRegime: netGex.status },
     // How the flip was found and the step its search sampled at, the
     // resolution only with a flip to belong to.
     gammaFlipMethod: cov.gammaFlipMethod === 'repriced' || cov.gammaFlipMethod === 'frozen-gamma' || cov.gammaFlipMethod === 'mixed'

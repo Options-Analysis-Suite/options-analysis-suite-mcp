@@ -1007,7 +1007,16 @@ describe('MCP tool output schemas', () => {
     expect(text).toMatch(/Unset, it defaults by strategy: 0\.15 to 0\.35 for short options and credit spreads, 0\.3 to 0\.6 for long options, 0\.4 to 0\.6 for debit spreads, straddles and butterflies, 0\.1 to 0\.25 for iron condors and short strangles, 0\.15 to 0\.35 for long strangles\./);
     expect(text).toMatch(/when that exact strike is not listed, the nearest within a quarter of the width is used and the candidate's `width` says what was listed \(for an iron condor or butterfly, the wider of its two wings; the legs' strikes show both\)\./);
     expect(text).toMatch(/a two-anchor candidate's `anchorDelta` is the mean of its two\./);
-    expect(text).toMatch(/`expectedMove` is this expiration's at-the-money straddle, with `pctOfSpot` its fraction of spot as get_live_dealer_positioning gives it,/);
+    expect(text).toMatch(/`expectedMove` is this expiration's at-the-money straddle \(`callMid` plus `putMid` at `strike`\), with `pctOfSpot` its fraction of spot as get_live_dealer_positioning gives it,/);
+    // The fallback yield is the dividend over the live spot (proxy/lib/liveMarketInputs.ts),
+    // taken whenever no usable trailing yield resolves (none on file, a failed
+    // read or an unusable value), not only for funds.
+    for (const name of ['scan_option_strategies', 'get_live_dealer_positioning']) {
+      expect(String(tools.find((t) => t.name === name)!.config.description), name).not.toMatch(/profile_yield\" \(a fund/);
+    }
+    for (const name of ['scan_option_strategies', 'get_live_dealer_positioning']) {
+      expect(String(tools.find((t) => t.name === name)!.config.description), name).toContain('When `resolved.q.source` is "profile_yield" (no usable trailing yield was resolved for the symbol: none on file, as for most funds, or one that could not be read or used), q is its trailing annual dividend over the live spot, so it moves slightly with spot from call to call while `resolved.q.asOf` dates the dividend record, not the division.');
+    }
     expect(text).toMatch(/Every leg needs a two-sided quote, and a sold leg a bid above zero; a candidate missing one is counted in `skipped` by reason, never priced from a last trade or a mark, and a spread whose credit or debit reaches its width is skipped as not a real price\./);
     expect(text).toMatch(/`probabilityOfProfit` is the risk-neutral probability, under a lognormal model, that the price at expiration ends where the position makes money at the mid, each breakeven read at the implied volatility the chain's own smile gives at that price, with the resolved rate and dividend yield;/);
     expect(text).toMatch(/They are model values, not forecasts: they take no view on direction, implied volatility has tended to run above realized so short-premium outcomes have tended to beat them, and they ignore early assignment, fills and costs\. Delta is not used as a probability\./);
