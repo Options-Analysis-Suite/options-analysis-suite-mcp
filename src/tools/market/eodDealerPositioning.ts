@@ -4,6 +4,7 @@ import { LiveApiError, type LiveApiClient } from '../../proxy/liveApiClient.js';
 import { toolHandler } from '../helpers.js';
 import { marketDataOutputSchema } from '../outputSchemas.js';
 import { summarizeEodDealerPositioning } from './eodDealerPositioningShaping.js';
+import { significantDeep } from './dealerPositioningShaping.js';
 
 /**
  * End-of-day dealer positioning, from the stored options snapshot.
@@ -123,6 +124,7 @@ export function register(server: McpServer, client: LiveApiClient, now: () => Da
         + 'The gamma flip here is a coarse-grid level from the stored snapshot with no search status or resolution; for the flip as of NOW, repriced from a live chain with its search status, use get_live_dealer_positioning (Pro and above), which is a different claim and is never substituted here. '
         + 'Pass `date` for a past session; omit it for the most recent on file. `date` in the result is the session it describes and is authoritative; do not present it as today\'s close. `date` is accepted from 1990-01-01 to one day past the current UTC date, the proxy\'s window, which moves forward with the date; a later weekday date is rejected as INVALID_REQUEST until the window reaches it, marked retryable with the UTC day it can be asked for from, and a later weekend date keeps the rejection as final, since it is never a session. The equity import is scheduled for 01:00 US Eastern the next day and usually lands about 02:30, so in the evening the most recent on file is usually the previous session, and it can be older when an import is late. A not-found for a weekday date inside that window is not final until 09:30 US Eastern on the following calendar day, and is marked retryable until then. That cutoff is this tool\'s, not a deadline of the producer\'s, which has none: the import is scheduled for 01:00 US Eastern, retried in half-hour steps to about 06:00, and runs later when it has days to catch up. If that date is a trading session its file usually lands about 02:30 US Eastern the next day (02:31 to 02:34 for every session from 2026-09-08 to 09-17), so before then it is usually not on file yet; a market holiday, a futures contract or a name with no near-term options stays not-found, and this tool cannot tell those apart from the date alone. After the cutoff the response is the proxy\'s answer for any absent row and says retrying will not succeed; that is the proxy\'s flag for a row absent on the normal schedule, not a promise that the file can never arrive: a session whose import or exposure computation failed can appear after a later successful import or repair, and nothing here says whether one is coming. Max pain is not here; it is in get_options_snapshot. A symbol with no exposure summary (a futures contract, or a session with no near-term options) reports not-found rather than a neutral regime. '
         + '`sincePriorSession` compares this session with the one before it on file, from the same stored end-of-day computation over the same 0-60 day window: `prior` holds that session\'s levels, `change` this session minus that one (null where either is missing), and `dealerRegimeChanged` whether the regime differs. `sessionsSkipped` counts the NYSE sessions between `priorDate` and `date`, none of which has a summary on file: 0 means no session falls between the two, and more means the change spans that many more sessions. Both flips are found on a grid of 60 prices within 20% of each session\'s spot, about 0.68% of spot apart and re-centred every session, so a flip change smaller than that step can come from the grid rather than the market. `status` is "none-on-file" when no earlier session has a summary and "unavailable" when it could not be read, and this session\'s values are unaffected either way. It is a close-to-close change on file, not a change to now: the live book comes from get_live_dealer_positioning, over a different window and computation, and differencing the two is not a change. '
+        + 'Every number goes out at 15 significant digits at most, which drops binary noise such as 29.666368063999997 in the derived `expectedMove30d.absolute` (published as 29.666368064), while a whole number such as `netGex` and a decimal stored with 15 or fewer digits pass unchanged; each `sincePriorSession.change` is computed as the exact difference of the two stored values (764.03 against 765.54 is -1.51, not the binary -1.509999999999991) and then published under the same 15-digit rule, so a difference needing more digits (10000000000.01 against 0.00001) is rounded like any other number. '
         + 'Distinct from get_regime with scope="symbol", which reports the daily regime classification and its authoritative Greek exposures.',
       inputSchema: {
         symbol: z.string().describe('Ticker symbol (e.g., AAPL, SPY)'),
@@ -158,7 +160,9 @@ export function register(server: McpServer, client: LiveApiClient, now: () => Da
         throw err;
       }
 
-      return summarizeEodDealerPositioning(res, { strikeLimit });
+      // The live tools' one rounding: a value derived in binary, such as the
+      // 30-day expected move (29.666368063999997), goes out at 15 digits.
+      return significantDeep(summarizeEodDealerPositioning(res, { strikeLimit }));
     }),
   );
 }

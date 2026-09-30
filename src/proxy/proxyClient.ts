@@ -91,6 +91,24 @@ export class ProxyClient {
    * GET request to the proxy.
    */
   async get<T = any>(path: string, params?: Record<string, string>): Promise<T> {
+    return this.handleResponse<T>(await this.fetchGet(path, params), path);
+  }
+
+  /**
+   * GET request that also returns the named response headers (null when
+   * absent), for a reader whose response says something beside its body: the
+   * stock price routes name the symbol's history state in
+   * X-Stock-History-State.
+   */
+  async getWithHeaders<T = any>(
+    path: string, params: Record<string, string> | undefined, headerNames: string[],
+  ): Promise<{ body: T; headers: Record<string, string | null> }> {
+    const response = await this.fetchGet(path, params);
+    const headers = Object.fromEntries(headerNames.map((name) => [name, response.headers.get(name)]));
+    return { body: await this.handleResponse<T>(response, path), headers };
+  }
+
+  private async fetchGet(path: string, params?: Record<string, string>): Promise<Response> {
     const url = new URL(path, this.proxyUrl);
     if (params) {
       for (const [key, value] of Object.entries(params)) {
@@ -118,7 +136,7 @@ export class ProxyClient {
       );
     }
 
-    return this.handleResponse<T>(response, path);
+    return response;
   }
 
   /**

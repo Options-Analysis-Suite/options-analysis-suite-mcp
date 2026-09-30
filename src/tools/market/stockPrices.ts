@@ -3,7 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ProxyClient } from '../../proxy/proxyClient.js';
 import { toolHandler } from '../helpers.js';
 import { marketDataOutputSchema } from '../outputSchemas.js';
-import { summarizeStockPrices } from './stockPriceShaping.js';
+import { HISTORY_STATE_HEADER, summarizeStockPrices } from './stockPriceShaping.js';
 
 export function register(server: McpServer, client: ProxyClient): void {
   server.registerTool(
@@ -19,12 +19,14 @@ export function register(server: McpServer, client: ProxyClient): void {
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     toolHandler(async ({ symbol, days }) => {
-      const res = await client.get('/stock-prices', {
+      // The proxy names the symbol's history state in a header; each row
+      // carries its own confirmation.
+      const { body, headers } = await client.getWithHeaders<any>('/stock-prices', {
         symbol: symbol.toUpperCase(),
         limit: String(days),
-      }) as any;
-      const rows = Array.isArray(res) ? res : [];
-      return summarizeStockPrices(rows.slice(-days), days);
-    }),
+      }, [HISTORY_STATE_HEADER]);
+      const rows = Array.isArray(body) ? body : [];
+      return summarizeStockPrices(rows.slice(-days), days, headers[HISTORY_STATE_HEADER] ?? null);
+    }, { keepOnEmpty: ['historyState', 'historyNote', 'summary'] }),
   );
 }

@@ -8,6 +8,21 @@ type StockPriceRow = {
   volume?: number;
 };
 
+/** The proxy's response header naming the symbol's stock history state. */
+export const HISTORY_STATE_HEADER = 'X-Stock-History-State';
+const HISTORY_STATES = new Set(['current', 'pending_split', 'held', 'not_applicable']);
+
+/**
+ * A line for the reader when the history may not be refreshed. `pending_split`:
+ * a split is due with a refresh still outstanding for it (an earlier refresh
+ * may already cover it; the requirement is what is known); `held`: the latest
+ * refresh was held for review. No vendor is named.
+ */
+const HISTORY_NOTES: Record<string, string> = {
+  pending_split: 'A split for this symbol is due and still awaits a price history refresh; until that refresh runs, bars before the split may be on the pre-split scale.',
+  held: 'The latest refresh of this symbol\'s price history was held for review; bars may not reflect a recent split or correction yet.',
+};
+
 function asFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
@@ -18,16 +33,31 @@ function roundTo(value: number | null, digits = 2): number | null {
   return Math.round(value * factor) / factor;
 }
 
-export function summarizeStockPrices(payload: unknown, requestedDays?: number): unknown {
+/**
+ * `historyState`, when given (the header's value, or null when the proxy sent
+ * none), adds the state, a note when it is pending_split or held, and the
+ * count of unconfirmed sessions. Rows keep their own `confirmed` flag (null
+ * for index, future and crypto symbols, which carry no confirmation).
+ */
+export function summarizeStockPrices(payload: unknown, requestedDays?: number, historyState?: string | null): unknown {
   const rows = Array.isArray(payload)
     ? payload.filter((row): row is StockPriceRow => row != null && typeof row === 'object')
     : [];
+  const state = historyState === undefined ? undefined
+    : historyState != null && HISTORY_STATES.has(historyState) ? historyState : null;
+  const history = state === undefined ? {} : {
+    historyState: state,
+    ...(state != null && HISTORY_NOTES[state] ? { historyNote: HISTORY_NOTES[state] } : {}),
+  };
+  const unconfirmed = state === undefined ? {} : { unconfirmedSessions: rows.filter((row) => row.confirmed === false).length };
 
   if (rows.length === 0) {
     return {
       data: [],
+      ...history,
       summary: {
         sessionsReturned: 0,
+        ...unconfirmed,
       },
     };
   }
@@ -71,8 +101,10 @@ export function summarizeStockPrices(payload: unknown, requestedDays?: number): 
   return {
     data: rows,
     latest: latest,
+    ...history,
     summary: {
       sessionsReturned: rows.length,
+      ...unconfirmed,
       startDate: first.date ?? null,
       endDate: latest.date ?? null,
       startClose: firstClose,

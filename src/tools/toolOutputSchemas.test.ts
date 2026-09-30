@@ -123,7 +123,7 @@ describe('MCP tool output schemas', () => {
     // in-memory Map per proxy instance, so a hit is possible, not promised.
     expect(chain).toMatch(/A repeat for the same symbol and expiration within 15 seconds can be answered from a short in-memory cache, with the same `asOf`, and still counts as a request; the cache is per proxy instance, so a repeat can also be fetched afresh\./);
     expect(chain).not.toMatch(/within 15 seconds is answered/);
-    expect(description('get_live_dealer_positioning')).toMatch(/Do not call it in a loop or for a list of symbols\. A repeat for the same symbol and broker over the same expirations, asked the same way, within 15 seconds can be answered from a short in-memory cache, with the same `asOf`, totals and levels whatever `strikeRange` or `strikeWindowPct` it asks for \(they only choose which computed rows are returned\), and is still charged in full; the cache is per proxy instance, so a repeat can also be computed afresh\./);
+    expect(description('get_live_dealer_positioning')).toMatch(/Do not call it in a loop or for a list of symbols\. A repeat for the same symbol and broker over the same expirations, asked the same way, within 15 seconds can be answered from a short in-memory cache, with the same `asOf`, totals and levels whatever `strikeRange`, `strikeWindowPct` or `strikeWindowDelta` it asks for \(they only choose which computed rows are returned\), and is still charged in full; the cache is per proxy instance, so a repeat can also be computed afresh\./);
     // One named expiration is the list plus one chain, charged two units
     // (liveBrokerLimiter LIVE_EXPOSURE_ONE_EXPIRATION_COST).
     expect(description('get_live_dealer_positioning')).toMatch(/EXPENSIVE: a call over the default four expirations is charged five weighted units against the 10-unit-per-minute live-broker limit, so at most two such calls a minute, and a call naming `expiration` is charged two, so at most five a minute\./);
@@ -651,7 +651,7 @@ describe('MCP tool output schemas', () => {
     // none) while the rows are the nearest `strikeRange`.
     expect(live).toMatch(/`levelStatus` is each level's required coverage \(the flip's sweep coverage, `coverage\.gammaFlip`, which counts repriced and held legs alike, so it can be complete under \"frozen-gamma\" with no leg repriced; the walls', the magnet's and the concentration's net-gamma coverage\), not whether a level was found: a null `gammaFlip` beside a complete `levelStatus\.gammaFlip` is a null the route reported over complete coverage, and `coverage\.gammaFlipSearchStatus` says whether the search found no crossing or was unresolved\./);
     const liveRange = String((tools.find((t) => t.name === 'get_live_dealer_positioning')!.config.inputSchema as Record<string, { description?: string }>).strikeRange.description);
-    expect(liveRange).toMatch(/^TOTAL per-strike rows nearest spot, the cap when `strikeWindowPct` is given\. Default 10 \(150 with `strikeWindowPct`\), max 150\. Totals use all supported legs in the selected expirations regardless of this display limit; metric statuses identify partial coverage\. The walls and the magnet are chosen over every strike in the window \(`strikes\.total` of them\), so they can sit outside the returned rows \(KBE on 2026-09-21: walls 75 and 59 with the ten default rows spanning 62 to 71\); such a level's own row is returned in `strikes\.atLevels`, naming the level, so its `callGex` and `putGex` can be checked\. Rows that would carry the answer past its 50 KB limit are dropped farthest from spot first, and `strikes\.limitedBySize` is then true\.$/);
+    expect(liveRange).toMatch(/^TOTAL per-strike rows nearest spot, the cap when `strikeWindowPct` or `strikeWindowDelta` is given\. Default 10 \(150 with either\), max 150\. Totals use all supported legs in the selected expirations regardless of this display limit; metric statuses identify partial coverage\. The walls and the magnet are chosen over every strike in the window \(`strikes\.total` of them\), so they can sit outside the returned rows \(KBE on 2026-09-21: walls 75 and 59 with the ten default rows spanning 62 to 71\); such a level's own row is returned in `strikes\.atLevels`, naming the level, so its `callGex` and `putGex` can be checked\. Rows that would carry the answer past its 50 KB limit are dropped farthest from spot first, and `strikes\.limitedBySize` is then true\.$/);
     // The wall row travels beside the rows now (dealerPositioningShaping
     // atLevels), so "a wall with no row here has no callGex" is gone.
     expect(liveRange).not.toMatch(/a wall with no row here/);
@@ -796,6 +796,89 @@ describe('MCP tool output schemas', () => {
     expect((live!.config.annotations as Record<string, unknown>).readOnlyHint).toBe(true);
     // No `full`: it would be an unbounded live broker call.
     expect(Object.keys(live!.config.inputSchema as object)).not.toContain('full');
+  });
+
+  test('live dealer positioning takes a delta band, strictly inside 0 to 0.5, and refuses it beside a percent window before any request', async () => {
+    const requests: Array<{ path: string; params?: Record<string, string> }> = [];
+    const byStrike = [118, 120, 140].map((strike) => ({
+      strike, netGamma: 1, callGamma: 1, putGamma: 0, netDelta: 1, netVega: 1,
+      coverage: { gamma: { total: 2, included: 2 }, delta: { total: 2, included: 2 }, vega: { total: 2, included: 2 } },
+      deltasByExpiration: [{ expiration: '2026-10-16', call: strike === 140 ? 0.03 : 0.5, put: strike === 140 ? -0.97 : -0.5 }],
+    }));
+    const recording = {
+      get: async (path: string, params?: Record<string, string>) => {
+        requests.push({ path, params });
+        return { symbol: 'SPY', expirations: ['2026-10-16'], snapshot: { spotPrice: 120 }, byStrike };
+      },
+    } as any;
+    const { tools, server } = captureRegisteredTools();
+    registerAllTools(server as any, stubClient(), stubTokens(), recording);
+    const tool = tools.find((t) => t.name === 'get_live_dealer_positioning')!;
+
+    const schema = (tool.config.inputSchema as Record<string, any>).strikeWindowDelta;
+    for (const ok of [0.01, 0.1, 0.49]) expect(schema.safeParse(ok).success, String(ok)).toBe(true);
+    for (const bad of [0, 0.5, 0.6, -0.1]) expect(schema.safeParse(bad).success, String(bad)).toBe(false);
+
+    const banded: any = await tool.handler({ symbol: 'spy', strikeWindowDelta: 0.1 });
+    // The band only chooses rows: the request is the same as without it.
+    expect(requests).toEqual([{ path: '/live/exposure/SPY', params: {} }]);
+    expect(banded.structuredContent.strikes).toMatchObject({ deltaBand: 0.1, inWindow: 2, returned: 2 });
+
+    // The echoes are the values the rows were chosen with, not rounded to 15
+    // digits: 0.10000000000000002 keeps no strike at 0.1, and 0.1 would.
+    const offGrid: any = await tool.handler({ symbol: 'spy', strikeWindowDelta: 0.10000000000000002 });
+    expect(offGrid.structuredContent.strikes.deltaBand).toBe(0.10000000000000002);
+    const near: any = await tool.handler({ symbol: 'spy', strikeWindowDelta: 0.49999999999999994 });
+    expect(near.structuredContent.strikes.deltaBand).toBe(0.49999999999999994);
+    const pct: any = await tool.handler({ symbol: 'spy', strikeWindowPct: 14.285714285714286 });
+    expect(pct.structuredContent.strikes.windowPct).toBe(14.285714285714286);
+
+    requests.length = 0;
+    const both: any = await tool.handler({ symbol: 'spy', strikeWindowDelta: 0.1, strikeWindowPct: 5 });
+    expect(both.isError).toBe(true);
+    expect(both.structuredContent).toMatchObject({ code: 'INVALID_REQUEST', retryable: false });
+    expect(both.content[0].text).toContain('strikeWindowDelta or strikeWindowPct, not both');
+    expect(requests).toEqual([]);
+  });
+
+  test('EOD dealer positioning publishes every number at 15 significant digits, as the live tools do', async () => {
+    // SPY on 2026-09-29, the values the thirty-first run read with binary
+    // noise; the changes now arrive exact from the proxy (eodExposure.ts).
+    const recording = {
+      get: async () => ({
+        schemaVersion: 1, symbol: 'SPY', date: '2026-09-29', asOf: '2026-09-29T21:40:00Z',
+        source: 'eod_options_snapshot', dteWindow: { minDte: 0, maxDte: 60, unit: 'calendar_days' },
+        spotPrice: 764.03, netGex: -10894620007, netDex: 16246461968,
+        gammaMagnet: 761, gammaFlip: 771.58, callWall: 765, putWall: 765, dealerRegime: 'negative_gamma',
+        expectedMovePct30d: 0.03882885235, expectedMove30d: 29.666368063999997,
+        topContributingStrikes: [{ strike: 765, netGex: -1597560842.5686889, netDex: 1234.5678901234567 }],
+        topContributingStrikesLimit: 10,
+        sincePriorSession: {
+          status: 'found', priorDate: '2026-09-28', sessionsSkipped: 0, dealerRegimeChanged: false,
+          prior: { spotPrice: 765.54, netGex: -8801431612, netDex: 11348727140, gammaFlip: 772.75, callWall: 785, putWall: 765, gammaMagnet: 765, dealerRegime: 'negative_gamma' },
+          change: { spotPrice: -1.51, netGex: -2093188395, netDex: 4897734828, gammaFlip: -1.17, callWall: -20, putWall: 0, gammaMagnet: -4 },
+        },
+      }),
+    } as any;
+    const { tools, server } = captureRegisteredTools();
+    registerAllTools(server as any, stubClient(), stubTokens(), recording);
+    const result: any = await tools.find((t) => t.name === 'get_dealer_positioning')!.handler({ symbol: 'spy' });
+    const out = result.structuredContent;
+    expect(out.sincePriorSession.change).toMatchObject({ spotPrice: -1.51, gammaFlip: -1.17, netGex: -2093188395, callWall: -20 });
+    expect(out.expectedMove30d.absolute).toBe(29.666368064);
+    expect(out.topContributingStrikes[0]).toMatchObject({ netGex: -1597560842.56869, netDex: 1234.56789012346 });
+    // Whole numbers and decimals already within 15 digits pass unchanged.
+    expect(out).toMatchObject({ netGex: -10894620007, spotPrice: 764.03, gammaFlip: 771.58 });
+    expect(result.content[0].text).not.toMatch(/\d{16,}/);
+    const text = tools.find((t) => t.name === 'get_dealer_positioning')!.config.description as string;
+    expect(text).toContain('Every number goes out at 15 significant digits at most, which drops binary noise such as 29.666368063999997 in the derived `expectedMove30d.absolute` (published as 29.666368064), while a whole number such as `netGex` and a decimal stored with 15 or fewer digits pass unchanged; each `sincePriorSession.change` is computed as the exact difference of the two stored values (764.03 against 765.54 is -1.51, not the binary -1.509999999999991) and then published under the same 15-digit rule, so a difference needing more digits (10000000000.01 against 0.00001) is rounded like any other number.');
+  });
+
+  test('live dealer positioning says what each of its three strike counts counts', () => {
+    const { tools, server } = captureRegisteredTools();
+    registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
+    const text = tools.find((t) => t.name === 'get_live_dealer_positioning')!.config.description as string;
+    expect(text).toContain('Three strike counts differ by what they count: `window.strikesUsed` is the strike rows the broker returned, one per strike per expiration; `coverage.strikes` is those rows with at least one leg not known to have zero open interest, the rows that enter the totals; and `strikes.total` is the distinct strikes among them, the strikes the per-strike rows are chosen from (SPY over four expirations on 2026-09-30: 796, 762 and 326).');
   });
 
   test('a structured proxy error reaches the model with its recovery fields', async () => {
@@ -1107,7 +1190,7 @@ describe('MCP tool output schemas', () => {
     for (const name of ['get_live_options_chain', 'get_live_dealer_positioning', 'scan_option_strategies']) {
       expect(text(name), name).toContain('`rateLimit` is the live-broker budget after this call as the proxy reported it: `remaining` of `limit` units, resetting in `resetSeconds`, or null when it reported none; ' + 'an error answered after the live-broker limiter ran carries it as `rateLimit` beside `code`, whether one it charged for (an unlisted expiration, a broker failure) or its own rate-limit refusal, which charges nothing, and one refused before it (the Pro tier gate, a malformed date) carries none.');
     }
-    expect(text('get_live_dealer_positioning')).toContain('Every number goes out at 15 significant digits at most, which drops binary noise such as -27496.350000000002 in a computed sum, mid or ratio, while a decimal the broker printed with 15 or fewer digits and a whole number such as an open-interest count pass unchanged; `coverage.gammaFlipResolution`, a sampling step, at 6.');
+    expect(text('get_live_dealer_positioning')).toContain('Every number goes out at 15 significant digits at most (except `strikes.windowPct` and `strikes.deltaBand`, which echo the value asked for exactly), which drops binary noise such as -27496.350000000002 in a computed sum, mid or ratio, while a decimal the broker printed with 15 or fewer digits and a whole number such as an open-interest count pass unchanged; `coverage.gammaFlipResolution`, a sampling step, at 6.');
   });
 
   test('the live tools name the credential store they read', () => {

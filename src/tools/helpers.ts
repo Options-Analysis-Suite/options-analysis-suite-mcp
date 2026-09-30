@@ -616,7 +616,12 @@ function renderIssuePath(path: unknown): string {
 
 export function toolHandler<T extends Record<string, unknown>>(
   fn: (args: T) => Promise<unknown>,
-  opts?: { isSyncTool?: boolean },
+  /**
+   * keepOnEmpty: fields of an empty result that still say something (a
+   * stock's history state beside no rows) and are kept on the generic
+   * no-data response instead of being dropped.
+   */
+  opts?: { isSyncTool?: boolean; keepOnEmpty?: readonly string[] },
 ): (args: T) => Promise<ToolResult> {
   return async (args: T): Promise<ToolResult> => {
     try {
@@ -668,6 +673,16 @@ export function toolHandler<T extends Record<string, unknown>>(
         const msg = opts?.isSyncTool
           ? 'No data found. Make sure MCP sync is enabled in the platform\'s Account Settings. Data syncs automatically as you use the platform.'
           : 'No data available for this query.';
+        const kept = Object.fromEntries((opts?.keepOnEmpty ?? [])
+          .filter((key) => response[key] !== undefined)
+          .map((key) => [key, response[key]]));
+        if (Object.keys(kept).length > 0) {
+          const json = applyResponseSizeGuard({ dataAvailable: false, data: [], message: msg, ...kept });
+          return {
+            content: [{ type: 'text', text: json }],
+            structuredContent: structuredContentFromJson(json),
+          };
+        }
         return {
           content: [{ type: 'text', text: msg }],
           structuredContent: { dataAvailable: false, data: [], message: msg },

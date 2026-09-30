@@ -24,6 +24,12 @@ export interface DealerPositioningOptions {
   strikeRange?: number;
   /** Every strike within this percent of spot, nearest first, up to the cap. */
   strikeWindowPct?: number;
+  /**
+   * Every strike inside this delta band, nearest spot first, up to the cap:
+   * a call delta from d to 1 - d or a put delta from -(1 - d) to -d on at
+   * least one expiration in the window. Takes the place of strikeWindowPct.
+   */
+  strikeWindowDelta?: number;
 }
 
 const DEFAULT_STRIKE_RANGE = 10;
@@ -193,6 +199,54 @@ export function withinPercent(strike: number, spot: number, pct: number): boolea
   return 100n * distance * 10n ** BigInt(s.scale + p.scale) <= s.n * p.n * 10n ** BigInt(scale);
 }
 
+/** One expiration's published deltas at a strike, as the route sends them. */
+export interface ExpirationDeltas {
+  expiration: string | null;
+  call: number | null;
+  put: number | null;
+}
+
+/** A delta the route sent, kept only inside its side's range (call 0 to 1, put -1 to 0). */
+function readDeltas(value: unknown): ExpirationDeltas[] {
+  const within = (v: unknown, low: number, high: number): number | null => {
+    const n = num(v);
+    return n !== null && n >= low && n <= high ? n : null;
+  };
+  return arr(value).map((entry) => {
+    const raw = record(entry);
+    return { expiration: str(raw.expiration), call: within(raw.call, 0, 1), put: within(raw.put, -1, 0) };
+  });
+}
+
+/**
+ * Whether a strike lies inside the band `d`: on at least one expiration its
+ * call delta is from d to 1 - d, or its put delta from -(1 - d) to -d, ends
+ * included. Either leg qualifies the strike on its own; neither is derived
+ * from the other.
+ *
+ * Decided on the decimals printed: 1 - 0.07 is 0.9299999999999999 in
+ * binary, which would leave a published 0.93 outside a band it closes.
+ */
+export function inDeltaBand(entries: ReadonlyArray<{ expiration?: string | null; call: number | null; put: number | null }>, d: number): boolean {
+  // Every term at one scale, as integers: x, d and 1 exactly.
+  const scaled = (x: number, scale: number) => {
+    const dec = decimalOf(x);
+    return dec.n * 10n ** BigInt(scale - dec.scale);
+  };
+  return entries.some(({ call, put }) => {
+    for (const [value, side] of [[call, 'call'], [put, 'put']] as const) {
+      if (value === null) continue;
+      const scale = Math.max(decimalOf(value).scale, decimalOf(d).scale);
+      const x = scaled(value, scale);
+      const band = scaled(d, scale);
+      const one = 10n ** BigInt(scale);
+      // call: d <= x <= 1 - d.  put: -(1 - d) <= x <= -d.
+      if (side === 'call' ? x >= band && x + band <= one : x + band <= 0n && x + one >= band) return true;
+    }
+    return false;
+  });
+}
+
 /** The `limit` rows nearest `centre`, returned in ascending strike order. */
 function nearestStrikes<T extends { strike: number | null }>(
   rows: T[], centre: number | null, limit: number,
@@ -224,10 +278,15 @@ export function summarizeDealerPositioning(
   response: Record<string, unknown>,
   options: DealerPositioningOptions = {},
 ) {
+  const windowDelta = num(options.strikeWindowDelta);
+  const requestedDeltaBand = windowDelta !== null && windowDelta > 0 && windowDelta < 0.5 ? windowDelta : null;
   const windowPct = num(options.strikeWindowPct);
-  const requestedWindowPct = windowPct !== null && windowPct > 0 && windowPct <= 50 ? windowPct : null;
+  // A delta band takes the place of a percent window (the tool refuses both).
+  const requestedWindowPct = requestedDeltaBand === null && windowPct !== null && windowPct > 0 && windowPct <= 50
+    ? windowPct : null;
   const limit = Math.min(MAX_STRIKE_ROWS, Math.max(1, Math.trunc(
-    num(options.strikeRange) ?? (requestedWindowPct !== null ? MAX_STRIKE_ROWS : DEFAULT_STRIKE_RANGE),
+    num(options.strikeRange)
+      ?? (requestedWindowPct !== null || requestedDeltaBand !== null ? MAX_STRIKE_ROWS : DEFAULT_STRIKE_RANGE),
   )));
   const body = response ?? {};
   const snapshot = record(body.snapshot);
@@ -301,14 +360,21 @@ export function summarizeDealerPositioning(
   // strike in a multi-expiration book before discarding most of them.
   const rows = arr(body.byStrike).map((value) => {
     const row = record(value);
-    return { strike: num(row.strike), row };
+    return { strike: num(row.strike), row, deltas: readDeltas(row.deltasByExpiration) };
   }).filter((row) => row.strike !== null);
-  // A percent window keeps the strikes within it, nearest first up to the
-  // cap; without spot there is no window to take.
-  const candidates = requestedWindowPct !== null && spotPrice !== null
-    ? rows.filter((row) => withinPercent(row.strike as number, spotPrice, requestedWindowPct))
-    : rows;
-  const shapeRow = ({ strike, row }: { strike: number | null; row: Record<string, unknown> }) => {
+  // A window keeps the strikes within it, nearest first up to the cap: a
+  // percent of spot (none without spot) or a delta band.
+  const windowed = requestedDeltaBand !== null || (requestedWindowPct !== null && spotPrice !== null);
+  const candidates = requestedDeltaBand !== null
+    ? rows.filter((row) => inDeltaBand(row.deltas, requestedDeltaBand))
+    : requestedWindowPct !== null && spotPrice !== null
+      ? rows.filter((row) => withinPercent(row.strike as number, spotPrice, requestedWindowPct))
+      : rows;
+  // One expiration has one delta a leg, so a row can carry it; over several
+  // a strike has one per expiration, and no single number is published.
+  const singleExpiration = arr(body.expirations).length === 1;
+  const shapeRow = ({ strike, row, deltas }: { strike: number | null; row: Record<string, unknown>; deltas: ExpirationDeltas[] }) => {
+    const own = singleExpiration && deltas.length === 1 ? deltas[0] : null;
     const raw = record(row.coverage);
     const coverage = { gamma: metricCoverage(raw.gamma), delta: metricCoverage(raw.delta), vega: metricCoverage(raw.vega) };
     const gamma = measuredValue(row.netGamma, coverage.gamma);
@@ -332,6 +398,9 @@ export function summarizeDealerPositioning(
       // Summed over the window's expirations; null when the broker did not
       // publish a size for some leg at this strike.
       callOpenInterest: count(row.callOpenInterest), putOpenInterest: count(row.putOpenInterest),
+      // The broker's per-contract deltas at this strike, only when the window
+      // is one expiration; null when unpublished or over several.
+      callDelta: own?.call ?? null, putDelta: own?.put ?? null,
       status: { netGex: gamma.status, netDex: delta.status, netVega: vega.status },
       // Only when some status is not complete: a complete row's counts add
       // nothing its status does not say, and dropping them is what lets the
@@ -502,7 +571,9 @@ export function summarizeDealerPositioning(
       // within it, which exceeds `returned` when the cap or the size budget
       // cut the window.
       windowPct: requestedWindowPct !== null && spotPrice !== null ? requestedWindowPct : null,
-      inWindow: requestedWindowPct !== null && spotPrice !== null ? candidates.length : null,
+      // With strikeWindowDelta: the band d asked for.
+      deltaBand: requestedDeltaBand,
+      inWindow: windowed ? candidates.length : null,
       limitedBySize: false,
       nearSpot: [] as typeof nearSpot,
       atLevels: [] as typeof atLevels,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { significantDeep, summarizeDealerPositioning, withinPercent } from './dealerPositioningShaping.js';
+import { inDeltaBand, significantDeep, summarizeDealerPositioning, withinPercent } from './dealerPositioningShaping.js';
 import { sanitizeMcpWireOutput, toolHandler } from '../helpers.js';
 
 const coverage = (total = 824, included = total) => ({
@@ -530,6 +530,69 @@ describe('summarizeDealerPositioning', () => {
     }
   });
 
+  it('takes every strike inside a delta band, on any expiration, up to the cap', () => {
+    // Spot 120; call delta falls 0.02 a strike from 0.9 at 100, one expiration.
+    const deltaRow = (k: number, call: number | null, put: number | null) => ({
+      ...strikeRow(k, 10), deltasByExpiration: [{ expiration: '2026-09-18', call, put }],
+    });
+    const byStrike = Array.from({ length: 41 }, (_, i) => {
+      const call = Math.round((0.9 - i * 0.02) * 100) / 100;
+      return deltaRow(100 + i, call > 0 ? call : null, call > 0 ? Math.round((call - 1) * 100) / 100 : null);
+    });
+    // 0.2 to 0.8: strikes 105 (0.8) to 135 (0.2).
+    const shaped = summarizeDealerPositioning(live({ byStrike, expirations: ['2026-09-18'] }), { strikeWindowDelta: 0.2 });
+    expect(shaped.strikes.deltaBand).toBe(0.2);
+    expect(shaped.strikes.windowPct).toBeNull();
+    expect(shaped.strikes.inWindow).toBe(31);
+    expect(shaped.strikes.nearSpot.map((r) => r.strike)).toEqual(Array.from({ length: 31 }, (_, i) => 105 + i));
+    // One expiration: each row carries its deltas.
+    const at = (k: number) => shaped.strikes.nearSpot.find((r) => r.strike === k)!;
+    expect(at(110)).toMatchObject({ callDelta: 0.7, putDelta: -0.3 });
+    // The cap still takes the strikes nearest spot.
+    const capped = summarizeDealerPositioning(live({ byStrike, expirations: ['2026-09-18'] }), { strikeWindowDelta: 0.2, strikeRange: 3 });
+    expect(capped.strikes.nearSpot.map((r) => r.strike)).toEqual([119, 120, 121]);
+    expect(capped.strikes.inWindow).toBe(31);
+    // Without it, no band is reported.
+    expect(summarizeDealerPositioning(live({ byStrike })).strikes).toMatchObject({ deltaBand: null, inWindow: null });
+  });
+
+  it('keeps a strike any expiration prices inside the band, and publishes no single delta over several', () => {
+    const two = (k: number, near: number | null, far: number | null) => ({
+      ...strikeRow(k, 10),
+      deltasByExpiration: [
+        { expiration: '2026-09-18', call: near, put: null },
+        { expiration: '2026-09-25', call: far, put: null },
+      ],
+    });
+    const shaped = summarizeDealerPositioning(live({
+      expirations: ['2026-09-18', '2026-09-25'],
+      byStrike: [
+        two(118, 0.6, 0.55), two(130, 0.05, 0.15), two(140, 0.01, 0.04), strikeRow(125, 10),
+        // Listed on the far expiration only: one entry, still not the window's one delta.
+        { ...strikeRow(121, 10), deltasByExpiration: [{ expiration: '2026-09-25', call: 0.45, put: -0.55 }] },
+      ],
+    }), { strikeWindowDelta: 0.1 });
+    // 130 qualifies on the far expiration; 140 on neither; 125 carries no deltas.
+    expect(shaped.strikes.nearSpot.map((r) => r.strike)).toEqual([118, 121, 130]);
+    expect(shaped.strikes.inWindow).toBe(3);
+    for (const row of shaped.strikes.nearSpot) expect(row).toMatchObject({ callDelta: null, putDelta: null });
+  });
+
+  it('publishes no per-row delta without a delta published, or on a route that sent none', () => {
+    const shaped = summarizeDealerPositioning(live({
+      expirations: ['2026-09-18'],
+      byStrike: [
+        { ...strikeRow(120, 10), deltasByExpiration: [{ expiration: '2026-09-18', call: null, put: -0.5 }] },
+        strikeRow(121, 10),
+        { ...strikeRow(122, 10), deltasByExpiration: [{ expiration: '2026-09-18', call: 'x', put: 7 }] },
+      ],
+    }));
+    const at = (k: number) => shaped.strikes.nearSpot.find((r) => r.strike === k)!;
+    expect(at(120)).toMatchObject({ callDelta: null, putDelta: -0.5 });
+    expect(at(121)).toMatchObject({ callDelta: null, putDelta: null });
+    expect(at(122)).toMatchObject({ callDelta: null, putDelta: null });
+  });
+
   it('decides the window on the decimals, including ones that print in exponent form', () => {
     // String(1e-7) is '1e-7'; 1e-7 percent of 100 is 1e-7.
     expect(withinPercent(100.0000001, 100, 1e-7)).toBe(true);
@@ -683,5 +746,43 @@ describe('gamma flip method disclosure', () => {
       },
     }) as any);
     expect((shaped.coverage as any).gammaFlipMethod).toBe('repriced');
+  });
+});
+
+describe('inDeltaBand', () => {
+  it('a call delta from d to 1-d or a put delta from -(1-d) to -d qualifies, ends included', () => {
+    expect(inDeltaBand([{ expiration: 'x', call: 0.1, put: null }], 0.1)).toBe(true);
+    expect(inDeltaBand([{ expiration: 'x', call: 0.9, put: null }], 0.1)).toBe(true);
+    expect(inDeltaBand([{ expiration: 'x', call: null, put: -0.1 }], 0.1)).toBe(true);
+    expect(inDeltaBand([{ expiration: 'x', call: null, put: -0.9 }], 0.1)).toBe(true);
+    expect(inDeltaBand([{ expiration: 'x', call: 0.09, put: -0.91 }], 0.1)).toBe(false);
+    expect(inDeltaBand([{ expiration: 'x', call: 0.95, put: -0.05 }], 0.1)).toBe(false);
+  });
+
+  it('the far end of the band is compared as the decimals printed, not as 1 - d in binary', () => {
+    // 1 - 0.07 is 0.9299999999999999 in binary, below a printed 0.93.
+    expect(inDeltaBand([{ expiration: 'x', call: 0.93, put: null }], 0.07)).toBe(true);
+    expect(inDeltaBand([{ expiration: 'x', call: null, put: -0.93 }], 0.07)).toBe(true);
+    expect(inDeltaBand([{ expiration: 'x', call: 0.67, put: null }], 0.33)).toBe(true);
+    expect(inDeltaBand([{ expiration: 'x', call: 0.9300001, put: null }], 0.07)).toBe(false);
+  });
+
+  it('either leg qualifies the strike on its own', () => {
+    expect(inDeltaBand([{ expiration: 'x', call: 0.05, put: -0.2 }], 0.1)).toBe(true);
+    expect(inDeltaBand([{ expiration: 'x', call: 0.3, put: -0.97 }], 0.1)).toBe(true);
+  });
+
+  it('a strike qualifies when any one expiration prices it inside the band', () => {
+    const entries = [
+      { expiration: '2026-10-02', call: 0.03, put: -0.97 },
+      { expiration: '2026-11-20', call: 0.18, put: -0.82 },
+    ];
+    expect(inDeltaBand(entries, 0.1)).toBe(true);
+    expect(inDeltaBand(entries, 0.2)).toBe(false);
+  });
+
+  it('no usable delta on any expiration does not qualify', () => {
+    expect(inDeltaBand([], 0.1)).toBe(false);
+    expect(inDeltaBand([{ expiration: 'x', call: null, put: null }], 0.1)).toBe(false);
   });
 });
