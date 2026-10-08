@@ -262,3 +262,43 @@ describe('summarizeSymbolTradingHalts', () => {
     expect(summarized.history).toHaveLength(1);
   });
 });
+
+describe('a halt is active only while it is the symbol\'s latest', () => {
+  // Thirty-third run: LQDA listed as active "Halted" from its 15:31:56 LUDP
+  // pause, beside later halts of its own that resumed at 17:45 and 17:52.
+  // The feed does not update an earlier row, so a later event supersedes it.
+  const halt = (symbol: string, haltTime: string, resumptionTime: string | null) => ({
+    symbol, name: symbol, market: 'NASDAQ', haltTime, haltCode: 'LUDP', haltDescription: 'Volatility Trading Pause',
+    resumptionTime, status: resumptionTime ? 'Resumed' : 'Halted', source: 'NASDAQ',
+  });
+  const feed = [
+    halt('LQDA', '2026-09-30T15:31:56.000Z', null),
+    halt('LQDA', '2026-09-30T17:40:00.000Z', '2026-09-30T17:45:00.000Z'),
+    halt('LQDA', '2026-09-30T17:47:00.000Z', '2026-09-30T17:52:00.000Z'),
+    halt('ABCD', '2026-09-30T17:00:00.000Z', '2026-09-30T17:05:00.000Z'),
+    halt('ABCD', '2026-09-30T18:00:00.000Z', null),
+  ];
+
+  it('the market summary lists a symbol as halted only when its latest halt has not resumed', () => {
+    const out = summarizeTradingHalts({ halts: feed }, '2026-09-30T20:00:00.000Z') as any;
+    expect(out.activeHalts.map((h: any) => h.symbol)).toEqual(['ABCD']);
+    expect(out.summary.activeHalts).toBe(1);
+  });
+
+  it('a resumed row for the same halt time wins over the row still reading Halted', () => {
+    const out = summarizeTradingHalts({ halts: [
+      halt('WXYZ', '2026-09-30T16:00:00.000Z', null),
+      halt('WXYZ', '2026-09-30T16:00:00.000Z', '2026-09-30T16:05:00.000Z'),
+    ] }, '2026-09-30T20:00:00.000Z') as any;
+    expect(out.activeHalts).toEqual([]);
+  });
+
+  it('the symbol history says the same', () => {
+    const out = summarizeSymbolTradingHalts({ symbol: 'LQDA', history: feed.filter((h) => h.symbol === 'LQDA') }) as any;
+    expect(out.summary.currentlyHalted).toBe(false);
+    expect(out.activeHalt).toBeNull();
+    const still = summarizeSymbolTradingHalts({ symbol: 'ABCD', history: feed.filter((h) => h.symbol === 'ABCD') }) as any;
+    expect(still.summary.currentlyHalted).toBe(true);
+    expect(still.activeHalt.haltTime).toBe('2026-09-30T18:00:00.000Z');
+  });
+});

@@ -271,3 +271,23 @@ describe('regime fit output survives the shared wire sanitizer', () => {
     expectSanitizerLeavesIntact(shaped);
   });
 });
+
+describe('regime fits name the parameters a fit left on an optimizer bound', () => {
+  // SPY 2026-09-29: Kou p 0.05 and eta1 30, Bates muJ -0.6 and sigmaJ 0.05,
+  // each exactly a bound, with nothing saying so.
+  it('publishes the latest fit\'s paramsAtBounds, and null where the fit did not record it', () => {
+    const out = summarizeRegimeFits({
+      symbol: 'SPY',
+      data: [
+        { market_date: '2026-09-29', model_name: 'kou', model_version: 'v1.0', params: { p: 0.05, eta1: 30 }, fit_error: { iv_rmse: 0.02, is_fallback: false }, params_at_bounds: ['p', 'eta1'] },
+        { market_date: '2026-09-28', model_name: 'kou', model_version: 'v1.0', params: { p: 0.3, eta1: 12 }, fit_error: { iv_rmse: 0.03, is_fallback: false }, params_at_bounds: [] },
+        { market_date: '2026-09-29', model_name: 'merton', model_version: 'v1.0', params: { lambda: 1 }, fit_error: { iv_rmse: 0.02, is_fallback: false } },
+        { market_date: '2026-09-29', model_name: 'bates', model_version: 'v1.0', params: { muJ: -0.6 }, fit_error: { iv_rmse: 0.02, is_fallback: false }, params_at_bounds: 'not-a-list' },
+      ],
+    } as any) as any;
+    const model = (name: string) => out.models.find((m: any) => m.model === name);
+    expect(model('kou').paramsAtBounds).toEqual(['p', 'eta1']);
+    expect(model('merton').paramsAtBounds).toBeNull();
+    expect(model('bates').paramsAtBounds).toBeNull();
+  });
+});

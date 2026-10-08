@@ -1052,7 +1052,7 @@ function makeRecord() {
         totalCalibrations: 0,
         executionTimeMs: 358646.55,
         errorCount: 1,
-        engineVersion: '2.0.6',
+        engineVersion: '2.0.8',
         completionState: 'partial',
         modelExclusionCount: 0,
         includedModelExclusionCount: 0,
@@ -1243,7 +1243,7 @@ describe('shapeComputeRunRecord', () => {
 
     expect(shaped.runKey).toBeUndefined();
     expect(shaped.summary.totalModelRuns).toBe(24);
-    expect(shaped.engineVersion).toBe('2.0.6');
+    expect(shaped.engineVersion).toBe('2.0.8');
     expect(shaped.summary.engineVersion).toBeUndefined();
     expect(shaped.errors).toEqual([{ model: 'PDE', message: 'slow' }]);
     expect(JSON.stringify(shaped)).not.toContain('debug-worker');
@@ -1400,10 +1400,10 @@ describe('shapeComputeRunRecord', () => {
     });
   });
 
-  test('preserves valid exact 2.0.6 JD/VG pairs and the MC-JD null in compact shaping', () => {
+  test('preserves valid exact 2.0.8 JD/VG pairs and the MC-JD null in compact shaping', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.6';
+    record.data.summary.engineVersion = '2.0.8';
     record.positions[0].models.JumpDiffusion = calibrationModel(
       72,
       exactCalibrationSemantics('unified-jump-selection-v1'),
@@ -1429,10 +1429,10 @@ describe('shapeComputeRunRecord', () => {
     expect(models['Monte Carlo - Jump Diffusion'].calibrationSummary.confidenceSemantics).toBeUndefined();
   });
 
-  test('withholds every malformed strict 2.0.6 JD/VG/MC-JD confidence fact in compact shaping', () => {
+  test('withholds every malformed strict 2.0.8 JD/VG/MC-JD confidence fact in compact shaping', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.6';
+    record.data.summary.engineVersion = '2.0.8';
     record.positions[0].models.JumpDiffusion = calibrationModel(72);
     record.positions[0].models.VarianceGamma = calibrationModel(
       83,
@@ -1463,7 +1463,7 @@ describe('shapeComputeRunRecord', () => {
     (_field, mutation) => {
       const record: any = makeRecord();
       record.data.runSchemaVersion = 2;
-      record.data.summary.engineVersion = '2.0.6';
+      record.data.summary.engineVersion = '2.0.8';
       const semantics = {
         ...exactCalibrationSemantics('unified-jump-selection-v1'),
         ...mutation,
@@ -1504,11 +1504,11 @@ describe('shapeComputeRunRecord', () => {
     ['Variance Gamma', 83, exactCalibrationSemantics('variance-gamma-quality-v1')],
     ['Monte Carlo - Jump Diffusion', 64, undefined],
   ] as const)(
-    'withholds strict 2.0.6 confidence facts from raw exact display model id %s in compact shaping',
+    'withholds strict 2.0.8 confidence facts from raw exact display model id %s in compact shaping',
     (displayModelId, confidence, semantics) => {
       const record: any = makeRecord();
       record.data.runSchemaVersion = 2;
-      record.data.summary.engineVersion = '2.0.6';
+      record.data.summary.engineVersion = '2.0.8';
       record.positions[0].models = {
         [displayModelId]: calibrationModel(confidence, semantics),
       };
@@ -1718,7 +1718,7 @@ describe('shapeComputeRunRecord', () => {
       syncSchemaVersion: 2,
       runSchemaVersion: 2,
       summary: {
-        engineVersion: '2.0.6',
+        engineVersion: '2.0.8',
         inputHash: 'a'.repeat(64),
       },
       portfolioAggregates: { exclusions: aggregate },
@@ -1980,7 +1980,7 @@ describe('shapeComputeRunRecord', () => {
       modelExclusionsTruncated: true,
     }), {
       totalPositions: 2,
-      engineVersion: '2.0.6',
+      engineVersion: '2.0.8',
       inputHash: 'b'.repeat(64),
     });
 
@@ -2216,7 +2216,7 @@ describe('shapeComputeRunRecord', () => {
         syncSchemaVersion: 2,
         runSchemaVersion: 2,
         summary: {
-          engineVersion: '2.0.6',
+          engineVersion: '2.0.8',
           inputHash: 'c'.repeat(64),
           totalPositions: 1,
           totalModelRuns: 2,
@@ -2529,10 +2529,10 @@ describe('sanitizeComputeRunsWireOutput', () => {
     });
   });
 
-  test('preserves valid exact 2.0.6 JD/VG pairs and MC-JD null in full-mode sanitization', () => {
+  test('preserves valid exact 2.0.8 JD/VG pairs and MC-JD null in full-mode sanitization', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.6';
+    record.data.summary.engineVersion = '2.0.8';
     record.positions[0].models.JumpDiffusion = calibrationModel(
       72,
       exactCalibrationSemantics('unified-jump-selection-v1'),
@@ -2583,10 +2583,10 @@ describe('sanitizeComputeRunsWireOutput', () => {
     },
   );
 
-  test('withholds malformed strict 2.0.6 JD/VG/MC-JD facts in full-mode sanitization', () => {
+  test('withholds malformed strict 2.0.8 JD/VG/MC-JD facts in full-mode sanitization', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.6';
+    record.data.summary.engineVersion = '2.0.8';
     record.positions[0].models.JumpDiffusion = calibrationModel(72);
     record.positions[0].models.VarianceGamma = calibrationModel(
       83,
@@ -2618,7 +2618,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
     (_field, mutation) => {
       const record: any = makeRecord();
       record.data.runSchemaVersion = 2;
-      record.data.summary.engineVersion = '2.0.6';
+      record.data.summary.engineVersion = '2.0.8';
       record.positions[0].models = {
         JumpDiffusion: calibrationModel(72, {
           ...exactCalibrationSemantics('unified-jump-selection-v1'),
@@ -2638,7 +2638,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
   test('withholds strict MC-JD null confidence when orphan semantics are present', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.6';
+    record.data.summary.engineVersion = '2.0.8';
     record.positions[0].models = {
       'MonteCarlo-JumpDiffusion': calibrationModel(
         null,
@@ -2660,11 +2660,11 @@ describe('sanitizeComputeRunsWireOutput', () => {
     ['Variance Gamma', 83, exactCalibrationSemantics('variance-gamma-quality-v1')],
     ['Monte Carlo - Jump Diffusion', 64, undefined],
   ] as const)(
-    'withholds strict 2.0.6 confidence facts from raw exact display model id %s in full mode',
+    'withholds strict 2.0.8 confidence facts from raw exact display model id %s in full mode',
     (displayModelId, confidence, semantics) => {
       const record: any = makeRecord();
       record.data.runSchemaVersion = 2;
-      record.data.summary.engineVersion = '2.0.6';
+      record.data.summary.engineVersion = '2.0.8';
       record.positions[0].models = {
         [displayModelId]: calibrationModel(confidence, semantics),
       };
@@ -2681,7 +2681,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
   test('preserves valid strict JD/VG facts when full-mode sanitization repeats on the same row', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.6';
+    record.data.summary.engineVersion = '2.0.8';
     record.positions[0].models = {
       JumpDiffusion: calibrationModel(
         72,
@@ -2711,7 +2711,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
   test('does not transfer display-id trust when a sanitized row receives a replacement models map', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.6';
+    record.data.summary.engineVersion = '2.0.8';
     record.positions[0].models = {
       JumpDiffusion: calibrationModel(
         72,
@@ -2751,7 +2751,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
   test('applies enclosing strictness to data.positions even when an empty top-level positions array shadows it', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.6';
+    record.data.summary.engineVersion = '2.0.8';
     record.positions = [];
     record.data.positions = [{
       models: {
@@ -2771,7 +2771,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
   test('propagates enclosing strictness to every nested models map in full output', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.6';
+    record.data.summary.engineVersion = '2.0.8';
     record.data.shadow = {
       nested: {
         models: {
@@ -2811,7 +2811,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
     (_shape, model, confidence, confidenceSemantics) => {
       const record: any = makeRecord();
       record.data.runSchemaVersion = 2;
-      record.data.summary.engineVersion = '2.0.6';
+      record.data.summary.engineVersion = '2.0.8';
       record.data.calibrationOutcomes = [{
         model,
         detail: calibrationModel(confidence, confidenceSemantics).calibration,
@@ -2829,7 +2829,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
   test('preserves a valid canonical strict calibrationOutcome pair across repeated full sanitization', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.6';
+    record.data.summary.engineVersion = '2.0.8';
     record.data.calibrationOutcomes = [{
       model: 'JumpDiffusion',
       detail: calibrationModel(
@@ -2851,7 +2851,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
   test('default-denies unbound calibration confidence and injected calibrationSummary confidence in strict rows', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.6';
+    record.data.summary.engineVersion = '2.0.8';
     record.data.shadow = {
       calibration: calibrationModel(
         72,
@@ -2881,7 +2881,7 @@ describe('sanitizeComputeRunsWireOutput', () => {
   test('lets an invalid unbound alias win when it shares a calibration object with a valid model context', () => {
     const record: any = makeRecord();
     record.data.runSchemaVersion = 2;
-    record.data.summary.engineVersion = '2.0.6';
+    record.data.summary.engineVersion = '2.0.8';
     const sharedCalibration = calibrationModel(
       72,
       exactCalibrationSemantics('unified-jump-selection-v1'),
@@ -3703,7 +3703,7 @@ describe('summarizeComputeRunsResponse', () => {
         errorCount: 12,
         includedErrorCount: 8,
         errorsTruncated: true,
-        engineVersion: '2.0.6',
+        engineVersion: '2.0.8',
         completionState: 'partial',
         valuationTime: 1774771100000,
         executionConfig: {
@@ -3744,7 +3744,7 @@ describe('summarizeComputeRunsResponse', () => {
     expect(shaped.summary.errorCount).toBe(12);
     expect(shaped.summary.includedErrorCount).toBe(8);
     expect(shaped.summary.errorsTruncated).toBe(true);
-    expect(shaped.engineVersion).toBe('2.0.6');
+    expect(shaped.engineVersion).toBe('2.0.8');
     expect(shaped.runSchemaVersion).toBe(2);
     expect(shaped.completionState).toBe('partial');
     expect(shaped.valuationTime).toBe(1774771100000);

@@ -17,7 +17,7 @@
  * measurement of the whole book.
  */
 
-import { MAX_RESPONSE_BYTES } from '../helpers.js';
+import { MAX_RESPONSE_BYTES, significant } from '../helpers.js';
 
 export interface DealerPositioningOptions {
   /** Total per-strike rows kept nearest spot (the cap, with strikeWindowPct). */
@@ -51,12 +51,12 @@ const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 const record = (v: unknown): Record<string, unknown> =>
   v !== null && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {};
 /** A YYYY-MM-DD string that names a real calendar day (not 2026-02-30). */
-const isoDate = (v: unknown): string | null => {
+export const isoDate = (v: unknown): string | null => {
   if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
   const parsed = new Date(`${v}T00:00:00Z`);
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === v ? v : null;
 };
-const exDividend = (v: unknown): { date: string; amount: number | null; declared: boolean } | null => {
+export const exDividend = (v: unknown): { date: string; amount: number | null; declared: boolean } | null => {
   const raw = record(v);
   const date = isoDate(raw.date);
   return date === null ? null : { date, amount: num(raw.amount), declared: raw.declared === true };
@@ -85,31 +85,9 @@ export function metricCoverage(value: unknown): MetricCoverage {
   return { total, included, status };
 }
 
-/**
- * A computed number at 15 significant digits, the most a double carries for
- * every decimal: a sum of published Greeks times open interest comes out of
- * binary arithmetic as -27496.350000000002, and this drops that noise. A
- * whole number has none and passes exactly: an open-interest count of
- * 1000000000000001 is not 1e15, and the largest double is not Infinity.
- */
-export function significant(value: number, digits = 15): number {
-  return Number.isInteger(value) ? value : Number(value.toPrecision(digits));
-}
-
-/**
- * Every number in a published payload through significant(): the live tools'
- * one rounding, so a ratio, mid or spread computed anywhere upstream goes out
- * at 15 significant digits at most. A decimal printed with 15 or fewer
- * digits, and a whole number, pass unchanged; nothing but numbers changes.
- */
-export function significantDeep<T>(value: T): T {
-  if (typeof value === 'number') return significant(value) as T;
-  if (Array.isArray(value)) return value.map(significantDeep) as T;
-  if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, significantDeep(entry)])) as T;
-  }
-  return value;
-}
+// The one rounding every tool's answer goes through, kept in helpers so the
+// shared tool handler applies it; re-exported here for this tool's callers.
+export { significant, significantDeep } from '../helpers.js';
 
 /**
  * The flip search's price step, which describes how finely it sampled and
@@ -493,6 +471,22 @@ export function summarizeDealerPositioning(
   if (Object.values(fields).some((field) => field.status === 'unavailable')) {
     limitations.push('Some reported totals are missing or invalid despite available input coverage.');
   }
+  // A spot that printed before the last session's open (Public's 04:00
+  // snapshot) skews everything read against it; resolved.S carries the flag,
+  // and this says what it touches.
+  if (record(record(body.resolved).S).stale === true) {
+    limitations.push("The spot printed before the last session's open (resolved.S.asOf, the broker's own time), so the levels' distances from spot, the at-the-money straddles and the split at spot are read against a stale price.");
+  }
+  // The expirations whose open interest the broker did not publish: a window
+  // of null levels says why, rather than reading as a thin book.
+  const unpublished = arr(body.openInterestUnpublishedExpirations).map(isoDate).filter((date): date is string => date !== null);
+  if (unpublished.length > 0) {
+    const named = unpublished.length === 1 ? unpublished[0]
+      : `${unpublished.slice(0, -1).join(', ')} and ${unpublished[unpublished.length - 1]}`;
+    limitations.push(unpublished.length === 1
+      ? `The broker published no open interest for ${named} (a zero on every contract, as Schwab prints on index options), so its legs are excluded and a level it feeds is withheld for incomplete coverage (\`levelStatus\` says which); the expected move is priced from quotes and is unaffected.`
+      : `The broker published no open interest for ${named} (a zero on every contract, as Schwab prints on index options), so their legs are excluded and a level they feed is withheld for incomplete coverage (\`levelStatus\` says which); the expected moves are priced from quotes and are unaffected.`);
+  }
 
   const shaped = {
     symbol: str(body.symbol),
@@ -535,6 +529,7 @@ export function summarizeDealerPositioning(
         ? body.expirationSelection : null,
       expirationsAvailable: num(body.expirationsAvailable),
       strikesUsed: num(body.strikesUsed),
+      ...(unpublished.length > 0 ? { openInterestUnpublishedExpirations: unpublished } : {}),
     },
 
     byExpiration,

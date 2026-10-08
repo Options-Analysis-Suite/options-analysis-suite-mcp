@@ -691,6 +691,33 @@ describe('gamma flip method disclosure', () => {
     expect(shaped.limitations.join(' ')).toMatch(/does not prove/);
   });
 
+  it('names the expirations whose open interest the broker did not publish, says why the levels are withheld, and reports no flip search that never ran', () => {
+    // All-broker live run: Schwab's SPX window, 0 of 1,868 legs, every level
+    // null and a "not-found" flip over a search that never ran.
+    const shaped = summarizeDealerPositioning(live({
+      expirations: ['2026-10-05', '2026-10-06'],
+      openInterestUnpublishedExpirations: ['2026-10-05', '2026-10-06'],
+      coverage: { ...coverage(), gamma: { total: 1868, included: 0 }, gammaFlip: { total: 1868, included: 0 }, gammaFlipSearchStatus: undefined },
+      snapshot: { spotPrice: 7722.72, netGamma: 0, gammaFlip: null, topStrikes: [] },
+    }) as any);
+    expect(shaped.window.openInterestUnpublishedExpirations).toEqual(['2026-10-05', '2026-10-06']);
+    expect(shaped.coverage.gammaFlipSearchStatus).toBeNull();
+    expect(shaped.limitations.join(' ')).toContain('The broker published no open interest for 2026-10-05 and 2026-10-06 (a zero on every contract, as Schwab prints on index options), so their legs are excluded and a level they feed is withheld for incomplete coverage (`levelStatus` says which); the expected moves are priced from quotes and are unaffected.');
+    const plain = summarizeDealerPositioning(live({}) as any);
+    expect(plain.window.openInterestUnpublishedExpirations).toBeUndefined();
+    expect(plain.limitations.join(' ')).not.toContain('published no open interest');
+  });
+
+  it('says what a stale spot skews when the broker\'s spot printed before the last session\'s open, and nothing otherwise', () => {
+    // Broker re-run: Public's 03:59 print put the at-the-money pair and the
+    // straddles three points low; only resolved.S carried the flag.
+    const stale = summarizeDealerPositioning(live({ resolved: { S: { value: 767.22, source: 'broker-public', asOf: '2026-10-02T07:59:57.000Z', stale: true } } }) as any);
+    expect(stale.limitations).toContain("The spot printed before the last session's open (resolved.S.asOf, the broker's own time), so the levels' distances from spot, the at-the-money straddles and the split at spot are read against a stale price.");
+    const fresh = summarizeDealerPositioning(live({ resolved: { S: { value: 769.64, source: 'broker-tradier', asOf: '2026-10-03T00:00:00.004Z', stale: false } } }) as any);
+    expect(fresh.limitations.join(' ')).not.toContain('stale price');
+    expect(summarizeDealerPositioning(live({}) as any).limitations.join(' ')).not.toContain('stale price');
+  });
+
   it('distinguishes an unresolved search from a measured absence of a crossing', () => {
     const shaped = summarizeDealerPositioning(live({
       coverage: { ...coverage(), gammaFlipSearchStatus: 'unresolved', gammaFlipResolution: null },

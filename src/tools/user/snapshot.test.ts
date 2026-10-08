@@ -269,3 +269,53 @@ describe('get_snapshot — full mode returns less-summarized payload', () => {
     expect(result.content[0].text).not.toContain('position_contributions');
   });
 });
+
+describe('get_snapshot - strategy definitions', () => {
+  const row = (over: Record<string, unknown> = {}) => ({
+    id: 7, user_id: 1, strategy_key: 'a'.repeat(64), symbol: 'SPY', label: 'Bull call spread', timestamp: 1_760_000_100_000, created_at: '2026-10-02T00:00:00Z',
+    data: {
+      schemaVersion: 1, strategyKey: 'a'.repeat(64), symbol: 'SPY', label: 'Bull call spread',
+      legs: [{ type: 'call', side: 'long', quantity: 1, strike: 500, expiration: '2026-10-17', expiryYears: null, premium: 8.1, premiumSource: 'market', iv: 0.18, ivSource: 'chain' }],
+      inputs: { spot: 503.1, spotSource: 'live', rate: 0.04, dividendYield: 0.012, volatilityMode: 'chain', model: 'Black-Scholes' },
+      builtAt: 1_760_000_000_000, updatedAt: 1_760_000_100_000,
+    },
+    ...over,
+  });
+
+  test('routes to the strategy type with the symbol and limit, and publishes each definition with the note', async () => {
+    const { calls, handler } = createHarness({ data: [row()], count: 1 });
+    const result = await handler({ type: 'strategy', symbol: 'spy', limit: 5 });
+    expect(result.isError).not.toBe(true);
+    expect(calls[0]).toEqual({ path: '/sync/analysis-data', params: { type: 'strategy', symbol: 'SPY', limit: '5' } });
+    const wire = JSON.parse(result.content[0].text);
+    expect(wire.count).toBe(1);
+    expect(wire.data[0]).toEqual({
+      strategyKey: 'a'.repeat(64), symbol: 'SPY', label: 'Bull call spread',
+      legs: [{ type: 'call', side: 'long', quantity: 1, strike: 500, expiration: '2026-10-17', expiryYears: null, premium: 8.1, premiumSource: 'market', iv: 0.18, ivSource: 'chain' }],
+      inputs: { spot: 503.1, spotSource: 'live', rate: 0.04, dividendYield: 0.012, volatilityMode: 'chain', model: 'Black-Scholes' },
+      builtAt: new Date(1_760_000_000_000).toISOString(), updatedAt: new Date(1_760_000_100_000).toISOString(),
+    });
+    expect(wire.note).toContain('compute_scenario');
+    expect(wire.note).toContain('strategyKey');
+    expect(wire.data[0].id).toBeUndefined();
+    expect(wire.data[0].userId).toBeUndefined();
+  });
+
+  test('without a symbol, every record comes back; full keeps the sanitized rows', async () => {
+    const { calls, handler } = createHarness({ data: [row(), row({ id: 8, symbol: 'QQQ', strategy_key: 'b'.repeat(64) })], count: 2 });
+    const result = await handler({ type: 'strategy', limit: 3, full: true });
+    expect(calls[0].params).toEqual({ type: 'strategy', limit: '3' });
+    const wire = JSON.parse(result.content[0].text);
+    expect(wire.data).toHaveLength(2);
+    expect(wire.data[0].user_id).toBeUndefined();
+    expect(wire.data[0].data.legs).toHaveLength(1);
+  });
+
+  test('an empty list says there is nothing sent yet, with how to send one', async () => {
+    const { handler } = createHarness({ data: [], count: 0 });
+    const result = await handler({ type: 'strategy' });
+    const wire = JSON.parse(result.content[0].text);
+    expect(wire.data).toEqual([]);
+    expect(wire.note).toContain('Send to assistant');
+  });
+});

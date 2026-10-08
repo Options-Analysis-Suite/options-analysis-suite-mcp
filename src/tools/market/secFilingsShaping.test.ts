@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { shapeSecFilingsResponse } from './secFilingsShaping.js';
+import { shapeDealFlags, shapeMnaFilings, shapeSecFilingsResponse } from './secFilingsShaping.js';
 
 describe('shapeSecFilingsResponse', () => {
   it('builds category summaries and preserves the most recent filing list', () => {
@@ -72,5 +72,44 @@ describe('shapeSecFilingsResponse', () => {
     expect(shaped.recentFilings).toEqual([]);
     expect(shaped.latestByFilingCategory).toEqual({});
     expect(String(shaped._filings_note)).toContain('Could not find CIK');
+  });
+});
+
+describe('shapeDealFlags / shapeMnaFilings', () => {
+  const S4 = {
+    form: 'S-4', kind: 'merger', label: 'Merger filing', dateFiled: '2026-10-02', accession: '0001104659-26-113346',
+    url: 'https://www.sec.gov/Archives/edgar/data/1538263/000110465926113346/0001104659-26-113346-index.htm',
+    counterparties: [{ cik: 1538263, name: 'HomeTrust Bancshares, Inc.', tickers: ['HTB'] }], expiresOn: '2027-01-30',
+  };
+
+  it('names each flag by what it is, with its link, counterparties and lapse day, and the index date', () => {
+    const out = shapeDealFlags({ asOf: '2026-10-02', flags: { merger: S4, offering: null } });
+    expect(out).toEqual({
+      dealFlags: {
+        merger: {
+          label: 'Merger filing', formType: 'S-4', filingDate: '2026-10-02', accessionNumber: '0001104659-26-113346', url: S4.url,
+          counterparties: [{ name: 'HomeTrust Bancshares, Inc.', tickers: ['HTB'], cik: 1538263 }], flagUntil: '2027-01-30',
+        },
+        offering: null,
+        windows: expect.stringContaining('within 120 days'),
+        indexThrough: '2026-10-02',
+      },
+    });
+    expect(String((out.dealFlags as any).windows)).toContain('may register debt as well as stock');
+  });
+
+  it('no filer on record (a fund) and a failed read each leave a note, never a guess', () => {
+    expect(shapeDealFlags(null)).toEqual({ dealFlags: null, dealFlagsNote: expect.stringContaining('not in the company filer map') });
+    expect(shapeDealFlags({ asOf: 'x' }, true)).toEqual({ dealFlags: null, dealFlagsNote: expect.stringContaining('unavailable') });
+  });
+
+  it('the market list keeps `limit` filings and says when it trimmed; an empty window says so', () => {
+    const deal = (i: number) => ({ label: 'Merger filing', form: '425', dateFiled: '2026-10-02', accession: `a${i}`, url: `u${i}`, parties: [{ cik: i, name: `Co ${i}`, tickers: [] }] });
+    const out = shapeMnaFilings({ days: 30, asOf: '2026-10-02', total: 386, deals: Array.from({ length: 200 }, (_, i) => deal(i)) }, 10);
+    expect(out).toMatchObject({ scope: 'market', days: 30, indexThrough: '2026-10-02', totalFilings: 386, filingsMeta: { showing: 10, total: 386, truncated: true } });
+    expect((out.filings as any[])[0]).toEqual({ label: 'Merger filing', formType: '425', filingDate: '2026-10-02', accessionNumber: 'a0', url: 'u0', parties: [{ name: 'Co 0', tickers: [], cik: 0 }] });
+    const all = shapeMnaFilings({ days: 7, asOf: '2026-10-02', total: 2, deals: [deal(1), deal(2)] }, 10);
+    expect(all.filingsMeta).toBeUndefined();
+    expect(shapeMnaFilings({ days: 7, asOf: null, total: 0, deals: [] }, 10)).toMatchObject({ totalFilings: 0, filings: [], filingsNote: expect.stringContaining('No merger') });
   });
 });

@@ -327,3 +327,35 @@ describe('shaper output survives the shared wire sanitizer', () => {
     expectSanitizerLeavesIntact(shaped);
   });
 });
+
+describe('summarizeMetricsBatch ranking', () => {
+  const rows = [
+    { symbol: 'SPY', date: '2026-09-09', atmIv: 0.14, hv20d: 0.10, hv60d: 0.12, ivRank: 20, totalOi: 100, netGex: 5e9, spotPrice: 650, netDex: -1e9, ivSkew25d: 0.03 },
+    { symbol: 'QQQ', date: '2026-09-09', atmIv: 0.19, hv20d: 0.17, hv60d: null, ivRank: 55, totalOi: 80, netGex: -2e9, spotPrice: 560, netDex: 2e9, ivSkew25d: 0.04 },
+    { symbol: 'IWM', date: '2026-09-09', atmIv: 0.22, hv20d: 0.15, hv60d: 0.16, ivRank: null, totalOi: 60, netGex: 1e9, spotPrice: 220, netDex: 0, ivSkew25d: null },
+  ];
+
+  it('carries spot, the exposures, the skew and the IV minus realized spreads on every row', () => {
+    const shaped: any = summarizeMetricsBatch({ data: rows }, ['SPY', 'QQQ', 'IWM']);
+    expect(shaped.metrics[0]).toMatchObject({ symbol: 'SPY', spotPrice: 650, netGex: 5e9, netDex: -1e9, ivSkew25d: 0.03, ivMinusHv20d: 0.04, ivMinusHv60d: 0.02 });
+    expect(shaped.metrics[1].ivMinusHv60d).toBeNull();
+    expect(shaped.metrics[2].ivSkew25d).toBeNull();
+    expect(shaped.rankMeta).toBeUndefined();
+  });
+
+  it('ranks the rows by the metric asked for, descending by default, with a null metric last and counted', () => {
+    const shaped: any = summarizeMetricsBatch({ data: rows }, ['SPY', 'QQQ', 'IWM'], { rankBy: 'ivRank' });
+    expect(shaped.metrics.map((r: any) => r.symbol)).toEqual(['QQQ', 'SPY', 'IWM']);
+    expect(shaped.rankMeta).toEqual({ rankBy: 'ivRank', order: 'desc', ranked: 2, unranked: 1, unrankedSymbols: ['IWM'] });
+    const asc: any = summarizeMetricsBatch({ data: rows }, ['SPY', 'QQQ', 'IWM'], { rankBy: 'ivMinusHv20d', order: 'asc' });
+    expect(asc.metrics.map((r: any) => r.symbol)).toEqual(['QQQ', 'SPY', 'IWM']);
+    expect(asc.rankMeta.order).toBe('asc');
+    const gex: any = summarizeMetricsBatch({ data: rows }, ['SPY', 'QQQ', 'IWM'], { rankBy: 'netGex' });
+    expect(gex.metrics.map((r: any) => r.symbol)).toEqual(['SPY', 'IWM', 'QQQ']);
+  });
+
+  it('keeps the request order when nothing is asked to rank by', () => {
+    const shaped: any = summarizeMetricsBatch({ data: rows }, ['IWM', 'SPY', 'QQQ']);
+    expect(shaped.metrics.map((r: any) => r.symbol)).toEqual(['IWM', 'SPY', 'QQQ']);
+  });
+});

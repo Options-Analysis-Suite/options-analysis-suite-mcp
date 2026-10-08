@@ -135,6 +135,10 @@ export function modelBackendId(modelName: unknown): unknown {
   if (typeof modelName !== 'string') return modelName;
   const trimmed = modelName.trim();
   if (!trimmed) return modelName;
+  // "Jump Diffusion (Merton)", as an analysis record is labeled, filters as
+  // the stored JumpDiffusion.
+  const jumpLabeled = /^(.*\S)\s*\((?:Merton|Kou|Bates|Variance Gamma)\)$/i.exec(trimmed);
+  if (jumpLabeled && modelBackendId(jumpLabeled[1]) === 'JumpDiffusion') return 'JumpDiffusion';
   return MODEL_BACKEND_IDS[trimmed] ?? NORMALIZED_MODEL_BACKEND_IDS[normalizeModelLookupKey(trimmed)] ?? trimmed;
 }
 

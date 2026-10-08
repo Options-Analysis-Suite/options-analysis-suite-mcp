@@ -34,9 +34,15 @@ describe('LiveApiClient', () => {
       return new LiveApiClient('https://proxy.example.com', { getAccessToken: async () => 'DUMMY_TOKEN' });
     };
     const seen: unknown[] = [];
-    await withHeaders(200, { 'RateLimit-Limit': '10', 'RateLimit-Remaining': '8', 'RateLimit-Reset': '43', 'X-RateLimit-Scope': 'live-broker' })
+    await withHeaders(200, { 'RateLimit-Limit': '120', 'RateLimit-Remaining': '111', 'RateLimit-Reset': '43', 'X-RateLimit-Scope': 'live-broker', 'X-RateLimit-Provider': 'tradier' })
       .get('/live/strategy-scan/SPY', {}, (r) => seen.push(r));
-    expect(seen).toEqual([{ limit: 10, remaining: 8, resetSeconds: 43 }]);
+    expect(seen).toEqual([{ limit: 120, remaining: 111, resetSeconds: 43, provider: 'tradier' }]);
+    // The provider is named by the limiter's own header; without it the
+    // budget is still a budget, with the broker unknown.
+    const unnamed: unknown[] = [];
+    await withHeaders(200, { 'RateLimit-Limit': '120', 'RateLimit-Remaining': '111', 'RateLimit-Reset': '43', 'X-RateLimit-Scope': 'live-broker' })
+      .get('/live/strategy-scan/SPY', {}, (r) => unnamed.push(r));
+    expect(unnamed).toEqual([{ limit: 120, remaining: 111, resetSeconds: 43, provider: null }]);
     // Missing or malformed headers report nothing rather than a guess, and
     // so do the global limiter's (300 a minute), which lack the live scope.
     for (const headers of [{}, { 'RateLimit-Limit': '300', 'RateLimit-Remaining': '299', 'RateLimit-Reset': '60' }, { 'RateLimit-Limit': '10', 'RateLimit-Remaining': 'x', 'RateLimit-Reset': '43' }, { 'RateLimit-Limit': '10', 'RateLimit-Remaining': '-1', 'RateLimit-Reset': '43' }] as Array<Record<string, string>>) {
@@ -65,16 +71,16 @@ describe('LiveApiClient', () => {
     const unlisted = { error: 'Expiration 2026-09-19 is not listed for SPY', code: 'UNKNOWN_EXPIRATION', retryable: false, availableExpirations: ['2026-09-18'] };
     const err = await caught(answer(400, unlisted, budget).get('/live/exposure/SPY', {}, () => {}));
     expect(err).toBeInstanceOf(LiveApiError);
-    expect(err.details).toEqual({ availableExpirations: ['2026-09-18'], rateLimit: { limit: 10, remaining: 8, resetSeconds: 60 } });
+    expect(err.details).toEqual({ availableExpirations: ['2026-09-18'], rateLimit: { limit: 10, remaining: 8, resetSeconds: 60, provider: null } });
     // Through the tool handler: in structuredContent and in the text.
     const result = await toolHandler(async () => answer(400, unlisted, budget).get('/live/exposure/SPY', {}, () => {}))({});
-    expect((result.structuredContent as any).rateLimit).toEqual({ limit: 10, remaining: 8, resetSeconds: 60 });
-    expect(result.content[0].text).toContain('rateLimit: {"limit":10,"remaining":8,"resetSeconds":60}.');
+    expect((result.structuredContent as any).rateLimit).toEqual({ limit: 10, remaining: 8, resetSeconds: 60, provider: null });
+    expect(result.content[0].text).toContain('rateLimit: {"limit":10,"remaining":8,"resetSeconds":60,"provider":null}.');
     // A rate-limit refusal says the window is spent, beside when to retry.
     // A live rate-limit refusal charges nothing and says what is left.
     const limited = await caught(answer(429, { error: 'Too many', code: 'RATE_LIMITED', retryAfterSeconds: 43 },
       { 'RateLimit-Limit': '10', 'RateLimit-Remaining': '2', 'RateLimit-Reset': '43', 'X-RateLimit-Scope': 'live-broker' }).get('/live/exposure/SPY', {}, () => {}));
-    expect(limited.details).toEqual({ retryAfterSeconds: 43, rateLimit: { limit: 10, remaining: 2, resetSeconds: 43 } });
+    expect(limited.details).toEqual({ retryAfterSeconds: 43, rateLimit: { limit: 10, remaining: 2, resetSeconds: 43, provider: null } });
     // Refused before the live limiter ran: the tier gate answers under the
     // global limiter's headers, and those are not the live budget.
     const general = { 'RateLimit-Limit': '300', 'RateLimit-Remaining': '299', 'RateLimit-Reset': '60' };
@@ -88,7 +94,7 @@ describe('LiveApiClient', () => {
     expect(broken).toBeInstanceOf(LiveApiError);
     expect(broken.message).toBe('Invalid JSON response from /live/exposure/SPY');
     expect(broken.statusCode).toBe(200);
-    expect(broken.details).toEqual({ rateLimit: { limit: 10, remaining: 8, resetSeconds: 60 } });
+    expect(broken.details).toEqual({ rateLimit: { limit: 10, remaining: 8, resetSeconds: 60, provider: null } });
     // Without a budget it stays the plain error it was.
     globalThis.fetch = (async () => new Response('{"schemaVersion":1,', { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
     const plain = await caught(new LiveApiClient('https://proxy.example.com', { getAccessToken: async () => 'DUMMY_TOKEN' })
@@ -98,7 +104,7 @@ describe('LiveApiClient', () => {
     // A 5xx after the charge too.
     const down = await caught(answer(503, { error: 'Broker unavailable', code: 'BROKER_UNAVAILABLE', retryable: true }, budget)
       .get('/live/exposure/SPY', {}, () => {}));
-    expect(down.details).toEqual({ rateLimit: { limit: 10, remaining: 8, resetSeconds: 60 } });
+    expect(down.details).toEqual({ rateLimit: { limit: 10, remaining: 8, resetSeconds: 60, provider: null } });
     // No headers, or a caller that did not ask: the details are untouched.
     expect((await caught(answer(400, unlisted, {}).get('/live/exposure/SPY', {}, () => {}))).details)
       .toEqual({ availableExpirations: ['2026-09-18'] });
@@ -106,6 +112,49 @@ describe('LiveApiClient', () => {
       .toEqual({ availableExpirations: ['2026-09-18'] });
     expect((await caught(answer(503, { error: 'Broker unavailable', code: 'BROKER_UNAVAILABLE', retryable: true }, {})
       .get('/live/exposure/SPY', {}, () => {}))).details).toBeUndefined();
+  });
+
+  it('a broker that did not answer carries the broker\'s own error beside the code, so the reason is not lost', async () => {
+    // All-broker live run: Public refused SPX's expirations and the proxy's
+    // `detail` (the broker's status, never its body) was dropped here, so
+    // neither the run nor the logs said why.
+    const answer = (status: number, body: unknown, headers: Record<string, string>) => {
+      globalThis.fetch = (async () => new Response(JSON.stringify(body), {
+        status, headers: { 'content-type': 'application/json', ...headers },
+      })) as unknown as typeof fetch;
+      return new LiveApiClient('https://proxy.example.com', { getAccessToken: async () => 'DUMMY_TOKEN' });
+    };
+    const down = await caught(answer(503, {
+      error: 'public did not answer the expirations request', code: 'BROKER_UNAVAILABLE', retryable: true, provider: 'public',
+      detail: 'Public.com API error (400)', brokerFailure: 'http-status', brokerStatus: 400,
+    }, {}).get('/live/options-chain/SPX', {}, () => {}));
+    expect(down).toBeInstanceOf(LiveApiError);
+    expect(down.message).toBe('public did not answer the expirations request');
+    expect(down.details).toEqual({ brokerFailure: 'http-status', brokerStatus: 400, provider: 'public' });
+    // Review: the broker's text never travels. A malformed
+    // answer's parse error quoted the body (an account id) into it.
+    const leaky = await caught(answer(503, {
+      error: 'public did not answer the account request', code: 'BROKER_UNAVAILABLE', retryable: true, provider: 'public',
+      detail: 'JSON Parse error: Unexpected identifier "DUMMY_PRIVATE_ACCOUNT_1234"', brokerFailure: 'unreadable-response', brokerStatus: null,
+    }, {}).get('/live/options-chain/SPX', {}, () => {}));
+    expect(leaky.details).toEqual({ brokerFailure: 'unreadable-response', brokerStatus: null, provider: 'public' });
+    expect(JSON.stringify(leaky.details) + leaky.message).not.toContain('DUMMY_PRIVATE_ACCOUNT_1234');
+    // A broker that answered with nothing usable (the route's own refusal).
+    const empty = await caught(answer(503, { error: 'tradier returned no usable quote for SPY', code: 'BROKER_UNAVAILABLE', retryable: true, provider: 'tradier', brokerFailure: 'no-usable-answer', brokerStatus: null }, {})
+      .get('/live/quote/SPY', {}, () => {}));
+    expect(empty.details).toEqual({ brokerFailure: 'no-usable-answer', brokerStatus: null, provider: 'tradier' });
+    // A broker that refused the request itself: not retryable, its status kept.
+    const rejected = await caught(answer(502, { error: 'public rejected the expirations request (HTTP 400)', code: 'BROKER_REJECTED', retryable: false, provider: 'public', brokerFailure: 'http-status', brokerStatus: 400, detail: 'Public.com API error (400)' }, {})
+      .get('/live/options-chain/SPX', {}, () => {}));
+    expect(rejected).toMatchObject({ code: 'BROKER_REJECTED', retryable: false, message: 'public rejected the expirations request (HTTP 400)' });
+    expect(rejected.details).toEqual({ brokerFailure: 'http-status', brokerStatus: 400, provider: 'public' });
+    // A kind the client does not know is not passed on.
+    const odd = await caught(answer(503, { error: 'x', code: 'BROKER_UNAVAILABLE', retryable: true, provider: 'public', brokerFailure: 'see body', brokerStatus: 'x' }, {})
+      .get('/live/options-chain/SPX', {}, () => {}));
+    expect(odd.details).toBeUndefined();
+    // Only the broker failure carries it; another code with a detail does not.
+    const other = await caught(answer(400, { error: 'bad', code: 'INVALID_REQUEST', retryable: false, detail: 'x' }, {}).get('/live/quote/SPY', {}, () => {}));
+    expect(other.details).toBeUndefined();
   });
 
   it('returns the body on success', async () => {
@@ -249,6 +298,19 @@ describe('LiveApiClient', () => {
       warnings: ['ARI: trailing dividend yield is 66.6%; supply modelParams.dividends[1] explicitly'],
     }).get('/live/x')) as LiveApiError;
     expect(err.details?.missingFields).toEqual(['modelParams.dividends[1]']);
+  });
+
+  it('carries the adjusted roots an ADJUSTED_SERIES_ONLY refusal names', async () => {
+    // A date listed only under adjusted series (AAPL1 after a special
+    // dividend) has no standard book to position or scan; the roots and
+    // their counts are the whole explanation.
+    const err = await caught(client(422, {
+      error: 'SPY 2026-10-16 is listed only under adjusted series',
+      code: 'ADJUSTED_SERIES_ONLY', retryable: false,
+      excludedRoots: [{ root: 'AAPL1', contracts: 2 }],
+    }).get('/live/x')) as LiveApiError;
+    expect(err.code).toBe('ADJUSTED_SERIES_ONLY');
+    expect(err.details?.excludedRoots).toEqual([{ root: 'AAPL1', contracts: 2 }]);
   });
 
   it('omits an empty warnings array rather than padding the detail budget', async () => {
@@ -475,12 +537,33 @@ describe('LiveApiClient', () => {
     // timed exactly.
     const err = await caught(client(429, {
       error: 'Live broker request budget exhausted', code: 'RATE_LIMITED',
-      retryable: true, retryAfterSeconds: 42, limit: 10, cost: 5,
+      retryable: true, retryAfterSeconds: 42, limit: 120, cost: 9, provider: 'tradier',
     }).get('/live/x')) as LiveApiError;
     expect(err.retryable).toBe(true);
     expect(err.code).toBe('RATE_LIMITED');
     expect(err.message).toContain('42 seconds');
     expect(err.details?.retryAfterSeconds).toBe(42);
+  });
+
+  it('keeps BROKER_RATE_LIMITED, its provider, the proxy\'s message and a null wait on the broker\'s own 429', async () => {
+    // The broker refused the caller's own quota. The proxy's message says
+    // whether the broker named a wait; null means it did not, and the model
+    // must back off rather than retry at once.
+    const silent = await caught(client(429, {
+      error: 'tradier rate-limited the chain request', code: 'BROKER_RATE_LIMITED', retryable: true, provider: 'tradier',
+      retryAfterSeconds: null, message: 'tradier sent no Retry-After. Wait before retrying and back off exponentially with jitter; its quota is per minute.',
+    }).get('/live/x')) as LiveApiError;
+    expect(silent.code).toBe('BROKER_RATE_LIMITED');
+    expect(silent.retryable).toBe(true);
+    expect(silent.message).toBe('tradier sent no Retry-After. Wait before retrying and back off exponentially with jitter; its quota is per minute.');
+    expect(silent.details).toEqual({ retryAfterSeconds: null, provider: 'tradier' });
+
+    const timed = await caught(client(429, {
+      error: 'schwab rate-limited the expirations request', code: 'BROKER_RATE_LIMITED', retryable: true, provider: 'schwab',
+      retryAfterSeconds: 9, message: 'schwab asks for 9 seconds before the next request.',
+    }).get('/live/x')) as LiveApiError;
+    expect(timed.message).toBe('schwab asks for 9 seconds before the next request.');
+    expect(timed.details).toEqual({ retryAfterSeconds: 9, provider: 'schwab' });
   });
 
   it('posts a JSON body and reads the same envelope on the way back', async () => {

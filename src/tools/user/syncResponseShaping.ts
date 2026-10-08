@@ -25,6 +25,15 @@ const ANALYSIS_DEDUPE_DELTA = 0.02;
 const ANALYSIS_DEDUPE_VOL = 1e-6;
 const SNAPSHOT_SIGNATURE_DECIMALS = 4;
 const ANALYSIS_MODEL_KEYS = new Set(['model', 'bestModel', 'worstModel']);
+// What an Analysis page jump-diffusion record's calibrationSummary.jumpModel
+// names: the record is labeled "Jump Diffusion (Merton)" and so on, since
+// plain "Jump Diffusion" could be any of the four.
+const JUMP_MODEL_LABELS: Record<string, string> = {
+  merton: 'Merton',
+  kou: 'Kou',
+  bates: 'Bates',
+  vg: 'Variance Gamma',
+};
 const VARIANCE_GAMMA_PARAM_LABELS: Record<string, string> = {
   vgNu: 'nu',
   vgSigma: 'sigma',
@@ -103,23 +112,34 @@ function humanizeVarianceGammaParams(value: unknown): void {
   }
 }
 
-export function humanizeAnalysisWireOutput(value: unknown, depth = 0): unknown {
+/** The jump model an object (a record via its artifacts, or a calibration summary) names. */
+function ownJumpModelLabel(obj: Record<string, unknown>): string | undefined {
+  const summary = asRecord(asRecord(obj.artifacts)?.calibrationSummary);
+  const jumpModel = typeof obj.jumpModel === 'string' ? obj.jumpModel : summary?.jumpModel;
+  return typeof jumpModel === 'string' ? JUMP_MODEL_LABELS[jumpModel] : undefined;
+}
+
+export function humanizeAnalysisWireOutput(value: unknown, depth = 0, jumpModelLabel?: string): unknown {
   if (depth > 20 || value == null || typeof value !== 'object') return value;
   if (Array.isArray(value)) {
-    for (const item of value) humanizeAnalysisWireOutput(item, depth + 1);
+    for (const item of value) humanizeAnalysisWireOutput(item, depth + 1, jumpModelLabel);
     return value;
   }
 
   const obj = value as Record<string, unknown>;
+  // A record's jump model labels the record and everything inside it (its
+  // data, facts and calibration summary describe the same calculation).
+  const label = ownJumpModelLabel(obj) ?? jumpModelLabel;
   for (const [key, child] of Object.entries(obj)) {
     if (ANALYSIS_MODEL_KEYS.has(key) && typeof child === 'string') {
-      obj[key] = modelDisplayName(child);
+      const display = modelDisplayName(child);
+      obj[key] = key === 'model' && label && display === 'Jump Diffusion' ? `Jump Diffusion (${label})` : display;
       continue;
     }
     if (key === 'models' && Array.isArray(child)) {
       obj[key] = child.map((item) => {
         if (typeof item === 'string') return modelDisplayName(item);
-        humanizeAnalysisWireOutput(item, depth + 1);
+        humanizeAnalysisWireOutput(item, depth + 1, label);
         return item;
       });
       continue;
@@ -127,7 +147,7 @@ export function humanizeAnalysisWireOutput(value: unknown, depth = 0): unknown {
     if (key === 'params') {
       humanizeVarianceGammaParams(child);
     }
-    humanizeAnalysisWireOutput(obj[key], depth + 1);
+    humanizeAnalysisWireOutput(obj[key], depth + 1, label);
   }
 
   return value;
@@ -153,6 +173,7 @@ function getAnalysisDelta(record: any): number | undefined {
 function getAnalysisSignature(record: any): {
   symbol?: string;
   model?: string;
+  jumpModel?: string;
   isCall?: boolean;
   strike?: number;
   daysToMaturity?: number;
@@ -181,9 +202,14 @@ function getAnalysisSignature(record: any): {
   const timestamp = typeof record?.timestamp === 'number' && Number.isFinite(record.timestamp) ? record.timestamp : undefined;
   const isCall = typeof data?.isCall === 'boolean' ? data.isCall : undefined;
 
+  // A jump-diffusion record's jump model: a Merton and a Kou run with the
+  // same inputs and price are different analyses.
+  const jumpModel = asRecord(asRecord(record?.artifacts)?.calibrationSummary)?.jumpModel;
+
   return {
     symbol,
     model,
+    jumpModel: typeof jumpModel === 'string' ? jumpModel : undefined,
     isCall,
     strike,
     daysToMaturity,
@@ -201,6 +227,7 @@ function isNearDuplicateAnalysisRecord(left: any, right: any): boolean {
   if (
     !current.symbol || !existing.symbol || current.symbol !== existing.symbol ||
     !current.model || !existing.model || current.model !== existing.model ||
+    current.jumpModel !== existing.jumpModel ||
     current.isCall == null || existing.isCall == null || current.isCall !== existing.isCall ||
     current.strike == null || existing.strike == null || current.strike !== existing.strike ||
     current.daysToMaturity == null || existing.daysToMaturity == null || current.daysToMaturity !== existing.daysToMaturity ||

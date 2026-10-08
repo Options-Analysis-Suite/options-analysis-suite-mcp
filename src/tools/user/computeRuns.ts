@@ -46,7 +46,7 @@ export function register(server: McpServer, client: ProxyClient): void {
     'get_compute_runs',
     {
       title: 'AI Compute Suite Runs',
-      description: 'Get the user\'s AI Compute Suite run history — portfolio-wide batch analyses across multiple pricing models. Default response returns compact run summaries, model-dispersion highlights, exposure levels, and representative position/model consensus summaries. Use view=\'detailed\' to inspect per-model outputs for one matched run; detailed view only takes effect when exactly one run matches, and multi-run responses are always summarized.',
+      description: 'Get the user\'s AI Compute Suite run history — portfolio-wide batch analyses across multiple pricing models. Default response returns compact run summaries, model-dispersion highlights, exposure levels, and representative position/model consensus summaries. Use view=\'detailed\' to inspect per-model outputs for one matched run; detailed view only takes effect when exactly one run matches, and multi-run responses are always summarized. A calibration status of success means the model produced usable fitted parameters; how well they fit is in its confidence and warnings, so a success can carry a warning such as few prices staying within bid/ask. calibratedModelCount counts the models carrying a calibration, including MonteCarlo-Heston, which reuses Heston\'s fit and has no calibration outcome of its own, so it can exceed the number of outcomes.',
       inputSchema: {
         run_key: z.string().optional().describe('Exact run key for one specific compute run'),
         status: z.enum(['completed', 'cancelled', 'failed']).optional().describe('Filter by terminal run status'),

@@ -94,12 +94,39 @@ function getRecord(value: unknown): Record<string, unknown> | null {
     ? value as Record<string, unknown>
     : null;
 }
+/**
+ * FINRA writes dates as YYYYMMDD (20260930); published as YYYY-MM-DD when that
+ * is a calendar date, and anything else as it is.
+ */
+function isoFinraDate(value: unknown): unknown {
+  if (typeof value !== 'string' || !/^\d{8}$/.test(value)) return value;
+  const iso = `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6)}`;
+  const parsed = new Date(`${iso}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === iso ? iso : value;
+}
+
+/**
+ * A FINRA stats block passed through: its dates as ISO and its numeric strings
+ * ("52.13") as numbers, so a field is never a string beside its numeric twin.
+ * An eight-digit value is a date or nothing, never a number.
+ */
+function normalizeFinraStats(value: unknown): unknown {
+  const record = getRecord(value);
+  if (!record) return value ?? null;
+  return Object.fromEntries(Object.entries(record).map(([key, entry]) => {
+    if (typeof entry !== 'string') return [key, entry];
+    if (/^\d{8}$/.test(entry)) return [key, isoFinraDate(entry)];
+    const trimmed = entry.trim();
+    return [key, /^-?\d+(\.\d+)?%?$/.test(trimmed) ? Number(trimmed.replace('%', '')) : entry];
+  }));
+}
+
 function summarizeShortVolumeRow(row: ShortVolumeRow): Record<string, unknown> {
   const shortPercent = asPercentNumber(row.shortPercent)
     ?? asPercentNumber(row.shortPercentage)
     ?? asPercentNumber(row.shortInterestPercentFloat);
   return {
-    date: typeof row.date === 'string' ? row.date : null,
+    date: typeof row.date === 'string' ? isoFinraDate(row.date) : null,
     shortVolume: asFiniteNumber(row.shortVolume) ?? asFiniteNumber(row.shortInterest),
     totalVolume: asFiniteNumber(row.totalVolume),
     shortPercent: roundTo(shortPercent, 2),
@@ -141,7 +168,7 @@ export function summarizeShortVolume(payload: unknown, historyLimit = 10): unkno
 
   return {
     symbol: typed.symbol,
-    lastUpdate: typed.lastUpdate,
+    lastUpdate: isoFinraDate(typed.lastUpdate),
     latest,
     summary: {
       trailingAverageShortPercent: roundTo(trailingAverageShortPercent, 2),
@@ -157,8 +184,8 @@ export function summarizeShortVolume(payload: unknown, historyLimit = 10): unkno
       lowestRecentShortPercent: lowestRecent,
     },
     recentHistory,
-    trailingAverages: typed.averages ?? null,
-    yearStats: typed.yearStats ?? null,
+    trailingAverages: normalizeFinraStats(typed.averages),
+    yearStats: normalizeFinraStats(typed.yearStats),
     _recent_history_meta: history.length > historyLimit
       ? { showing: historyLimit, total: history.length, truncated: true }
       : undefined,
@@ -167,7 +194,7 @@ export function summarizeShortVolume(payload: unknown, historyLimit = 10): unkno
 
 function summarizeShortInterestRow(row: ShortInterestRow): Record<string, unknown> {
   return {
-    settlementDate: typeof row.settlementDate === 'string' ? row.settlementDate : null,
+    settlementDate: typeof row.settlementDate === 'string' ? isoFinraDate(row.settlementDate) : null,
     shortInterest: asFiniteNumber(row.shortInterest),
     previousShortInterest: asFiniteNumber(row.previousShortInterest),
     changeNumber: asFiniteNumber(row.changeNumber),
@@ -237,7 +264,7 @@ export function summarizeShortInterest(payload: unknown, historyLimit = 8, compa
 
   return {
     symbol: typed.symbol,
-    lastUpdate: typed.lastUpdate,
+    lastUpdate: isoFinraDate(typed.lastUpdate),
     freeFloat: shareFloat.freeFloat,
     sharesOutstanding: shareFloat.sharesOutstanding,
     latest,
@@ -254,9 +281,9 @@ export function summarizeShortInterest(payload: unknown, historyLimit = 8, compa
             : 'stable',
       averageDaysToCover: roundTo(asFiniteNumber(stats.avgDaysToCover), 2),
       maxShortInterest: asFiniteNumber(stats.maxShortInterest),
-      maxDate: typeof stats.maxDate === 'string' ? stats.maxDate : null,
+      maxDate: typeof stats.maxDate === 'string' ? isoFinraDate(stats.maxDate) : null,
       minShortInterest: asFiniteNumber(stats.minShortInterest),
-      minDate: typeof stats.minDate === 'string' ? stats.minDate : null,
+      minDate: typeof stats.minDate === 'string' ? isoFinraDate(stats.minDate) : null,
     },
     recentHistory,
     _recent_history_meta: history.length > historyLimit

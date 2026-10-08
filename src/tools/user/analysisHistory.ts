@@ -17,10 +17,10 @@ export function register(server: McpServer, client: ProxyClient): void {
     'get_analysis_history',
     {
       title: 'Analysis History',
-      description: 'Get the user\'s options pricing analysis history — past calculations run in the platform. Each result includes the model used (Black-Scholes, Heston, SABR, etc.), input parameters (spot, strike, volatility, DTE), computed option price, and Greeks. Includes calibration data and model-specific sensitivities when available. Default view collapses near-identical reruns from the same pricing sweep.',
+      description: 'Get the user\'s options pricing analysis history — past calculations run on the platform\'s Analysis page. Only calibrated models (Heston, SABR, jump diffusion, Variance Gamma, Dupire local volatility) and standard Monte Carlo runs are recorded; a Black-Scholes, Black76, Binomial, PDE or exotic-payoff calculation is not, and compute_black_scholes prices one on demand. A newer jump-diffusion record names its jump model, as Jump Diffusion (Merton), (Kou), (Bates) or (Variance Gamma), and a newer record\'s calibrationSummary.params holds only the model\'s fitted parameters; an older one shows plain Jump Diffusion, and its params can also list pricer settings or other jump models\' defaults. The model filter matches every jump model, so read the label. Each result includes the model used, input parameters (spot, strike, volatility, DTE), computed option price, and Greeks. Includes calibration data and model-specific sensitivities when available. Default view collapses near-identical reruns from the same pricing sweep.',
       inputSchema: {
         symbol: z.string().optional().describe('Filter by ticker symbol'),
-        model: z.string().optional().describe('Filter by pricing model (e.g., Black-Scholes, Heston)'),
+        model: z.string().optional().describe('Filter by pricing model (e.g., Heston, SABR, Jump Diffusion)'),
         limit: z.number().int().min(1).max(200).default(10).describe('Max results (default 10)'),
         since: z.string().optional().describe('Only results after this date (ISO format)'),
         full: z.boolean().default(false).describe('Return less-summarized sanitized data including detail tables, correlation matrices, and per-position breakdowns, still subject to the MCP response budget'),

@@ -23,6 +23,8 @@ export interface RegimeFitRow {
   model_version?: unknown;
   params?: unknown;
   fit_error?: unknown;
+  /** The parameters the fit finished exactly on an optimizer bound (diagnostics.summary). */
+  params_at_bounds?: unknown;
 }
 
 export interface RegimeFitsResponse {
@@ -96,6 +98,7 @@ type BuiltModel = {
   version: string | null;
   asOf: string | null;
   params: Record<string, unknown> | null;
+  paramsAtBounds: string[] | null;
   fit: FitError;
   fitDays: number;
   daysFailingQualityCheck: number;
@@ -177,7 +180,7 @@ export function summarizeRegimeFits(
   const groups = new Map<string, {
     model: string | null;
     version: string | null;
-    entries: Array<{ date: string | null; params: Record<string, unknown> | null; fit: FitError }>;
+    entries: Array<{ date: string | null; params: Record<string, unknown> | null; paramsAtBounds: string[] | null; fit: FitError }>;
   }>();
 
   const dates = new Set<string>();
@@ -190,7 +193,13 @@ export function summarizeRegimeFits(
     const key = `${model ?? '?'} ${version ?? '?'}`;
     let group = groups.get(key);
     if (!group) { group = { model, version, entries: [] }; groups.set(key, group); }
-    group.entries.push({ date, params: obj(row.params), fit: readFitError(row.fit_error) });
+    group.entries.push({
+      date,
+      params: obj(row.params),
+      // Null for a fit written before the calibration recorded it.
+      paramsAtBounds: Array.isArray(row.params_at_bounds) ? row.params_at_bounds.filter((name): name is string => typeof name === 'string') : null,
+      fit: readFitError(row.fit_error),
+    });
   }
 
   // Decided after grouping, because the share each model gets depends on how
@@ -211,6 +220,10 @@ export function summarizeRegimeFits(
         // The parameters of the LATEST fit only. An older set is not a worse
         // answer to "what are the parameters", it is a wrong one.
         params: latest?.params ?? null,
+        // Which of those parameters the fit left exactly on an optimizer
+        // bound: a parameter there may be pinned by the box rather than set
+        // by the market.
+        paramsAtBounds: latest?.paramsAtBounds ?? null,
         fit: latest?.fit ?? readFitError(null),
         fitDays: entries.length,
         daysFailingQualityCheck: entries.filter((e) => e.fit.failedQualityCheck === true).length,

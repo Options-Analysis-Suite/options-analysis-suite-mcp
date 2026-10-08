@@ -27,7 +27,7 @@ export function register(server: McpServer, client: ProxyClient): void {
       inputSchema: {
         type: z.enum(['volume', 'interest']).describe('Which FINRA series to fetch.'),
         symbol: z.string().describe('Ticker symbol (e.g., AAPL, GME)'),
-        full: z.boolean().optional().describe('Return the raw FINRA payload instead of the compact summary.'),
+        full: z.boolean().optional().describe('Return the raw FINRA payload instead of the compact summary, as the proxy sends it: dates as FINRA writes them (YYYYMMDD) and some numbers as strings. The compact summary publishes YYYY-MM-DD dates and numbers.'),
       },
       outputSchema: marketDataOutputSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },

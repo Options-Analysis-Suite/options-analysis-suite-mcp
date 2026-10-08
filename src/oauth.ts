@@ -619,11 +619,28 @@ const PAGE_STYLE = `
     @media (max-width: 480px) { body { padding: 24px 12px; } .card { padding: 24px 20px 22px; border-radius: 12px; } h1 { font-size: 1.35rem; } }
 `;
 
-function htmlPageHeaders(): Record<string, string> {
+/**
+ * The page's CSP form-action: 'self', plus the origin of the client the page
+ * was opened for when its form ends in a redirect there.
+ *
+ * Chrome applies form-action to the redirect a form submission ends in, so a
+ * sign-in POST answered with a 302 to claude.ai under form-action 'self' alone
+ * is stopped in the browser: the user stays on this page, and no code ever
+ * reaches the client. Every desktop-Chrome email and password connect failed
+ * that way (Safari does not apply it to redirects; the provider buttons are
+ * links, not forms). Only an allowlisted redirect's exact origin is added, so
+ * the page can still submit nowhere but here and the one client it serves.
+ */
+function formActionSources(redirectUri?: string): string {
+  if (!redirectUri || !isRedirectAllowed(redirectUri)) return "'self'";
+  return `'self' ${new URL(redirectUri).origin}`;
+}
+
+function htmlPageHeaders(redirectUri?: string): Record<string, string> {
   return {
     'Content-Type': 'text/html',
     'Content-Security-Policy':
-      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      `default-src 'none'; style-src 'unsafe-inline'; form-action ${formActionSources(redirectUri)}; frame-ancestors 'none'; base-uri 'none'`,
     'X-Frame-Options': 'DENY',
     'Referrer-Policy': 'no-referrer',
     'Cache-Control': 'no-store',
@@ -907,7 +924,7 @@ function issueAuthorizationOrConsent(
     bindingHash: sha256Hex(secret),
     expiresAt: Date.now() + CONSENT_TTL_MS,
   });
-  const page = consentPage(consentId, new URL(grant.redirectUri).host);
+  const page = consentPage(consentId, grant.redirectUri);
   return {
     ...page,
     headers: {
@@ -949,7 +966,8 @@ export function handleConsentPost(
 /** The confirmation page. Names the DESTINATION HOST, never the client-supplied
  * client_id: the host is allowlist-constrained, a client_id is not, and a
  * free-text name rendered here would be a phishing surface of its own. */
-function consentPage(consentId: string, destinationHost: string): { status: number; headers: Record<string, string>; body: string } {
+function consentPage(consentId: string, redirectUri: string): { status: number; headers: Record<string, string>; body: string } {
+  const destinationHost = new URL(redirectUri).host;
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -974,7 +992,7 @@ function consentPage(consentId: string, destinationHost: string): { status: numb
   </div>
 </body>
 </html>`;
-  return { status: 200, headers: htmlPageHeaders(), body: html };
+  return { status: 200, headers: htmlPageHeaders(redirectUri), body: html };
 }
 
 // --- Route handlers ---
@@ -1055,7 +1073,7 @@ function renderLoginPage(p: LoginPageParams, status = 200): { status: number; he
 <body>
   <div class="card">
     <h1>Options Analysis Suite</h1>
-    <p class="subtitle">Sign in to connect your account to ChatGPT</p>
+    <p class="subtitle">Sign in to connect your account to your AI assistant</p>
     ${errorHtml}${providersHtml}<form method="POST" action="/oauth/authorize">
       <input type="hidden" name="client_id" value="${escapeHtml(p.clientId)}">
       <input type="hidden" name="redirect_uri" value="${escapeHtml(p.redirectUri)}">
@@ -1072,7 +1090,7 @@ function renderLoginPage(p: LoginPageParams, status = 200): { status: number; he
   </div>
 </body>
 </html>`;
-  return { status, headers: htmlPageHeaders(), body: html };
+  return { status, headers: htmlPageHeaders(p.redirectUri), body: html };
 }
 
 /** GET /oauth/authorize - render login page */
@@ -1137,7 +1155,7 @@ function renderMfaForm(flowId: string, flow: MfaFlow, errorMsg = ''): { status: 
   </div>
 </body>
 </html>`;
-  return { status: 200, headers: htmlPageHeaders(), body: html };
+  return { status: 200, headers: htmlPageHeaders(flow.redirectUri), body: html };
 }
 
 /** POST /oauth/authorize - validate credentials, issue code, redirect */

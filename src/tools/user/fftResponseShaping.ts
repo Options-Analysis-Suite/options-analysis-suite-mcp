@@ -190,6 +190,10 @@ function compactPositions(positions: unknown): unknown {
           if ('signal' in modelSrc) modelOut.signal = humanizeSignal(modelSrc.signal);
           if ('priceDiffPct' in modelSrc) modelOut.priceDiffPct = modelSrc.priceDiffPct;
           if ('greeks' in modelSrc) modelOut.greeks = compactGreeks(modelSrc.greeks);
+          // Whether the price stands on a successful calibration, and why not
+          if (typeof modelSrc.actionable === 'boolean') modelOut.actionable = modelSrc.actionable;
+          if (typeof modelSrc.calibrationStatus === 'string') modelOut.calibrationStatus = modelSrc.calibrationStatus;
+          if (Array.isArray(modelSrc.qualityReasons)) modelOut.qualityReasons = modelSrc.qualityReasons;
           if ('error' in modelSrc && modelSrc.error) modelOut.error = modelSrc.error;
           return modelOut;
         });

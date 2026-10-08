@@ -9,7 +9,7 @@
  */
 
 import { MAX_RESPONSE_BYTES } from '../helpers.js';
-import { measuredLevel, measuredValue, metricCoverage, readRegime, RESOLUTION_DIGITS, RESPONSE_MARGIN_BYTES, significant } from './dealerPositioningShaping.js';
+import { exDividend, isoDate, measuredLevel, measuredValue, metricCoverage, readRegime, RESOLUTION_DIGITS, RESPONSE_MARGIN_BYTES, significant } from './dealerPositioningShaping.js';
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
@@ -85,6 +85,12 @@ export function summarizeStrategyScan(response: Record<string, unknown>) {
     gammaFlipSearchStatus: flip.value === null && (searchStatus === 'found' || searchStatus === 'not-found' || searchStatus === 'unresolved')
       ? searchStatus
       : flip.value !== null ? 'found' : null,
+    // The expirations whose open interest the broker did not publish (a zero
+    // on every contract): the levels they feed are unmeasured, and this is why.
+    ...(() => {
+      const dates = arr(rawLevels.openInterestUnpublishedExpirations).map(isoDate).filter((e): e is string => e !== null);
+      return dates.length > 0 ? { openInterestUnpublishedExpirations: dates } : {};
+    })(),
   };
 
   const candidates = arr(body.candidates).map((value) => {
@@ -111,6 +117,8 @@ export function summarizeStrategyScan(response: Record<string, unknown>) {
       width: num(c.width),
       netMid: num(c.netMid),
       netNatural: num(c.netNatural),
+      // What crossing every leg at the natural price gives up, in percent of the mid.
+      naturalSlippagePct: num(c.naturalSlippagePct),
       maxProfit: num(c.maxProfit),
       maxLoss: num(c.maxLoss),
       returnOnRisk: num(c.returnOnRisk),
@@ -150,15 +158,33 @@ export function summarizeStrategyScan(response: Record<string, unknown>) {
     expiration: str(body.expiration),
     daysToExpiration: count(body.daysToExpiration),
     spotPrice: spot,
+    // A spot that printed before the last session's open skews everything read
+    // against it; resolved.S carries the flag, and this says what it touches.
+    ...(record(record(body.resolved).S).stale === true
+      ? { spotNote: "The spot printed before the last session's open (resolved.S.asOf, the broker's own time), so every pctFromSpot, the expected move and each breakeven's place against it are read against a stale price." }
+      : {}),
     strategy: str(request.strategy),
     request: {
       deltaMin: num(request.deltaMin), deltaMax: num(request.deltaMax), width: num(request.width),
       minOpenInterest: num(request.minOpenInterest), maxSpreadPct: num(request.maxSpreadPct), minCredit: num(request.minCredit),
+      maxNaturalSlippagePct: num(request.maxNaturalSlippagePct),
       sortBy: str(request.sortBy), maxResults: count(request.maxResults), levels: str(request.levels),
     },
     expectedMove,
     expectedMoveUnavailable: str(body.expectedMoveUnavailable),
     levels,
+    // What falls between today and the expiration, as get_live_dealer_positioning
+    // reports it: null when the calendar could not be read.
+    events: (() => {
+      if (body.events === null || typeof body.events !== 'object') return null;
+      const raw = record(body.events);
+      return {
+        from: isoDate(raw.from),
+        through: isoDate(raw.through),
+        earningsOnOrBefore: isoDate(raw.earningsOnOrBefore),
+        exDividendOnOrBefore: exDividend(raw.exDividendOnOrBefore),
+      };
+    })(),
     matched: count(body.matched),
     returned: 0,
     limitedBySize: false,

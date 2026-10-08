@@ -51,6 +51,171 @@ describe('summarizeLiveChain', () => {
     expect(strikes).toEqual([497, 498, 499, 500, 501, 502, 503]);
   });
 
+  it('carries the proxy\'s openInterestUnpublished flag, and the note says the open interest was withheld', () => {
+    // The proxy withholds a blanket zero (Schwab prints 0 on every index
+    // option) and says so; the shaper rebuilds the answer by hand, so the
+    // flag has to be carried on purpose or the model reads "null OI" with no
+    // reason while the tool's description promises one.
+    const chain = wideChain();
+    const withheld: LiveChainResponse = {
+      ...chain,
+      openInterestUnpublished: true,
+      calls: chain.calls!.map((o) => ({ ...o, openInterest: null })),
+      puts: chain.puts!.map((o) => ({ ...o, openInterest: null })),
+    };
+    const shaped = summarizeLiveChain(withheld) as any;
+    expect(shaped.openInterestUnpublished).toBe(true);
+    expect(shaped.totals.calls.openInterest).toBeNull();
+    expect(shaped.view.note).toMatch(/open interest/i);
+    const plain = summarizeLiveChain(wideChain()) as any;
+    expect(plain.openInterestUnpublished).toBeUndefined();
+    expect(plain.view.note).not.toMatch(/withheld/i);
+  });
+
+  it('a row has a mid only where both sides are quoted above zero, as get_live_quote\'s; a zero bid keeps its ask and mark', () => {
+    // Live re-run: Tradier's SPY 785-790 calls showed bid 0, ask 0.01 and
+    // mid 0.005, a midpoint of a missing side nobody can trade at.
+    const shaped = summarizeLiveChain({
+      spotPrice: 770,
+      calls: [call(785, 0.01, { bid: 0, ask: 0.01, mid: 0.005, mark: 0.005 }), call(780, 0.05, { bid: 0.02, ask: 0.04, mid: 0.03 })],
+      puts: [put(760, -0.1, { bid: 0, ask: 0, mid: null }), put(765, -0.2, { bid: 0.5, ask: 0.6, mid: 0.55 })],
+    }, { strikeRange: 10 }) as any;
+    const at = (side: 'calls' | 'puts', strike: number) => shaped.nearTheMoney[side].find((r: any) => r.strike === strike);
+    expect(at('calls', 785)).toMatchObject({ bid: 0, ask: 0.01, mid: null, mark: 0.005 });
+    expect(at('calls', 780)).toMatchObject({ mid: 0.03 });
+    expect(at('puts', 760)).toMatchObject({ bid: 0, ask: 0, mid: null });
+    expect(at('puts', 765)).toMatchObject({ mid: 0.55 });
+  });
+
+  it('withholds the Greeks of a contract whose IV is not usable, with the reason, and keeps them where the IV is a volatility', () => {
+    // Final re-run: Public's XSP 762-764 calls carried iv null (a sentinel)
+    // beside delta 1, gamma 0 and vega 0, the zero-vol limits of the same
+    // failed solve, not measurements.
+    const chain = wideChain();
+    const at = (strike: number) => chain.calls!.findIndex((o) => o.strike === strike);
+    chain.calls![at(499)] = { ...chain.calls![at(499)]!, iv: 0, delta: 1, gamma: 0, theta: -0.01, vega: 0 };
+    chain.calls![at(500)] = { ...chain.calls![at(500)]!, iv: 12, delta: 1, gamma: 0, vega: 0 };
+    chain.calls![at(501)] = { ...chain.calls![at(501)]!, iv: null, delta: 0.97, gamma: 0.001, vega: 0.002 };
+    const shaped = summarizeLiveChain(chain) as any;
+    const near = (strike: number) => shaped.nearTheMoney.calls.find((r: any) => r.strike === strike);
+    for (const strike of [499, 500, 501]) {
+      expect(near(strike), String(strike)).toMatchObject({ iv: null, delta: null, gamma: null, theta: null, vega: null, greeksReason: 'iv-unusable' });
+      expect(near(strike).bid, String(strike)).not.toBeNull();
+    }
+    const kept = near(502);
+    expect(kept.iv).not.toBeNull();
+    expect(typeof kept.delta).toBe('number');
+    expect(kept.greeksReason).toBeUndefined();
+  });
+
+  it('chooses a 25-delta wing only among contracts whose delta it would show, and none when no such contract remains', () => {
+    // Review: the wing was chosen on a delta the row then
+    // withheld, so a "25-delta wing" displayed delta null beside a usable
+    // contract one strike away.
+    const shaped = summarizeLiveChain({
+      spotPrice: 772,
+      calls: [call(782, 0.25, { iv: null }), call(783, 0.26, { iv: 0.2 })],
+      puts: [put(760, -0.25, { iv: 0 }), put(759, -0.24, { iv: 0.21 })],
+    }, { strikeRange: 10 }) as any;
+    expect(shaped.wings.call25Delta).toMatchObject({ strike: 783, delta: 0.26 });
+    expect(shaped.wings.put25Delta).toMatchObject({ strike: 759, delta: -0.24 });
+    const none = summarizeLiveChain({ spotPrice: 772, calls: [call(782, 0.25, { iv: null })], puts: [put(760, -0.25, { iv: 9 })] }, { strikeRange: 10 }) as any;
+    expect(none.wings).toEqual({ call25Delta: null, put25Delta: null });
+  });
+
+  it('carries when the spot printed and whether it is stale, and the note says the at-the-money pair is read against a stale spot', () => {
+    // Broker re-run: Public's chain spot was its 04:00 pre-market print and
+    // the "at-the-money" pair sat two strikes off with nothing saying why.
+    const stale = summarizeLiveChain({ ...wideChain(), spotTime: '2026-10-02T07:59:57.000Z', spotStale: true } as LiveChainResponse) as any;
+    expect(stale).toMatchObject({ spotTime: '2026-10-02T07:59:57.000Z', spotStale: true });
+    expect(stale.view.note).toContain('The spot printed before the last session\'s open (spotTime), so the at-the-money pair and the strike window are read against a stale price.');
+    const fresh = summarizeLiveChain({ ...wideChain(), spotTime: '2026-10-02T19:59:57.000Z', spotStale: false } as LiveChainResponse) as any;
+    expect(fresh).toMatchObject({ spotStale: false });
+    expect(fresh.view.note).not.toContain('stale price');
+    const unknown = summarizeLiveChain(wideChain()) as any;
+    expect(unknown).toMatchObject({ spotTime: null, spotStale: null });
+  });
+
+  it('names the roots a chain was merged from, and a row priced from another root says so', () => {
+    const chain = wideChain();
+    const merged: LiveChainResponse = {
+      ...chain, root: 'SPXW', roots: ['SPX', 'SPXW'],
+      calls: chain.calls!.map((o) => ({ ...o, root: o.strike === 501 ? 'SPX' : 'SPXW', openInterestByRoot: { SPX: 227, SPXW: 939 }, volumeByRoot: { SPX: null, SPXW: 25 } })),
+      puts: chain.puts!.map((o) => ({ ...o, root: 'SPXW' })),
+    };
+    const shaped = summarizeLiveChain(merged) as any;
+    expect(shaped).toMatchObject({ root: 'SPXW', roots: ['SPX', 'SPXW'] });
+    // Each root's own open interest and volume ride on the row beside the sum.
+    expect(shaped.nearTheMoney.calls[0]).toMatchObject({ openInterestByRoot: { SPX: 227, SPXW: 939 }, volumeByRoot: { SPX: null, SPXW: 25 } });
+    expect(shaped.nearTheMoney.puts[0].openInterestByRoot).toBeUndefined();
+    expect(shaped.view.note).toMatch(/SPX and SPXW/);
+    const near = shaped.nearTheMoney.calls as any[];
+    expect(near.find((r) => r.strike === 501).root).toBe('SPX');
+    expect(near.find((r) => r.strike === 500).root).toBeUndefined();
+    const plain = summarizeLiveChain(wideChain()) as any;
+    expect(plain.roots).toBeUndefined();
+    expect(plain.nearTheMoney.calls[0].root).toBeUndefined();
+  });
+
+  it('a chain under one root names it, and the note says so only where the root is not the symbol', () => {
+    const chain = wideChain();
+    const weekly = summarizeLiveChain({
+      ...chain, symbol: 'SPX', root: 'SPXW', roots: ['SPXW'],
+      calls: chain.calls!.map((o) => ({ ...o, root: 'SPXW' })), puts: chain.puts!.map((o) => ({ ...o, root: 'SPXW' })),
+    }) as any;
+    expect(weekly).toMatchObject({ root: 'SPXW', roots: ['SPXW'] });
+    expect(weekly.view.note).toMatch(/Every contract is under the SPXW root, not SPX\./);
+    expect(weekly.view.note).not.toMatch(/summed across/);
+    expect(weekly.nearTheMoney.calls[0].root).toBeUndefined();
+    const equity = summarizeLiveChain({
+      ...chain, symbol: 'AAPL', root: 'AAPL', roots: ['AAPL'],
+      calls: chain.calls!.map((o) => ({ ...o, root: 'AAPL' })), puts: chain.puts!.map((o) => ({ ...o, root: 'AAPL' })),
+    }) as any;
+    expect(equity).toMatchObject({ root: 'AAPL', roots: ['AAPL'] });
+    expect(equity.view.note).not.toMatch(/root/);
+    // Review: a rootless row beside the rooted ones is not
+    // under that root, and "every contract" said it was.
+    const partly = summarizeLiveChain({
+      ...chain, symbol: 'SPX', root: 'SPXW', roots: ['SPXW'],
+      calls: chain.calls!.map((o) => ({ ...o, root: 'SPXW' })), puts: chain.puts!.map((o, i) => (i === 0 ? { ...o } : { ...o, root: 'SPXW' })),
+    }) as any;
+    const contracts = chain.calls!.length + chain.puts!.length;
+    expect(partly.view.note).toMatch(new RegExp(`${contracts - 1} of ${contracts} contracts are under the SPXW root, not SPX; the rest name root null, none from the broker\\.`));
+    expect(partly.view.note).not.toMatch(/Every contract/);
+  });
+
+  it('names an adjusted series the proxy left out, with its contract count, and the note says why', () => {
+    const chain = wideChain();
+    const shaped = summarizeLiveChain({ ...chain, excludedRoots: [{ root: 'AAPL1', contracts: 12 }] }) as any;
+    expect(shaped.excludedRoots).toEqual([{ root: 'AAPL1', contracts: 12 }]);
+    expect(shaped.view.note).toMatch(/12 contracts under the AAPL1 root/);
+    expect(shaped.view.note).toMatch(/adjusted series/);
+    const plain = summarizeLiveChain(wideChain()) as any;
+    expect(plain.excludedRoots).toBeUndefined();
+    expect(plain.view.note).not.toMatch(/adjusted/);
+  });
+
+  it('an empty book naming adjusted roots shapes to zero contracts, no rows, and the note naming each root', () => {
+    const shaped = summarizeLiveChain({ ...wideChain(), calls: [], puts: [], excludedRoots: [{ root: 'AAPL1', contracts: 2 }, { root: 'AAPL2', contracts: 1 }] }) as any;
+    expect(shaped.totals.calls.contracts).toBe(0);
+    expect(shaped.nearTheMoney).toEqual({ calls: [], puts: [] });
+    expect(shaped.view.note).toMatch(/0 contracts in the full chain\. 2 contracts under the AAPL1 root and 1 contracts under the AAPL2 root/);
+  });
+
+  it('on a merged chain a row the broker named no root for says so with null, never by silence', () => {
+    const chain = wideChain();
+    const merged: LiveChainResponse = {
+      ...chain, root: 'SPX', roots: ['SPX', 'SPXW'],
+      calls: chain.calls!.map((o) => (o.strike === 500 ? { ...o } : { ...o, root: 'SPX' })),
+      puts: chain.puts!.map((o) => ({ ...o, root: 'SPX' })),
+    };
+    const shaped = summarizeLiveChain(merged) as any;
+    const near = shaped.nearTheMoney.calls as any[];
+    expect(near.find((r) => r.strike === 500).root).toBeNull();
+    expect(near.find((r) => r.strike === 499).root).toBeUndefined();
+    expect(shaped.view.note).toMatch(/null where the broker named none/);
+  });
+
   it('carries provenance into the summary, not just the envelope', () => {
     // The summary is what the model reads. A quote it cannot date or attribute
     // is a quote it will relay without either.
@@ -205,7 +370,7 @@ describe('summarizeLiveChain', () => {
     // has no IV), not a 1000% or a 0% vol, and the exposure engine already
     // treats them as absent (packages/shared exposure-compute isUsableIV, the
     // proxy's capIv: finite, above 0, at most 5). This tool passed them
-    // through as numbers. Same band here; the delta and the quote stay.
+    // through as numbers. Same band here; the quote stays.
     const shaped = summarizeLiveChain({
       spotPrice: 762.6,
       calls: [call(755, 1, { iv: 10 }), call(763, 0.4, { iv: 0.1314 }), call(800, 0.02, { iv: 5 })],
@@ -219,8 +384,9 @@ describe('summarizeLiveChain', () => {
     expect(ivAt('puts', 770)).toBeNull();
     expect(ivAt('puts', 763)).toBe(0.1192);
     expect(ivAt('puts', 700)).toBeNull();
-    // The delta the broker published beside it is still real.
-    expect(shaped.nearTheMoney.calls.find((c) => c.strike === 755)?.delta).toBe(1);
+    // The Greeks beside it come from the same failed solve: withheld with the
+    // reason (the user's ruling after the final live re-run, 2026-10-04).
+    expect(shaped.nearTheMoney.calls.find((c) => c.strike === 755)).toMatchObject({ delta: null, greeksReason: 'iv-unusable' });
     expect(shaped.totals.calls.contractsWithoutUsableIv).toBe(1);
     expect(shaped.totals.puts.contractsWithoutUsableIv).toBe(3);
     // And the ATM pair, which is what a model quotes first.

@@ -60,6 +60,18 @@ describe('summarizeStrategyScan', () => {
     expect(shaped).toMatchObject({ matched: 3, returned: 1, limitedBySize: false, strategy: 'bull_put_spread' });
   });
 
+  it('names the expirations whose open interest the broker did not publish beside the levels, and nothing otherwise', () => {
+    const withheld = summarizeStrategyScan(scan({ levels: { ...scan().levels, gammaFlip: null, openInterestUnpublishedExpirations: ['2026-02-30', '2026-10-05'], coverage: coverage({ gamma: { total: 40, included: 0 }, gammaFlip: { total: 40, included: 0 }, gammaFlipSearchStatus: undefined }) } }));
+    expect(withheld.levels).toMatchObject({ openInterestUnpublishedExpirations: ['2026-10-05'], gammaFlipSearchStatus: null, callWall: null });
+    expect((summarizeStrategyScan(scan()).levels as any).openInterestUnpublishedExpirations).toBeUndefined();
+  });
+
+  it('says beside the spot what a stale spot skews, and nothing otherwise', () => {
+    const stale = summarizeStrategyScan(scan({ resolved: { ...scan().resolved, S: { value: 767.22, source: 'broker-public', asOf: '2026-10-02T07:59:57.000Z', stale: true } } })) as any;
+    expect(stale.spotNote).toBe("The spot printed before the last session's open (resolved.S.asOf, the broker's own time), so every pctFromSpot, the expected move and each breakeven's place against it are read against a stale price.");
+    expect((summarizeStrategyScan(scan()) as any).spotNote).toBeUndefined();
+  });
+
   it('withholds levels on incomplete coverage, as the live positioning tool does', () => {
     const partial = summarizeStrategyScan(scan({ levels: { ...scan().levels, coverage: coverage({ gamma: { total: 20, included: 19 } }) } }));
     expect(partial.levels).toMatchObject({ callWall: null, putWall: null, gammaMagnet: null, gammaFlip: 97.5, status: { callWall: 'partial', dealerRegime: 'partial' }, dealerRegime: null });
@@ -158,6 +170,9 @@ describe('scan_option_strategies', () => {
     }]);
     await run({ symbol: 'SPY', expiration: '2026-10-16', strategy: 'short_put', minCredit: 1e-7, deltaMin: 0.30000000001, width: 1e-11 });
     expect(calls[1].params).toMatchObject({ minCredit: '0.0000001', deltaMin: '0.30000000001', width: '0.00000000001' });
+    // A supplied rate and yield go the same way, and only when given.
+    await run({ symbol: 'SPX', expiration: '2026-10-16', strategy: 'short_put', r: 0.0425, q: 0 });
+    expect(calls[2].params).toEqual({ expiration: '2026-10-16', strategy: 'short_put', r: '0.0425', q: '0' });
   });
 
   it('writes every number out as the decimal it reads back from, never rounded', () => {
@@ -168,5 +183,19 @@ describe('scan_option_strategies', () => {
     }
     expect(plainDecimal(1e21)).toBe('1000000000000000000000');
     expect(plainDecimal(-2.5e-8)).toBe('-0.000000025');
+  });
+});
+
+describe('slippage and events', () => {
+  it('publishes each candidate\'s natural slippage, the cap asked for, and the events before the expiration', () => {
+    const shaped: any = summarizeStrategyScan(scan({
+      request: { ...scan().request, maxNaturalSlippagePct: 25 },
+      events: { from: '2026-09-28', through: '2026-10-16', earningsOnOrBefore: '2026-10-10', exDividendOnOrBefore: { date: '2026-10-01', amount: 0.3, declared: false } },
+      candidates: [candidate({ naturalSlippagePct: 20 })],
+    }));
+    expect(shaped.request.maxNaturalSlippagePct).toBe(25);
+    expect(shaped.candidates[0].naturalSlippagePct).toBe(20);
+    expect(shaped.events).toEqual({ from: '2026-09-28', through: '2026-10-16', earningsOnOrBefore: '2026-10-10', exDividendOnOrBefore: { date: '2026-10-01', amount: 0.3, declared: false } });
+    expect((summarizeStrategyScan(scan({ events: null })) as any).events).toBeNull();
   });
 });

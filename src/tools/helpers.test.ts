@@ -130,7 +130,7 @@ describe('sanitizeMcpWireOutput publishes camelCase field names', () => {
       // review: the pattern's anchors; a snake run inside a longer
       // key is data, not a field name.
       versions: { 'model_name.v2': 1, 'x-fixed_income': 2, 'fixed_income ': 3, ' atm_iv': 4 },
-      callWall: 510, x: 1, reason: 'below_average', source: 'scan_tickers',
+      callWall: 510, x: 1, reason: 'below_average', source: 'nearest_date',
     };
     expect(sanitizeMcpWireOutput(data)).toEqual(data);
   });
@@ -933,5 +933,241 @@ describe('no tool output names a data vendor', () => {
     }))({});
     expect(JSON.stringify(res)).not.toMatch(any);
     expect(res.structuredContent).toEqual({ symbol: 'ROIV', description: 'per VENDOR' });
+  });
+});
+
+describe('sanitizeMcpWireOutput never publishes our own infrastructure', () => {
+  // The proxy's history provenance names the database product and the table
+  // each answer came from (2026-09-30 smoke test: "provider":"supabase",
+  // scan_tickers, scan_strikes, option_ticker_snapshots), on get_iv_history,
+  // get_greeks_history and get_options_analytics_history.
+  const provenance = {
+    provider: 'supabase',
+    source: 'scan_tickers',
+    sourceKind: 'cached',
+    historySnapshotId: 'scan_tickers:SPY:auto:latest:2026-09-29:62',
+    openInterestSource: 'scan_strikes',
+    volumeSource: 'option_ticker_snapshots',
+    greeksSource: 'option_term_structure',
+    fetchedAt: '2026-09-29T20:00:00.000Z',
+  };
+
+  test('drops a field whose value is the database product, and relabels table names wherever they appear', () => {
+    const out = sanitizeMcpWireOutput({ provenance, rows: [{ source: 'futures_strikes' }, { source: 'ticker_snapshots' }] }) as any;
+    const text = JSON.stringify(out);
+    expect(text).not.toMatch(/supabase/i);
+    for (const table of ['scan_tickers', 'scan_strikes', 'option_ticker_snapshots', 'option_term_structure', 'futures_strikes', 'ticker_snapshots']) {
+      expect(text).not.toContain(table);
+    }
+    expect(out.provenance).not.toHaveProperty('provider');
+    expect(out.provenance).toMatchObject({
+      source: 'eod-options-summary',
+      historySnapshotId: 'eod-options-summary:SPY:auto:latest:2026-09-29:62',
+      openInterestSource: 'eod-strike-data',
+      volumeSource: 'eod-options-snapshot',
+      greeksSource: 'eod-term-structure',
+      sourceKind: 'cached',
+      fetchedAt: '2026-09-29T20:00:00.000Z',
+    });
+    expect(out.rows).toEqual([{ source: 'eod-futures-strikes' }, { source: 'eod-ticker-snapshot' }]);
+  });
+
+  test('rewrites the database product named inside text, and leaves lookalike words alone', () => {
+    expect(sanitizeMcpWireOutput({ note: 'Read from Supabase at 20:00.' })).toEqual({ note: 'Read from the platform database at 20:00.' });
+    expect(sanitizeMcpWireOutput({ source: 'SUPABASE' })).toEqual({});
+    // Not our tables: a word that merely contains one, and ordinary fields.
+    expect(sanitizeMcpWireOutput({ note: 'rescan_tickers_x', other: 'rescan_tickers', source: 'historical', table: 'default' }))
+      .toEqual({ note: 'rescan_tickers_x', other: 'rescan_tickers', source: 'historical', table: 'default' });
+  });
+
+  test('the same scrub reaches an error result', async () => {
+    const handler = toolHandler(async () => {
+      throw new LiveApiError('read from scan_strikes via supabase failed', 503, 'UPSTREAM', true, undefined, { table: 'scan_strikes' });
+    });
+    const result: any = await handler({});
+    expect(JSON.stringify(result)).not.toMatch(/supabase|scan_strikes/i);
+  });
+});
+
+describe('toolHandler publishes every number at 15 significant digits', () => {
+  // The thirty-third run: get_options_chain atmStraddleMid 4.4399999999999995,
+  // get_insider_trading totalValue 815803.9400000001, get_snapshot cashBalance
+  // 32164.399999999994, get_greeks_history values at 17 digits.
+  test('drops binary noise everywhere in a result and leaves whole numbers and short decimals alone', async () => {
+    const handler = toolHandler(async () => ({
+      atmStraddleMid: 4.4399999999999995, totalValue: 815803.9400000001, cashBalance: 32164.399999999994,
+      rows: [{ putCallSkew: 0.016460000000000002, delta: -0.24352300000000004 }],
+      openInterest: 1000000000000001, strike: 762.63, date: '2026-09-29',
+    }));
+    const result: any = await handler({});
+    expect(result.structuredContent).toEqual({
+      atmStraddleMid: 4.44, totalValue: 815803.94, cashBalance: 32164.4,
+      rows: [{ putCallSkew: 0.01646, delta: -0.243523 }],
+      openInterest: 1000000000000001, strike: 762.63, date: '2026-09-29',
+    });
+    expect(result.content[0].text).not.toMatch(/\d\.\d{16,}|\d{17,}/);
+  });
+
+  test('a path the tool names as exact keeps the value it computed', async () => {
+    const handler = toolHandler(async () => ({ strikes: { deltaBand: 0.10000000000000002, other: 0.10000000000000002 } }),
+      { exactPaths: ['strikes.deltaBand'] });
+    const result: any = await handler({});
+    expect(result.structuredContent.strikes).toEqual({ deltaBand: 0.10000000000000002, other: 0.1 });
+  });
+
+  test('an empty account-data result is JSON in the text as well as structured', async () => {
+    const handler = toolHandler(async () => ({ data: [] }), { isSyncTool: true });
+    const result: any = await handler({});
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed).toEqual(result.structuredContent);
+    expect(parsed.message).toContain('No data found. Make sure MCP sync is enabled');
+  });
+});
+
+describe('sanitizeMcpWireOutput drops invisible characters', () => {
+  // Thirty-third run: a news summary carried U+200B and U+2060 between words.
+  test('zero-width spaces, word joiners and byte-order marks go; joiners that shape text stay', () => {
+    const zw = String.fromCharCode(0x200b);
+    const wj = String.fromCharCode(0x2060);
+    const bom = String.fromCharCode(0xfeff);
+    const zwj = String.fromCharCode(0x200d);
+    const out = sanitizeMcpWireOutput({
+      summary: `Apple ${zw}shares rose${wj} after ${bom}the report`,
+      rows: [`a${zw}b`],
+      emoji: `x${zwj}y`,
+    });
+    expect(out).toEqual({ summary: 'Apple shares rose after the report', rows: ['ab'], emoji: `x${zwj}y` });
+  });
+});
+
+describe('the infrastructure and invisible-character scrubs reach every path (review)', () => {
+  test('keys naming the database product or a table are renamed, snake and camel alike', () => {
+    const out = sanitizeMcpWireOutput({ supabaseProvider: 'cached', scan_tickers: 1, rows_scan_strikes: 2, SupabaseUrl: 'x' }) as Record<string, unknown>;
+    expect(JSON.stringify(out)).not.toMatch(/supabase|scan_tickers|scanTickers|scan_strikes|scanStrikes/i);
+    expect(out).toEqual({ platformDatabaseProvider: 'cached', eodOptionsSummary: 1, rowsEodStrikeData: 2, PlatformDatabaseUrl: 'x' });
+  });
+
+  test('a renamed key never overwrites another', () => {
+    const out = sanitizeMcpWireOutput({ eodOptionsSummary: 'kept', scan_tickers: 'renamed' }) as Record<string, unknown>;
+    expect(out.eodOptionsSummary).toBe('kept');
+    expect(Object.values(out)).toContain('renamed');
+  });
+
+  test('the product inside an identifier in text reads platformDatabase, and as a word the platform database', () => {
+    expect(sanitizeMcpWireOutput({ note: 'via supabaseClient and Supabase' })).toEqual({ note: 'via platformDatabaseClient and the platform database' });
+  });
+
+  test('keys in error details and past the depth limit are renamed too', async () => {
+    const handler = toolHandler(async () => {
+      throw new LiveApiError('failed', 503, 'UPSTREAM', true, undefined, { scan_tickers: 1, supabaseRegion: 'x' });
+    });
+    const result: any = await handler({});
+    expect(JSON.stringify(result)).not.toMatch(/supabase|scan_tickers/i);
+    let deep: any = { scan_strikes: 1 };
+    for (let i = 0; i < 25; i += 1) deep = { d: deep };
+    expect(JSON.stringify(sanitizeMcpWireOutput(deep))).not.toMatch(/scan_strikes/);
+    // Past the depth limit keys keep their form, so the label keeps the key's
+    // snake form rather than the value label's hyphens.
+    let leaf: any = sanitizeMcpWireOutput(deep);
+    while (leaf.d) leaf = leaf.d;
+    expect(leaf).toEqual({ eod_strike_data: 1 });
+  });
+
+  test('a URL encoding the product in its path is removed too', () => {
+    expect(sanitizeMcpWireOutput({ image: 'https://cdn.example.com/%73upabase/logo.png' })).toEqual({});
+  });
+
+  test('a URL on the database product is removed however it is encoded', () => {
+    const encoded = 'https://abc.%73upabase.co/storage/v1/logo.png';
+    expect(sanitizeMcpWireOutput({ image: encoded })).toEqual({});
+    expect(sanitizeMcpWireOutput({ note: `see ${encoded} now` })).toEqual({ note: 'see a removed link now' });
+  });
+
+  test('invisible characters are dropped from errors, keys and values past the depth limit', async () => {
+    const zw = String.fromCharCode(0x200b);
+    const wj = String.fromCharCode(0x2060);
+    const handler = toolHandler(async () => {
+      throw new LiveApiError(`bad${zw}symbol`, 400, 'INVALID_REQUEST', false, undefined, { detail: `a${wj}b` });
+    });
+    const result: any = await handler({});
+    expect(JSON.stringify(result)).not.toMatch(/[​⁠]/);
+    expect(sanitizeMcpWireOutput({ [`k${zw}ey`]: 1 })).toEqual({ key: 1 });
+    let deep: any = { leaf: `x${wj}y` };
+    for (let i = 0; i < 25; i += 1) deep = { d: deep };
+    expect(JSON.stringify(sanitizeMcpWireOutput(deep))).not.toMatch(/[​⁠]/);
+  });
+});
+
+describe('toolHandler publishes what JSON makes of a value (review)', () => {
+  test('a Date is its ISO string and a boxed number its value, as before the rounding', async () => {
+    // eslint-disable-next-line no-new-wrappers
+    const handler = toolHandler(async () => ({ asOf: new Date('2026-09-30T12:00:00Z'), boxed: new Number(12.34), noisy: 4.4399999999999995 }));
+    const result: any = await handler({});
+    expect(result.structuredContent).toEqual({ asOf: '2026-09-30T12:00:00.000Z', boxed: 12.34, noisy: 4.44 });
+  });
+});
+
+describe('the scrubs hold for case, key order, stray escapes and null results (review)', () => {
+  const zw = String.fromCharCode(0x200b);
+
+  test('table names match in any case, in keys, meta keys, text and details', async () => {
+    expect(sanitizeMcpWireOutput({ SCAN_TICKERS: 1, note: 'from SCAN_STRIKES' })).toEqual({ eodOptionsSummary: 1, note: 'from eod-strike-data' });
+    expect(JSON.stringify(sanitizeMcpWireOutput({ _SCAN_TICKERS_meta: { n: 1 } }))).not.toMatch(/scan_tickers|scanTickers/i);
+    const handler = toolHandler(async () => { throw new LiveApiError('read SCAN_TICKERS', 503, 'UPSTREAM', true, undefined, { Scan_Strikes: 1 }); });
+    expect(JSON.stringify(await handler({}))).not.toMatch(/scan_tickers|scan_strikes/i);
+  });
+
+  test('invisible characters leave a key before anything reads it', async () => {
+    expect(sanitizeMcpWireOutput({ [`_s${zw}can_strikes_meta`]: 1 })).toEqual({ eodStrikeDataMeta: 1 });
+    expect(sanitizeMcpWireOutput({ supabase_provider: 1 })).toEqual({ platformDatabaseProvider: 1 });
+    const handler = toolHandler(async () => { throw new LiveApiError('x', 503, 'UPSTREAM', true, undefined, { [`s${zw}can_tickers`]: 1 }); });
+    const result: any = await handler({});
+    expect(JSON.stringify(result)).toContain('eod_options_summary');
+    expect(JSON.stringify(result)).not.toMatch(/scan_tickers|eod-options-summary/);
+  });
+
+  test('an unrelated bad escape does not hide an encoded product in the path', () => {
+    const url = 'https://example.com/%73upabase/%FF';
+    expect(sanitizeMcpWireOutput({ url })).toEqual({});
+    expect(sanitizeMcpWireOutput({ note: `see ${url} here` })).toEqual({ note: 'see a removed link here' });
+  });
+
+  test('the data-vendor URL check decodes escapes one by one too', () => {
+    // The acronym from base64, so this file names no vendor; its first letter
+    // percent-encoded, beside an unrelated bad escape.
+    const name = Buffer.from('b3JhdHM=', 'base64').toString('utf8');
+    const url = `https://example.com/%${name.charCodeAt(0).toString(16)}${name.slice(1)}/%FF`;
+    expect(sanitizeMcpWireOutput({ url })).toEqual({});
+  });
+
+  test('a result that serializes to null is the ordinary no-data answer, not an error', async () => {
+    const handler = toolHandler(async () => ({ toJSON: () => null }));
+    const result: any = await handler({});
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toEqual({ dataAvailable: false, message: 'No data available for this query.' });
+  });
+});
+
+describe('cleaned keys never overwrite, multi-byte escapes decode, and every rule reads cleaned keys (review)', () => {
+  const zw = String.fromCharCode(0x200b);
+
+  test('a key that lost an invisible character never overwrites another, in any branch', () => {
+    const meta = sanitizeMcpWireOutput({ fooMeta: 'kept', [`_f${zw}oo_meta`]: 'renamed' }) as Record<string, unknown>;
+    expect(meta.fooMeta).toBe('kept');
+    expect(Object.values(meta)).toContain('renamed');
+    const plain = sanitizeMcpWireOutput({ callWall: 'kept', [`call${zw}Wall`]: 'renamed' }) as Record<string, unknown>;
+    expect(plain.callWall).toBe('kept');
+    expect(Object.values(plain)).toContain('renamed');
+  });
+
+  test('a valid multi-byte escape decodes, beside a broken one', () => {
+    const name = Buffer.from('ZmluYW5jaWFsIG1vZGVsaW5nIHByZXA=', 'base64').toString('utf8').replace(/ /g, '%C2%A0');
+    expect(sanitizeMcpWireOutput({ url: `https://example.com/${name}/logo.png` })).toEqual({});
+    expect(sanitizeMcpWireOutput({ note: `see https://example.com/${name}/%FF now` })).toEqual({ note: 'see a removed link now' });
+    expect(sanitizeMcpWireOutput({ url: 'https://example.com/%C2%A0%73upabase%FF' })).toEqual({});
+  });
+
+  test('sync-row detection reads the cleaned keys too', () => {
+    expect(sanitizeMcpWireOutput({ id: 'row-id', [`user_${zw}id`]: 'u', value: 1 })).toEqual(sanitizeMcpWireOutput({ id: 'row-id', user_id: 'u', value: 1 }));
   });
 });

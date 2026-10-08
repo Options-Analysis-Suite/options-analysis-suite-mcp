@@ -113,3 +113,40 @@ export function summarizeEarnings(payload: unknown, historyLimit = 8, now: Date 
       : undefined,
   };
 }
+
+/** Every finite number rounded to four decimals; nulls, strings and booleans untouched. */
+function roundDeep(value: unknown): unknown {
+  if (typeof value === 'number') return Number.isFinite(value) ? Math.round(value * 10_000) / 10_000 : value;
+  if (Array.isArray(value)) return value.map(roundDeep);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, entry]) => [key, roundDeep(entry)]));
+  }
+  return value;
+}
+
+/**
+ * The proxy's earnings-moves answer for the model: the events (the route
+ * already caps them at eight), the summary with its per-source counts, the
+ * notes that say how each figure was made, and the price-history state,
+ * rounded to four decimals with every null kept. `dataAvailable` is false
+ * when no past event had a close around it, so an empty list is not read as
+ * "no moves".
+ */
+export function summarizeEarningsMoves(payload: unknown): unknown {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return { dataAvailable: false, message: 'No earnings moves were returned.' };
+  const typed = payload as Record<string, unknown>;
+  const events = Array.isArray(typed.events) ? typed.events : [];
+  return {
+    dataAvailable: events.length > 0,
+    // An empty list is a fact about the symbol (no past report with a close
+    // around it on file), not an outage; say so.
+    reason: events.length > 0 ? null : 'no-past-earnings-with-closes',
+    symbol: typed.symbol ?? null,
+    asOf: typed.asOf ?? null,
+    straddleWindowStart: typed.straddleWindowStart ?? null,
+    events: roundDeep(events),
+    summary: roundDeep(typed.summary ?? null),
+    notes: typed.notes ?? null,
+    priceHistory: typed.priceHistory ?? null,
+  };
+}

@@ -290,7 +290,7 @@ function makeRun(index = 0) {
       key: `compute-data-${index}`,
       resultId: 900 + index,
       summary: {
-        engineVersion: '2.0.6',
+        engineVersion: '2.0.8',
         inputHash: testInputHash(index + 1),
         completionState: 'complete',
         valuationTime: 1774771100000 - index * 1000,
@@ -1059,7 +1059,7 @@ describe('get_compute_runs wire output', () => {
         syncSchemaVersion: 2,
         runSchemaVersion: 2,
         summary: {
-          engineVersion: '2.0.6',
+          engineVersion: '2.0.8',
           inputHash: testInputHash(99),
           totalPositions: 2,
           modelExclusionCount: 1,
@@ -1242,9 +1242,9 @@ describe('get_compute_runs wire output', () => {
       mutate(run);
       unsupported.push(run);
     };
-    addUnsupported(run => { run.data.summary.engineVersion = '2.0.4'; });
     addUnsupported(run => { run.data.summary.engineVersion = '2.0.7'; });
-    addUnsupported(run => { run.data.summary.engineVersion = '2.0.6-rc.1'; });
+    addUnsupported(run => { run.data.summary.engineVersion = '2.0.9'; });
+    addUnsupported(run => { run.data.summary.engineVersion = '2.0.8-rc.1'; });
     addUnsupported(run => { run.data.summary.inputHash = 'abc123'; });
     addUnsupported(run => { run.data.summary.inputHash = 'A'.repeat(64); });
     addUnsupported(run => { run.scope = 'core'; });
@@ -1697,7 +1697,7 @@ describe('get_compute_runs wire output', () => {
     expect(parsed.matchedCount).toBe(1);
     expect(parsed.hasMore).toBe(false);
     expect(parsed.data).toHaveLength(1);
-    expect(parsed.data[0].engineVersion).toBe('2.0.6');
+    expect(parsed.data[0].engineVersion).toBe('2.0.8');
     expect(parsed.data[0].underlyings).toEqual(['QQQ']);
     expect(parsed.data[0].startedAt).toBe(new Date(currentTarget.timestamp).toISOString());
   });

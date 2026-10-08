@@ -110,16 +110,26 @@ function trimHalt(halt: TradingHalt): Record<string, unknown> {
   };
 }
 
-function uniqueLatestActiveHalts(halts: TradingHalt[]): TradingHalt[] {
-  const bySymbol = new Map<string, TradingHalt>();
-
-  for (const halt of halts.sort(compareByRecency)) {
+/**
+ * The symbols halted now: each symbol's LATEST halt event, kept only when it
+ * has not resumed. The feed never updates an earlier row, so a halt followed
+ * by later halts of the same symbol that resumed still reads "Halted" (LQDA
+ * on 2026-09-30: a 15:31:56 pause beside later halts resumed at 17:45 and
+ * 17:52); the later event supersedes it. At the same halt time a resumed row
+ * wins, since it carries the resumption the other lacks.
+ */
+function currentlyHalted(halts: TradingHalt[]): TradingHalt[] {
+  const latest = new Map<string, TradingHalt>();
+  for (const halt of halts) {
     const key = typeof halt.symbol === 'string' ? halt.symbol.toUpperCase() : '';
-    if (!key || bySymbol.has(key)) continue;
-    bySymbol.set(key, halt);
+    if (!key) continue;
+    const seen = latest.get(key);
+    const newer = seen === undefined
+      || parseTimestamp(halt.haltTime) > parseTimestamp(seen.haltTime)
+      || (parseTimestamp(halt.haltTime) === parseTimestamp(seen.haltTime) && isActiveHalt(seen) && !isActiveHalt(halt));
+    if (newer) latest.set(key, halt);
   }
-
-  return Array.from(bySymbol.values());
+  return Array.from(latest.values()).filter(isActiveHalt).sort(compareByRecency);
 }
 
 function uniqueRecentVolatilityHalts(halts: TradingHalt[], cap: number): TradingHalt[] {
@@ -179,7 +189,7 @@ export function summarizeTradingHalts(
   const nowMs = typeof now === 'string' ? parseTimestamp(now) : now.getTime();
   const deduped = dedupeTradingHalts(halts).sort(compareByRecency);
   const duplicateRowsRemoved = halts.length - deduped.length;
-  const activeHalts = uniqueLatestActiveHalts(deduped.filter(isActiveHalt));
+  const activeHalts = currentlyHalted(deduped);
   const olderActiveRowsCollapsed = deduped.filter(isActiveHalt).length - activeHalts.length;
   const todayHalts = deduped.filter((halt) => sameUtcDay(parseTimestamp(halt.haltTime), nowMs));
   const recentMaterialHalts = deduped
@@ -239,7 +249,7 @@ export function summarizeSymbolTradingHalts(payload: unknown): unknown {
 
   const deduped = dedupeTradingHalts(normalizedHalts).sort(compareByRecency);
   const duplicateRowsRemoved = normalizedHalts.length - deduped.length;
-  const activeHalts = uniqueLatestActiveHalts(deduped.filter(isActiveHalt));
+  const activeHalts = currentlyHalted(deduped);
   const olderActiveRowsCollapsed = deduped.filter(isActiveHalt).length - activeHalts.length;
   const resumedHalts = deduped.filter((halt) => !isActiveHalt(halt));
   const visibleHistory = [...activeHalts, ...resumedHalts].sort(compareByRecency);

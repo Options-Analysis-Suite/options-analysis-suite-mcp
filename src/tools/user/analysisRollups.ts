@@ -11,7 +11,7 @@ export function register(server: McpServer, client: ProxyClient): void {
     'get_analysis_rollups',
     {
       title: 'Analysis Rollups',
-      description: 'Get pre-computed daily or weekly aggregates of the user\'s analysis activity per symbol. Default response returns compact rollup rows plus a cross-period summary of volatility, spot, and model usage trends.',
+      description: 'Get pre-computed daily or weekly aggregates of the user\'s analysis activity per symbol. Default response returns compact rollup rows plus a cross-period summary of volatility, spot, and model usage trends. Rollups count only what the Analysis page records: calibrated models and standard Monte Carlo.',
       inputSchema: {
         symbol: z.string().describe('Ticker symbol'),
         period: z.enum(['day', 'week']).default('day').describe('Aggregation period'),

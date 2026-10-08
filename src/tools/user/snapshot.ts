@@ -110,8 +110,27 @@ function replaceDuplicatedDetailsInSnapshotRows(res: any): void {
 const SNAPSHOT_DESCRIPTION = `Get the user's synced snapshot history by type. Each type serves a different question:
 
 • type="gex" — per-symbol Gamma Exposure snapshots. REQUIRED: \`symbol\`. Returns the 3 most recent snapshots (no dedupe — rows may be near-duplicates if recorded back-to-back). Includes per-expiration breakdown, call/put walls, gamma flip point, gamma magnet, unusual activity, expected move data, and raw vs in-wall visible combo-strike counts.
-• type="portfolio" — account-wide portfolio snapshots with market-scaled raw Greeks (no \$): first-order delta, gamma, theta/day, vega/1% IV, rho/1% rate; second-order vanna/1% IV, charm/day (delta decay), vomma/1% IV², veta/day (vega decay, sign-flipped for market convention). Default view collapses consecutive identical snapshots to surface the latest distinct states. For \$-impact views of the same Greeks, use type="risk".
-• type="risk" — account-wide risk-analysis snapshots: Value-at-Risk (95%/99%), Conditional VaR, portfolio beta, Sharpe ratio, maximum drawdown, volatility, stress test results, and aggregate Greek \$-impact exposure. \$-Greeks include first-order dollarDelta, dollarGamma (per 1% move), dollarTheta/day, dollarVega (per 1% IV), dollarRho (per 1% rate) and second-order dollarVanna (per 1% IV move), dollarCharm (daily \$Δ decay), dollarVomma (per 1% IV), dollarVeta (daily vega decay). Units & sign convention: var95/var99/cvar95/maxDrawdown/volatility are in PERCENT (e.g., 2.5 = 2.5%); volatility is annualized; var95/var99/cvar95/maxDrawdown are POSITIVE loss magnitudes (e.g., var95=2.5 means a 2.5% loss). beta/sharpeRatio are dimensionless. stressResults[].impact is signed \$ P&L; impactPercent is signed % of portfolio. details.historicalVarDetails: worstDay is POSITIVE magnitude of the worst single-day LOSS (worstDay=13.46 means a 13.46% loss, NOT a 13.46% gain); bestDay and avgReturn are SIGNED percent returns. Default view collapses consecutive identical snapshots. For raw-unit Greeks, use type="portfolio".`;
+• type="portfolio" — account-wide portfolio snapshots with market-scaled raw Greeks: first-order delta, gamma, theta/day, vega/1% IV, rho/1% rate; second-order vanna/1% IV, charm/day (delta decay), vomma/1% IV², veta/day (vega decay, sign-flipped for market convention). Its \`delta\` is the share-equivalent delta summed across every underlying with no price weighting, while \`details.greeks.dollarDelta\` (and \`dollarGamma\`) weights each position by its own underlying's price, so the two can differ in size and even in sign when positions span underlyings priced far apart (a short index position beside long shares of a low-priced stock). Default view collapses consecutive identical snapshots to surface the latest distinct states. For \$-impact views of the same Greeks, use type="risk".
+• type="risk" — account-wide risk-analysis snapshots: Value-at-Risk (95%/99%), Conditional VaR, portfolio beta, Sharpe ratio, maximum drawdown, volatility, stress test results, and aggregate Greek \$-impact exposure. \$-Greeks include first-order dollarDelta, dollarGamma (per 1% move), dollarTheta/day, dollarVega (per 1% IV), dollarRho (per 1% rate) and second-order dollarVanna (per 1% IV move), dollarCharm (daily \$Δ decay), dollarVomma (per 1% IV), dollarVeta (daily vega decay). Units & sign convention: var95/var99/cvar95/maxDrawdown/volatility are in PERCENT (e.g., 2.5 = 2.5%); volatility is annualized; var95/var99/cvar95/maxDrawdown are POSITIVE loss magnitudes (e.g., var95=2.5 means a 2.5% loss). beta/sharpeRatio are dimensionless. stressResults[].impact is signed \$ P&L; impactPercent is signed % of portfolio. details.historicalVarDetails: worstDay is POSITIVE magnitude of the worst single-day LOSS (worstDay=13.46 means a 13.46% loss, NOT a 13.46% gain); bestDay and avgReturn are SIGNED percent returns. A figure or stress row with contractStatus "rejected" (calculationAccepted false) is display-only, whether its inputs were fallback or degraded or they changed after it was computed (a stale_snapshot reason); its displayReasons say which. It is not a valid risk result, so report it as unavailable, not as the portfolio\'s risk. Default view collapses consecutive identical snapshots. For raw-unit Greeks, use type="portfolio".
+• type="strategy" — the strategy definitions you sent from the Strategy page's AI Assistant panel ("Send to assistant"): symbol, label, the legs with their strikes, expirations, premiums (and where each came from: market, last, manual or theoretical) and implied vols, and the page's inputs (spot and its source, the rate and the dividend yield each with where the page got it and the Treasury series the rate matched (\`rateSeries\`, the shortest option leg\'s tenor), the volatility mode the legs were priced with, and the model\'s name). Definitions only, never computed outputs: price or stress one with compute_scenario by its \`strategyKey\`, which reprices the legs without retyping them. Optional \`symbol\` filter; newest first; the newest hundred are kept.`;
+
+const STRATEGY_NOTE = 'Strategy definitions the user sent from the Strategy page; no computed outputs are stored. To price or stress one, call compute_scenario with its strategyKey (the legs, spot and vols are read from the record; shocks are optional).';
+const STRATEGY_EMPTY_NOTE = 'No strategy definitions have been sent yet. The user sends one from the Strategy page: AI Assistant panel, Data tab, "Send to assistant" (sync must be on in Account, AI Settings).';
+
+/** One stored definition as the model sees it: the record, with its two clocks as ISO strings. */
+function shapeStrategyRecord(record: any): Record<string, unknown> {
+  const data = record && typeof record === 'object' && record.data && typeof record.data === 'object' ? record.data : {};
+  const iso = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? new Date(value).toISOString() : null);
+  return {
+    strategyKey: data.strategyKey ?? record?.strategy_key ?? null,
+    symbol: data.symbol ?? record?.symbol ?? null,
+    label: data.label ?? record?.label ?? null,
+    legs: Array.isArray(data.legs) ? data.legs : [],
+    inputs: data.inputs && typeof data.inputs === 'object' ? data.inputs : {},
+    builtAt: iso(data.builtAt),
+    updatedAt: iso(data.updatedAt ?? record?.timestamp),
+  };
+}
 
 export function register(server: McpServer, client: ProxyClient): void {
   server.registerTool(
@@ -120,8 +139,8 @@ export function register(server: McpServer, client: ProxyClient): void {
       title: 'Account Snapshots',
       description: SNAPSHOT_DESCRIPTION,
       inputSchema: {
-        type: z.enum(['gex', 'portfolio', 'risk']).describe('Which snapshot feed to fetch.'),
-        symbol: z.string().optional().describe('Required for type=gex; ignored otherwise.'),
+        type: z.enum(['gex', 'portfolio', 'risk', 'strategy']).describe('Which feed to fetch.'),
+        symbol: z.string().optional().describe('Required for type=gex; an optional filter for type=strategy; ignored otherwise.'),
         limit: z.number().int().min(1).max(50).default(3).describe('Max snapshots (default 3)'),
         full: z.boolean().default(false).describe('Return the less-summarized sanitized payload including detail tables, correlation matrices, and per-position breakdowns, still subject to the MCP response budget.'),
       },
@@ -129,6 +148,17 @@ export function register(server: McpServer, client: ProxyClient): void {
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     toolHandler(async ({ type, symbol, limit, full }) => {
+      if (type === 'strategy') {
+        const params: Record<string, string> = { type: 'strategy', limit: String(limit) };
+        if (symbol) params.symbol = symbol.toUpperCase();
+        const res = await client.get('/sync/analysis-data', params) as any;
+        const rows: any[] = res && Array.isArray(res.data) ? res.data : [];
+        for (const record of rows) stripSyncRecordMetadata(record);
+        if (full && res != null) return { _skipSizeGuard: true, data: res };
+        const data = rows.map(shapeStrategyRecord);
+        return { data, count: data.length, note: data.length === 0 ? STRATEGY_EMPTY_NOTE : STRATEGY_NOTE };
+      }
+
       if (type === 'gex') {
         if (!symbol) throw new Error("type='gex' requires `symbol`");
         const res = await client.get('/sync/analysis-data', { type: 'gex', symbol, limit: String(limit) }) as any;
@@ -240,6 +270,7 @@ export function register(server: McpServer, client: ProxyClient): void {
         }
       }
       return res;
-    }, { isSyncTool: true }),
+    // The strategy type's note survives an empty answer: it says how to send one.
+    }, { isSyncTool: true, keepOnEmpty: ['note'] }),
   );
 }

@@ -639,3 +639,64 @@ describe('get_regime intraday prior label', () => {
     expect(JSON.stringify(parsed)).not.toContain('prevLabel');
   });
 });
+
+describe('scope=intraday migration', () => {
+  const scan = (date: string, scanTime: string, interval: string, gex: Record<string, unknown> | null) => ({
+    date, scan_time: scanTime, interval, scope: 'market', label: 'NORMAL', stress_score: 0.1, confidence: 0.8, drivers: [],
+    vector: { z: {}, raw: {}, _meta: { gex } },
+  });
+  const level = (spotPrice: number, gammaFlip: number | null, callWall: number, putWall: number, absGamma: number, netGamma: number) =>
+    ({ spotPrice, netGamma, netDelta: 0, netVega: 0, netVanna: 0, netCharm: 0, netVomma: 0, callWall, putWall, gammaFlip, absGamma, regime: 'positive', topStrikes: [] });
+  // The proxy's order: newest date first, scan time ascending within a date.
+  // Built per call: the handler shapes the scans it is given in place.
+  const stub = () => ({
+    symbol: 'SPY', count: 5,
+    scans: [
+      scan('2026-09-17', '2026-09-17T13:30:00.000Z', 'open', level(100, 100, 105, 95, 100, 1e9)),
+      scan('2026-09-17', '2026-09-17T15:00:00.000Z', 'midday', level(101, 101, 106, 95, 105, 1.2e9)),
+      scan('2026-09-17', '2026-09-17T17:00:00.000Z', 'afternoon', null),
+      scan('2026-09-17', '2026-09-17T19:30:00.000Z', 'pre-close', level(102, null, 106, 96, 105, 1.3e9)),
+      scan('2026-09-16', '2026-09-16T13:30:00.000Z', 'open', level(99, 99, 104, 94, 99, 0.8e9)),
+      scan('2026-09-16', '2026-09-16T19:30:00.000Z', 'pre-close', level(100.5, 99.5, 105, 94, 100, 0.9e9)),
+    ],
+  });
+
+  test('each scan carries its levels\' change against the previous scan with exposures, and the first scan of a date against the previous session\'s last', async () => {
+    const { handler } = createHarness(stub());
+    const parsed = JSON.parse((await handler({ scope: 'intraday', symbol: 'SPY', migration: true })).content[0].text);
+    const [open17, midday17, afternoon17, preClose17, open16, preClose16] = parsed.scans;
+    expect(String(parsed.migrationNote)).toMatch(/scan start/i);
+
+    // 09-17 open against 09-16 pre-close, eighteen hours earlier.
+    expect(open17.migration.basis).toBe('previous-session-last-scan');
+    expect(open17.migration.gammaFlip).toEqual({ from: 99.5, to: 100, change: 0.5, changePctOfSpot: 0.5, perHour: 0.0278, direction: 'up' });
+    expect(open17.migration.putWall).toEqual({ from: 94, to: 95, change: 1, changePctOfSpot: 1, perHour: 0.0556, direction: 'up' });
+    expect(open17.migration.netGamma).toEqual({ from: 0.9e9, to: 1e9, change: 1e8, changePct: 11.1111, perHour: 5555555.5556, direction: 'up' });
+
+    // 09-17 midday against 09-17 open, ninety minutes earlier.
+    expect(midday17.migration.basis).toBe('previous-scan');
+    expect(midday17.migration.gammaFlip).toEqual({ from: 100, to: 101, change: 1, changePctOfSpot: 0.9901, perHour: 0.6667, direction: 'up' });
+    expect(midday17.migration.putWall).toEqual({ from: 95, to: 95, change: 0, changePctOfSpot: 0, perHour: 0, direction: 'flat' });
+    expect(midday17.migration.gammaMagnet).toEqual({ from: 100, to: 105, change: 5, changePctOfSpot: 4.9505, perHour: 3.3333, direction: 'up' });
+    expect(midday17.migration.netGamma).toEqual({ from: 1e9, to: 1.2e9, change: 2e8, changePct: 20, perHour: 133333333.3333, direction: 'up' });
+
+    // A scan whose exposure compute failed has no levels: null, and it is not a basis.
+    expect(afternoon17.migration).toBeNull();
+    expect(preClose17.migration.basis).toBe('previous-scan');
+    expect(preClose17.migration.callWall).toEqual({ from: 106, to: 106, change: 0, changePctOfSpot: 0, perHour: 0, direction: 'flat' });
+    // A null level on either side is a null entry, never zero.
+    expect(preClose17.migration.gammaFlip).toEqual({ from: 101, to: null, change: null, changePctOfSpot: null, perHour: null, direction: null });
+
+    // The oldest date in the payload has no earlier session to measure from.
+    expect(open16.migration).toBeNull();
+    expect(preClose16.migration.basis).toBe('previous-scan');
+    expect(preClose16.migration.gammaFlip.change).toBe(0.5);
+  });
+
+  test('without migration the scans carry no migration keys', async () => {
+    const { handler } = createHarness(stub());
+    const parsed = JSON.parse((await handler({ scope: 'intraday', symbol: 'SPY' })).content[0].text);
+    expect(parsed.scans.every((entry: any) => !('migration' in entry))).toBe(true);
+    expect('migrationNote' in parsed).toBe(false);
+  });
+});

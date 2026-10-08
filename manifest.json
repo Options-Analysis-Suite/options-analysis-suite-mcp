@@ -80,11 +80,11 @@
     },
     {
       "name": "get_regime",
-      "description": "Get regime data at one of three scopes: market (composite stress regime across SPY/QQQ/IWM/DIA), symbol (per-symbol daily regime + authoritative Greek exposures — net gamma/delta/vega/vanna/charm/vomma, call wall, put wall, gamma flip, gamma magnet, top 10 gamma strikes), or intraday (5 scans/day with stress scoring + Greek snapshots). Pick via the scope enum; symbol and intraday require `symbol`"
+      "description": "Get regime data at one of six scopes: market (composite stress regime across SPY/QQQ/IWM/DIA), symbol (per-symbol daily regime + authoritative Greek exposures — net gamma/delta/vega/vanna/charm/vomma, call wall, put wall, gamma flip, gamma magnet, top 10 gamma strikes), intraday (5 scans/day with stress scoring + Greek snapshots), volatility (the VIX term structure at the close: VIX1D to VIX6M, its shape, VIX/VIX3M and VVIX), sectors (sector and industry P/E and daily change by exchange, with one group's history), or cot (CFTC Commitments of Traders positioning: a futures contract's family market with every trader group and its 3-year range, or every market's speculative line). Pick via the scope enum; symbol and intraday require `symbol`"
     },
     {
       "name": "get_earnings",
-      "description": "Get earnings history and estimates"
+      "description": "Get earnings history and estimates; with includeMoves, the realized and implied moves around each of the last eight reports (both one-session moves, the implied move from the stored ATM straddle else ATM IV, the IV crush on one tenor, and realized-over-implied ratios)"
     },
     {
       "name": "get_news",
@@ -96,7 +96,7 @@
     },
     {
       "name": "get_fundamentals",
-      "description": "Get compact company fundamentals with metadata, key ratios, and summarized statements"
+      "description": "Get compact company fundamentals with metadata, key ratios, and summarized statements, plus valuation: the P/E against its sector and industry on its exchange and the market cap with its one- and five-year change"
     },
     {
       "name": "get_dividends",
@@ -108,7 +108,15 @@
     },
     {
       "name": "get_insider_trading",
-      "description": "Get insider trading with grouped open-market buy/sell events and summarized administrative activity"
+      "description": "Get insider trading with grouped purchase and sale events (open market or private alike), summarized administrative activity and quarterly statistics by transaction date, or scope=market for insider filings across covered companies: purchase and sale totals, the top companies by value and the individual lines"
+    },
+    {
+      "name": "get_institutional_ownership",
+      "description": "Get a company's or an ETF's institutional ownership from quarterly Form 13F filings: institutions, shares, reported value and share of market cap, changes from the quarter before, calls and puts, the top holders and the quarterly history, and the ETFs holding it"
+    },
+    {
+      "name": "get_congress_trades",
+      "description": "Get trades by members of Congress and their households from their STOCK Act reports: a company's trades with totals, or scope=market for the trades first disclosed over recent days with the companies traded most; party on the trade date, amount ranges, trade and disclosure dates"
     },
     {
       "name": "get_options_analytics_history",
@@ -120,7 +128,7 @@
     },
     {
       "name": "get_stock_prices",
-      "description": "Get historical OHLCV price data with a compact trend summary and the requested daily bars"
+      "description": "Get historical OHLCV bars (daily, weekly or monthly) with a compact trend summary, a labelled volume-weighted average, and optional Stock Charts indicators (up to six, by catalogue name and the chart's own parameters) computed on the returned bars"
     },
     {
       "name": "get_stock_splits",
@@ -128,7 +136,7 @@
     },
     {
       "name": "get_analyst_data",
-      "description": "Get analyst ratings, price targets, nearest forward estimate periods, and compact rating-history summaries"
+      "description": "Get analysts' monthly rating counts and their 12-month history, individual price targets, price-target summaries, nearest forward estimate periods, recent rating changes, and a quantitative model grade"
     },
     {
       "name": "get_market_calendar",
@@ -140,7 +148,7 @@
     },
     {
       "name": "get_sec_filings",
-      "description": "Get recent SEC EDGAR filings with form/category summaries by default and full=true for the less-summarized filing list"
+      "description": "Get recent SEC EDGAR filings with form/category summaries and merger and offering flags (the newest merger, tender offer or going-private filing within 120 days and the newest shelf registration or securities offering within 30, with counterparties) by default, full=true for the less-summarized filing list, and scope=market for recent merger, tender offer and going-private filings across covered companies"
     },
     {
       "name": "get_fail_to_deliver",
@@ -175,6 +183,18 @@
       "description": "Scan one expiration of your connected broker's live chain for option strategy candidates (Pro and above): single options, vertical spreads, iron condors and butterflies, straddles and strangles, priced from two-sided quotes with payoff, risk-neutral model probabilities, position Greeks and distances to the expected move and dealer levels"
     },
     {
+      "name": "get_live_quote",
+      "description": "Get a LIVE quote for one underlying (stock, ETF or index) from the broker connected to your account (Pro and above): last, bid, ask, sizes, mid, mark, the session's open, high and low, previous close, volume, the broker's quote and trade times, and change against the previous close"
+    },
+    {
+      "name": "get_intraday_bars",
+      "description": "Get one session's LIVE intraday bars (1 to 30 minutes) for a stock, ETF or index from the broker connected to your account (Pro and above; Tradier and Schwab), with the session VWAP and its band, a session summary, and Stock Charts indicators computed on the same bars"
+    },
+    {
+      "name": "rank_live_skew_gex",
+      "description": "Rank a watchlist of up to 50 symbols LIVE by 25-delta skew and net GEX, each with its change since the prior session's close, computed by one model on the live chains from the broker connected to your account and on the prior session's stored chains (Pro and above); may spend the whole per-broker request budget, and a long list is finished over several calls with the same list"
+    },
+    {
       "name": "get_options_snapshot",
       "description": "Get the end-of-day options snapshot for a symbol (spot, max pain, net GEX/DEX, ATM IV term structure, IV rank and percentile, historical vol, volume and open interest), with optional per-strike curve summaries; pass several symbols to compare headline metrics in one request"
     },
@@ -191,6 +211,10 @@
       "description": "Price a European option with Black-Scholes from explicit inputs (Pro and above): price, seventeen Greeks in the commercial API's convention, expected move and risk-neutral ITM probability; r and q supplied or resolved from stored market data, never defaulted"
     },
     {
+      "name": "compute_scenario",
+      "description": "Reprice a multi-leg options strategy across spot moves, vol-point shocks and days elapsed (Pro and above): a P&L grid against each leg's entry, base Greeks in the commercial API's convention, inputs supplied or resolved from stored end-of-day data with their source named, and an optional portfolio fit against held positions (Greeks by underlying, expiration and sector; correlation over sixty daily log returns; a uniform stress across every underlying)"
+    },
+    {
       "name": "get_platform_info",
       "description": "Get platform background information"
     },
@@ -200,7 +224,7 @@
     },
     {
       "name": "get_snapshot",
-      "description": "Get user synced snapshots by type: 'gex' (per-symbol Gamma Exposure — requires symbol; returns 3 most recent snapshots, no dedupe; includes raw vs in-wall visible combo counts when available), 'portfolio' (account-wide portfolio snapshots with market-scaled raw Greeks; default view collapses consecutive identical snapshots), or 'risk' (account-wide risk analysis with $-impact Greeks, VaR, stress tests; default view collapses consecutive identical snapshots)"
+      "description": "Get user synced snapshots by type: 'gex' (per-symbol Gamma Exposure — requires symbol; returns 3 most recent snapshots, no dedupe; includes raw vs in-wall visible combo counts when available), 'portfolio' (account-wide portfolio snapshots with market-scaled raw Greeks; default view collapses consecutive identical snapshots), or 'risk' (account-wide risk analysis with $-impact Greeks, VaR, stress tests; default view collapses consecutive identical snapshots), or 'strategy' (the strategy definitions sent from the Strategy page's AI Assistant panel: symbol, legs, premiums and vols, the page's inputs; definitions only, priced on demand by compute_scenario via strategyKey)"
     },
     {
       "name": "get_analysis_rollups",
@@ -220,7 +244,7 @@
     },
     {
       "name": "get_company_profile",
-      "description": "Get a compact normalized company profile with float metrics, identifiers, and a trimmed description; use full=true for the less-summarized synced row"
+      "description": "Get a compact normalized company profile with float metrics, identifiers, a trimmed description and ESG scores and risk rating, and for a fund its facts, holdings and weights; use full=true for the less-summarized synced row"
     },
     {
       "name": "run_screener",

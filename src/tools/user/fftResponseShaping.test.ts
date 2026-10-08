@@ -118,6 +118,25 @@ describe('flattenObjects', () => {
       .toEqual({ rmse: 0.023 });
   });
 
+  test('keeps whether each position model\'s price stands on a successful calibration', () => {
+    // A portfolio scan stored Heston and Kou strongBuy signals priced from
+    // default parameters after their calibrations failed, with no mark.
+    const result = flattenObjects({
+      positions: [{
+        strike: 764,
+        models: [
+          { model: 'heston', price: 25.73, signal: 'strongBuy', priceDiffPct: 40.51, greeks: {}, actionable: false, calibrationStatus: 'failed', qualityReasons: ['calibration_failed'] },
+          { model: 'merton', price: 18.46, signal: 'neutral', priceDiffPct: 0.8, greeks: { Delta: 0.5 }, actionable: true, calibrationStatus: 'calibrated', qualityReasons: [] },
+          { model: 'bates', price: 18.9, signal: 'neutral', greeks: {} },
+        ],
+      }],
+    });
+    const models = (result.positions as any[])[0].models;
+    expect(models[0]).toMatchObject({ actionable: false, calibrationStatus: 'failed', qualityReasons: ['calibration_failed'] });
+    expect(models[1]).toMatchObject({ actionable: true, calibrationStatus: 'calibrated', qualityReasons: [] });
+    expect(models[2]).not.toHaveProperty('actionable');
+  });
+
   test('keeps arrays intact', () => {
     const obj = { models: ['bs', 'heston'], count: 5 };
     const result = flattenObjects(obj);

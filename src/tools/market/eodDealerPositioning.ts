@@ -116,7 +116,7 @@ export function register(server: McpServer, client: LiveApiClient, now: () => Da
     {
       title: 'EOD Dealer Positioning / GEX',
       description:
-        'Get END-OF-DAY dealer positioning for a symbol from the most recent session on file, over the 0-60 day expiration window: '
+        'Get END-OF-DAY dealer positioning for a symbol from the most recent session on file, over the 0-60 day expiration window (get_options_snapshot and get_options_analytics_history report net GEX and DEX over ALL expirations, so they differ from these for the same session, and neither is wrong: Long-dated contracts carry large delta, so the two can differ even in sign (SPY 2026-09-29: net DEX -16,795,316,756 over all expirations against +16,246,461,968 over 0-60 days)): '
         + 'net GEX and DEX, the dealer regime, the gamma flip, the call wall and put wall (the call wall is the strike with the largest positive call gamma and the put wall the strike with the most negative put gamma (ties go to the lower strike; a side with no such strike leaves that wall null), and nothing orders them, so the put wall can sit above the call wall), the gamma magnet (largest absolute gamma strike), '
         + 'the 30-day expected move (as a decimal fraction of spot, and in dollars), and the top contributing strikes. Covers roughly 5,500 listed equities and ETFs. '
         + 'Positive net gamma means dealers hedge against moves and dampen them; negative means they hedge with moves and amplify them. '

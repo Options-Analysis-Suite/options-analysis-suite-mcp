@@ -17,6 +17,8 @@ import { register as fundamentals } from './market/fundamentals.js';
 import { register as dividends } from './market/dividends.js';
 import { register as rates } from './market/rates.js';
 import { register as insiderTrading } from './market/insiderTrading.js';
+import { register as institutionalOwnership } from './market/institutionalOwnership.js';
+import { register as congressTrades } from './market/congressTrades.js';
 import { register as optionsAnalyticsHistory } from './market/optionsAnalyticsHistory.js';
 import { register as ivSurface } from './market/ivSurface.js';
 import { register as stockPrices } from './market/stockPrices.js';
@@ -40,6 +42,10 @@ import { register as dealerPositioning } from './market/dealerPositioning.js';
 import { register as strategyScan } from './market/strategyScan.js';
 import { register as eodDealerPositioning } from './market/eodDealerPositioning.js';
 import { register as blackScholes } from './market/blackScholes.js';
+import { register as liveQuote } from './market/liveQuote.js';
+import { register as liveBars } from './market/liveBars.js';
+import { register as liveSkewGex } from './market/liveSkewGex.js';
+import { register as computeScenario } from './market/computeScenario.js';
 
 // Platform info
 import { registerPlatformInfo } from './platformInfo.js';
@@ -52,12 +58,38 @@ import { register as fftResults } from './user/fftResults.js';
 import { register as queryAnalysis } from './user/queryAnalysis.js';
 import { register as computeRuns } from './user/computeRuns.js';
 
+/**
+ * The server every tool registers on, with each tool's `title` also given as
+ * `annotations.title`.
+ *
+ * MCP carries a tool's display name in two places: the top-level `title` and
+ * the older `annotations.title`. Anthropic's connector directory reads the
+ * second for its listing and flags a tool without one. Each tool declares
+ * its title once, and it is copied here, so the two cannot drift apart.
+ */
+function withAnnotationTitles(server: McpServer): McpServer {
+  const registerTool = server.registerTool.bind(server) as (...args: unknown[]) => unknown;
+  return new Proxy(server, {
+    get(target, property) {
+      if (property === 'registerTool') {
+        return (name: string, config: { title?: string; annotations?: Record<string, unknown> }, ...rest: unknown[]) =>
+          registerTool(name, typeof config.title === 'string'
+            ? { ...config, annotations: { ...config.annotations, title: config.title } }
+            : config, ...rest);
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
 export function registerAllTools(
-  server: McpServer,
+  target: McpServer,
   client: ProxyClient,
   _tokenManager: AccessTokenProvider,
   liveClient: LiveApiClient,
 ): void {
+  const server = withAnnotationTitles(target);
   // Market data tools. Several previously individual tools were consolidated
   // into enum-driven unified tools (run_screener, get_regime, get_snapshot,
   // get_market_calendar, get_rates, get_short_data) to keep the tool count
@@ -65,12 +97,15 @@ export function registerAllTools(
   ivHistory(server, client);
   greeksHistory(server, client);
   regime(server, client);
-  earnings(server, client);
+  // History from the proxy client; the moves (includeMoves) through the live client's structured envelope.
+  earnings(server, client, liveClient);
   news(server, client);
   fundamentals(server, client);
   dividends(server, client);
   rates(server, client);
   insiderTrading(server, client);
+  institutionalOwnership(server, client);
+  congressTrades(server, client);
   optionsAnalyticsHistory(server, client);
   ivSurface(server, client);
   stockPrices(server, client);
@@ -111,12 +146,20 @@ export function registerAllTools(
   dealerPositioning(server, liveClient);
   // Strategy candidates from one live expiration: a broker call, openWorldHint true.
   strategyScan(server, liveClient);
+  // The underlying's quote now: one broker request, openWorldHint true.
+  liveQuote(server, liveClient);
+  // One session's intraday bars with VWAP: one broker request, openWorldHint true.
+  liveBars(server, liveClient);
+  // A watchlist of up to 50 symbols ranked by live skew and GEX on the user's own broker budget.
+  liveSkewGex(server, liveClient);
   // The end-of-day twin of the live positioning tool (no Pro requirement, no
   // broker) and Black-Scholes from explicit inputs (Pro, no broker). Separate tools,
   // never a fallback inside the live one: an end-of-day gamma flip and a live
   // one are different claims.
   eodDealerPositioning(server, liveClient);
   blackScholes(server, liveClient);
+  // A strategy across spot, vol and time with an optional fit against held positions (Pro, no broker).
+  computeScenario(server, liveClient);
 
   // Platform info (1 tool).
   registerPlatformInfo(server);

@@ -24,7 +24,8 @@ describe('summarizeDarkPoolVenue', () => {
       '2026-01-18',
       '2026-01-17',
     ]);
-    expect(summary.trendSample.length).toBeGreaterThan(0);
+    // Sampled from the weeks older than the recent ones, never repeating one.
+    expect(summary.trendSample.map((point: any) => point.weekEnding)).toEqual(['2026-01-16', '2026-01-11', '2026-01-06', '2026-01-01']);
     expect(summary.summary.latestWeek).toBe('2026-01-20');
     expect(summary.summary.avgWeeklyShares).toBe(1095);
     expect(summary._weeklyData_meta).toMatchObject({
@@ -47,9 +48,12 @@ describe('summarizeDarkPoolVenue', () => {
 
     const summary = summarizeDarkPoolVenue(payload, 4, 4) as any;
 
-    expect(summary.summary.volumeTrend).toBe('12.5');
+    // A numeric string the proxy sent is published as a number (it read the
+    // string "-0.17" in the thirty-third run), and a history no longer than
+    // the recent rows has no older weeks to sample, so no trendSample.
+    expect(summary.summary.volumeTrend).toBe(12.5);
     expect(summary._weeklyData_meta).toBeUndefined();
-    expect(summary.trendSample).toEqual([]);
+    expect(summary).not.toHaveProperty('trendSample');
   });
 });
 
@@ -74,5 +78,15 @@ describe('summarizeDarkPoolResponse', () => {
 
     expect(summary.otcTrading.weeklyData[0].weekEnding).toBe('2026-01-02');
     expect(summary.atsData.weeklyData[0].totalShares).toBe(1000);
+  });
+});
+
+describe('an empty dark pool history still publishes numbers (review)', () => {
+  test('the proxy\'s no-rows answer: its summary strings become numbers too', () => {
+    const out = summarizeDarkPoolVenue({ symbol: 'X', weeklyData: [], summary: { volumeTrend: '0.00', note: 'none' } }) as any;
+    expect(out.summary).toEqual({ volumeTrend: 0, note: 'none' });
+    expect(out.weeklyData).toEqual([]);
+    const both = summarizeDarkPoolResponse({ otcTrading: { symbol: 'X', weeklyData: [], summary: { volumeTrend: '-0.17' } } }) as any;
+    expect(both.otcTrading.summary.volumeTrend).toBe(-0.17);
   });
 });

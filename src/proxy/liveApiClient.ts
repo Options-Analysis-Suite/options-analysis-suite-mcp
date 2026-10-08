@@ -115,8 +115,15 @@ interface ErrorBody {
   upgradeUrl?: unknown;
   availableExpirations?: unknown;
   availableExpirationsTruncated?: unknown;
+  /** The adjusted roots (a different deliverable) an ADJUSTED_SERIES_ONLY refusal names, with their counts. */
+  excludedRoots?: unknown;
   /** The live-broker limiter's name for it; the proxy has no `retryAfter`. */
   retryAfterSeconds?: unknown;
+  /** Which broker's quota a BROKER_RATE_LIMITED refusal is about. */
+  provider?: unknown;
+  /** BROKER_UNAVAILABLE: the kind of failure, and the broker's HTTP status where it gave one. */
+  brokerFailure?: unknown;
+  brokerStatus?: unknown;
   issues?: unknown;
   missingFields?: unknown;
   warnings?: unknown;
@@ -130,11 +137,14 @@ const BODY_TRANSPORT_ERROR_CODES = new Set([
 
 /** The live-broker budget after an admitted request, from the proxy's RateLimit headers. */
 export interface LiveRateLimit {
+  /** The broker's own quota, in its own requests a minute. */
   limit: number;
-  /** Units left in the current window, after this request's charge. */
+  /** Requests left in the current window, after this request's charge. */
   remaining: number;
   /** Seconds until the window resets. */
   resetSeconds: number;
+  /** The broker whose budget this is, from the limiter's own header; null when unnamed. */
+  provider: string | null;
 }
 
 /**
@@ -145,6 +155,7 @@ export interface LiveRateLimit {
  */
 const LIVE_BROKER_SCOPE_HEADER = 'X-RateLimit-Scope';
 const LIVE_BROKER_SCOPE = 'live-broker';
+const LIVE_BROKER_PROVIDER_HEADER = 'X-RateLimit-Provider';
 
 function readRateLimit(headers: Headers): LiveRateLimit | null {
   if (headers.get(LIVE_BROKER_SCOPE_HEADER) !== LIVE_BROKER_SCOPE) return null;
@@ -155,7 +166,9 @@ function readRateLimit(headers: Headers): LiveRateLimit | null {
   const limit = count('RateLimit-Limit');
   const remaining = count('RateLimit-Remaining');
   const resetSeconds = count('RateLimit-Reset');
-  return limit === null || remaining === null || resetSeconds === null ? null : { limit, remaining, resetSeconds };
+  if (limit === null || remaining === null || resetSeconds === null) return null;
+  const provider = headers.get(LIVE_BROKER_PROVIDER_HEADER);
+  return { limit, remaining, resetSeconds, provider: provider !== null && provider !== '' ? provider : null };
 }
 
 export class LiveApiClient {
@@ -284,6 +297,17 @@ export class LiveApiClient {
 
     if (status === 429) {
       const after = typeof body?.retryAfterSeconds === 'number' ? body.retryAfterSeconds : undefined;
+      // The broker's OWN rate limit, relayed by the proxy: the message says
+      // whether the broker named a wait, and `retryAfterSeconds` is null
+      // (not absent) when it did not, which tells the model to back off
+      // rather than retry at once. The provider names whose quota it was.
+      if (code === 'BROKER_RATE_LIMITED') {
+        throw new LiveApiError(
+          str(body?.message) ?? str(body?.error) ?? 'The broker rate-limited this request. Wait before retrying.',
+          429, code, true, undefined,
+          { retryAfterSeconds: after ?? null, provider: str(body?.provider) ?? null },
+        );
+      }
       throw new LiveApiError(
         after != null
           ? `Rate limit exceeded. Retry in ${after} seconds.`
@@ -319,7 +343,25 @@ export class LiveApiClient {
     // and indistinguishable from an outage. The explanation is the whole point
     // of refusing rather than publishing a number nobody can question.
     if (Array.isArray(body?.missingFields)) details.missingFields = body.missingFields;
+    // ADJUSTED_SERIES_ONLY names the adjusted roots (a different deliverable)
+    // a date is listed under, with their counts: the whole explanation.
+    if (Array.isArray(body?.excludedRoots)) details.excludedRoots = body.excludedRoots;
     if (Array.isArray(body?.warnings) && body.warnings.length > 0) details.warnings = body.warnings;
+    // A broker that did not answer: the kind of failure and the broker's
+    // HTTP status, so a refusal says why (the proxy logs nothing for it). The
+    // proxy's `detail` text is never passed on: a malformed answer's parse
+    // error quotes the body, an account id or a minted token, which no
+    // credential scrub knows.
+    if (code === 'BROKER_UNAVAILABLE' || code === 'BROKER_REJECTED') {
+      const kind = body?.brokerFailure;
+      if (kind === 'http-status' || kind === 'timeout' || kind === 'unreadable-response' || kind === 'no-usable-answer' || kind === 'other') {
+        details.brokerFailure = kind;
+        const status = body?.brokerStatus;
+        details.brokerStatus = typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+        const provider = str(body?.provider);
+        if (provider) details.provider = provider;
+      }
+    }
 
     throw new LiveApiError(
       detail ?? `Request to ${path} failed (HTTP ${status})`,

@@ -124,3 +124,36 @@ describe('summarizeShortInterest', () => {
     expect(summarized.recentHistory[1].shortPercentOfFloat).toBeCloseTo(40.04, 2);
   });
 });
+
+describe('short data publishes ISO dates and numbers', () => {
+  // Thirty-third run: dates as FINRA writes them ("20260930"), and
+  // avgShortPercentage the string "52.13" beside the number 52.13.
+  it('short volume: rows, lastUpdate, averages and year stats', () => {
+    const out = summarizeShortVolume({
+      symbol: 'AAPL',
+      lastUpdate: '20260930',
+      history: [{ date: '20260930', shortVolume: 100, totalVolume: 250, shortPercent: '40.00' }],
+      averages: { avgShortPercentage: '52.13', avgShortVolume: '1234567', label: 'trailing 20 days' },
+      yearStats: { highShortPercent: '71.2', highDate: '20260105', lowShortPercent: 30.5, lowDate: '2026-03-02' },
+    }) as any;
+    expect(out.lastUpdate).toBe('2026-09-30');
+    expect(out.latest.date).toBe('2026-09-30');
+    expect(out.recentHistory[0].date).toBe('2026-09-30');
+    expect(out.trailingAverages).toEqual({ avgShortPercentage: 52.13, avgShortVolume: 1234567, label: 'trailing 20 days' });
+    expect(out.yearStats).toEqual({ highShortPercent: 71.2, highDate: '2026-01-05', lowShortPercent: 30.5, lowDate: '2026-03-02' });
+  });
+
+  it('short interest: settlement dates', () => {
+    const out = summarizeShortInterest({
+      symbol: 'AAPL', lastUpdate: '20260915',
+      history: [{ settlementDate: '20260915', shortInterest: 100 }],
+    }) as any;
+    expect(JSON.stringify(out)).not.toMatch(/"\d{8}"/);
+    expect(out.lastUpdate).toBe('2026-09-15');
+  });
+
+  it('leaves an eight-digit value that is not a calendar date, and a number, as they are', () => {
+    const out = summarizeShortVolume({ symbol: 'X', history: [], averages: { code: '20261399', n: 5 } }) as any;
+    expect(out.trailingAverages).toEqual({ code: '20261399', n: 5 });
+  });
+});

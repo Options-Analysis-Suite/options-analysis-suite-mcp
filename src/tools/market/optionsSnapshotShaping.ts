@@ -273,7 +273,25 @@ export function summarizeOptionsSnapshot(response: SnapshotResponse, options: Sh
   };
 }
 
-export function summarizeMetricsBatch(response: MetricsBatchResponse, requestedSymbols: string[]) {
+export const BATCH_RANK_METRICS = [
+  'ivRank', 'ivPercentile', 'atmIv', 'ivMinusHv20d', 'ivMinusHv60d', 'hv20d', 'hv60d',
+  'expectedMove30dFraction', 'netGex', 'netDex', 'ivSkew25d', 'putCallRatio', 'totalOi', 'totalVolume',
+] as const;
+export type BatchRankMetric = typeof BATCH_RANK_METRICS[number];
+
+export interface MetricsBatchOptions {
+  /** Sort the rows by this metric; absent keeps the order asked for. */
+  rankBy?: BatchRankMetric;
+  /** Largest first by default. */
+  order?: 'asc' | 'desc';
+}
+
+/** IV minus realized, when both are on file; the volatility risk premium's raw form. */
+function spread(iv: number | null, hv: number | null): number | null {
+  return iv !== null && hv !== null ? Number((iv - hv).toFixed(6)) : null;
+}
+
+export function summarizeMetricsBatch(response: MetricsBatchResponse, requestedSymbols: string[], options: MetricsBatchOptions = {}) {
   const rows = arr(response?.data).map((row: any) => ({
     symbol: str(row?.symbol),
     date: str(row?.date),
@@ -287,6 +305,13 @@ export function summarizeMetricsBatch(response: MetricsBatchResponse, requestedS
     totalOi: num(row?.totalOi),
     maxPain: num(row?.maxPain),
     expectedMove30dFraction: num(row?.expectedMovePct),
+    spotPrice: num(row?.spotPrice),
+    // Over ALL expirations on file, as the single-symbol snapshot reports them.
+    netGex: num(row?.netGex),
+    netDex: num(row?.netDex),
+    ivSkew25d: num(row?.ivSkew25d),
+    ivMinusHv20d: spread(num(row?.atmIv), num(row?.hv20d)),
+    ivMinusHv60d: spread(num(row?.atmIv), num(row?.hv60d)),
   }));
 
   // The endpoint omits a symbol it has no snapshot for, so the difference has
@@ -302,12 +327,44 @@ export function summarizeMetricsBatch(response: MetricsBatchResponse, requestedS
   const rank = (symbol: string | null) => (symbol !== null ? position.get(symbol) : undefined) ?? Number.MAX_SAFE_INTEGER;
   rows.sort((a, b) => rank(a.symbol) - rank(b.symbol));
 
+  // A ranking, when asked for: by the metric, a null metric last (it is not
+  // a zero) and counted, ties in the order asked for. The request order is
+  // the base, so the result is a stable re-sort of it.
+  let rankMeta: Record<string, unknown> | undefined;
+  if (options.rankBy) {
+    const metric = options.rankBy;
+    const order = options.order ?? 'desc';
+    const value = (row: (typeof rows)[number]): number | null => {
+      const v = (row as Record<string, unknown>)[metric];
+      return typeof v === 'number' && Number.isFinite(v) ? v : null;
+    };
+    const direction = order === 'asc' ? 1 : -1;
+    rows.sort((a, b) => {
+      const va = value(a);
+      const vb = value(b);
+      if (va === null && vb === null) return rank(a.symbol) - rank(b.symbol);
+      if (va === null) return 1;
+      if (vb === null) return -1;
+      if (va !== vb) return (va - vb) * direction;
+      return rank(a.symbol) - rank(b.symbol);
+    });
+    const unranked = rows.filter((row) => value(row) === null);
+    rankMeta = {
+      rankBy: metric,
+      order,
+      ranked: rows.length - unranked.length,
+      unranked: unranked.length,
+      unrankedSymbols: unranked.map((row) => row.symbol),
+    };
+  }
+
   return {
     dataSource: 'eod' as const,
     requested: requestedSymbols.length,
     returned: rows.length,
     missingSymbols: missing,
     metrics: rows,
+    ...(rankMeta ? { rankMeta } : {}),
     units: { expectedMove30dFraction: EXPECTED_MOVE_30D_FRACTION_UNIT },
   };
 }

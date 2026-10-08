@@ -15,10 +15,10 @@ export function register(server: McpServer, client: ProxyClient): void {
     'query_analysis',
     {
       title: 'Query Analysis',
-      description: 'Query your analysis history with filters. Find specific analyses by greek values, volatility ranges, or other criteria. For example: "analyses where delta > 0.7" or "all Heston runs with IV below 30%". Default view collapses near-identical reruns from the same pricing sweep so the results stay diverse and readable.',
+      description: 'Query your analysis history with filters. Find specific analyses by greek values, volatility ranges, or other criteria. For example: "analyses where delta > 0.7" or "all Heston runs with IV below 30%". Default view collapses near-identical reruns from the same pricing sweep so the results stay diverse and readable. Only calibrated models (Heston, SABR, jump diffusion, Variance Gamma, Dupire local volatility) and standard Monte Carlo runs are recorded; a Black-Scholes, Black76, Binomial, PDE or exotic-payoff calculation is not, and compute_black_scholes prices one on demand. A newer jump-diffusion record names its jump model, as Jump Diffusion (Merton), (Kou), (Bates) or (Variance Gamma), and a newer record\'s calibrationSummary.params holds only the model\'s fitted parameters; an older one shows plain Jump Diffusion, and its params can also list pricer settings or other jump models\' defaults. The model filter matches every jump model, so read the label.',
       inputSchema: {
         symbol: z.string().optional().describe('Filter by ticker symbol'),
-        model: z.string().optional().describe('Filter by pricing model (e.g., Black-Scholes, Heston)'),
+        model: z.string().optional().describe('Filter by pricing model (e.g., Heston, SABR, Jump Diffusion)'),
         since: z.string().optional().describe('Only results after this date (ISO format)'),
         minDelta: z.number().optional().describe('Minimum delta value'),
         maxDelta: z.number().optional().describe('Maximum delta value'),

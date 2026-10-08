@@ -70,7 +70,7 @@ describe('get_stock_prices history state', () => {
     expect(body.data).toEqual([]);
     expect(body.historyState).toBe('pending_split');
     expect(String(body.historyNote)).toMatch(/split/i);
-    expect(body.summary).toEqual({ sessionsReturned: 0, unconfirmedSessions: 0 });
+    expect(body.summary).toEqual({ interval: 'daily', sessionsReturned: 0, unconfirmedSessions: 0 });
     expect(out.content[0].text).toContain('historyState');
   });
 
@@ -85,5 +85,55 @@ describe('get_stock_prices history state', () => {
     };
     walk(out.structuredContent);
     expect(keys.filter(k => k.includes('_'))).toEqual([]);
+  });
+});
+
+describe('get_stock_prices interval, indicators and the volume-weighted average', () => {
+  const twelve = Array.from({ length: 12 }, (_, i) => ({
+    date: `2026-09-${String(i + 1).padStart(2, '0')}`, open: 10 + i, high: 11 + i, low: 9 + i, close: 10 + i, volume: 100 + i, confirmed: true,
+  }));
+  const smaPoints = twelve.slice(2).map((r, i) => ({ time: r.date, value: 11 + i }));
+
+  test('passes interval and the indicator list to the proxy and shapes each series to its latest value plus the last points', async () => {
+    const body = { data: twelve, indicators: [{ name: 'sma', params: { period: 3, source: 'close' }, plots: { sma: smaPoints } }], indicatorsMeta: { barsUsed: 12, barsSkipped: 0 } };
+    const { calls, handler } = harness(body as unknown as unknown[], 'current');
+    const out = await handler({ symbol: 'abc', days: 12, interval: 'weekly', indicators: [{ name: 'sma', params: { period: 3 } }], indicatorPoints: 3 });
+    expect(calls[0].params).toEqual({ symbol: 'ABC', limit: '12', interval: 'weekly', indicators: JSON.stringify([{ name: 'sma', params: { period: 3 } }]) });
+    const got = out.structuredContent;
+    expect(got.data).toHaveLength(12);
+    expect(got.summary.interval).toBe('weekly');
+    expect(got.indicators).toEqual([{
+      name: 'sma', params: { period: 3, source: 'close' },
+      latest: { sma: 20 },
+      points: { sma: smaPoints.slice(-3) },
+      pointsKept: 3, pointsTotal: 10,
+    }]);
+    expect(got.indicatorsMeta).toEqual({ barsUsed: 12, barsSkipped: 0 });
+  });
+
+  test('sends no interval for the daily default, so the proxy request is unchanged', async () => {
+    const { calls } = harness(rows, 'current');
+    await (harness(rows, 'current').handler({ symbol: 'ABC', days: 2 }));
+    expect(calls).toEqual([]);
+    const { calls: c2, handler } = harness(rows, 'current');
+    await handler({ symbol: 'ABC', days: 2, interval: 'daily' });
+    expect(c2[0].params).toEqual({ symbol: 'ABC', limit: '2' });
+  });
+
+  test('a plot with no finite point reports latest null', async () => {
+    const body = { data: twelve, indicators: [{ name: 'rsi', params: { period: 14, source: 'close' }, plots: { rsi: [] } }], indicatorsMeta: { barsUsed: 12, barsSkipped: 0 } };
+    const got = (await harness(body as unknown as unknown[], 'current').handler({ symbol: 'ABC', days: 12, indicators: [{ name: 'rsi' }] })).structuredContent;
+    expect(got.indicators[0]).toEqual({ name: 'rsi', params: { period: 14, source: 'close' }, latest: { rsi: null }, points: { rsi: [] }, pointsKept: 0, pointsTotal: 0 });
+  });
+
+  test('summarizes a labelled volume-weighted average of the typical price over the returned bars, null without volume', async () => {
+    const got = (await harness(twelve, 'current').handler({ symbol: 'ABC', days: 12 })).structuredContent;
+    const num = twelve.reduce((s, r) => s + ((r.high + r.low + r.close) / 3) * r.volume, 0);
+    const den = twelve.reduce((s, r) => s + r.volume, 0);
+    // Published at four decimals, like the other prices in the summary.
+    expect(got.summary.volumeWeightedAverage).toBeCloseTo(num / den, 3);
+    expect(String(got.summary.volumeWeightedAverageNote)).toMatch(/not a session VWAP/);
+    const quiet = twelve.map((r) => ({ ...r, volume: 0 }));
+    expect((await harness(quiet, 'current').handler({ symbol: 'ABC', days: 12 })).structuredContent.summary.volumeWeightedAverage).toBeNull();
   });
 });

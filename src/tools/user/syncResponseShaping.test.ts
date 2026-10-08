@@ -15,6 +15,7 @@ import {
   sanitizeFullSyncResponse,
   stripSyncRecordMetadata,
 } from './syncResponseShaping.js';
+import { modelBackendId } from '../modelLabels.js';
 
 describe('summarizeNestedValue', () => {
   test('keeps scalars and small scalar arrays inline', () => {
@@ -1082,3 +1083,65 @@ describe('compactAnalysisHistoryResponse', () => {
     });
   });
 });
+
+describe('jump-diffusion analysis records name their jump model', () => {
+  // A Merton calibration was published as plain "Jump Diffusion", which could
+  // be any of Merton, Kou, Bates or the unified fit's Variance Gamma.
+  const jdRecord = (jumpModel?: string) => ({
+    model: 'JumpDiffusion',
+    symbol: 'SPY',
+    data: { model: 'JumpDiffusion', optionPrice: 13.76 },
+    artifacts: { calibrationSummary: { model: 'JumpDiffusion', rmse: 0.0157, rmseMetric: 'ivRmse', ...(jumpModel ? { jumpModel } : {}), params: { lambda: 0.86 } } },
+  });
+
+  test('the default view labels the record, its data and its summary', () => {
+    const record: any = jdRecord('merton');
+    shapeAnalysisResultRecord(record);
+    expect(record.model).toBe('Jump Diffusion (Merton)');
+    expect(record.data.model).toBe('Jump Diffusion (Merton)');
+    expect(record.artifacts.calibrationSummary.model).toBe('Jump Diffusion (Merton)');
+    expect(record.artifacts.calibrationSummary.jumpModel).toBe('merton');
+  });
+
+  test('the full view labels each record by its own jump model', () => {
+    const res: any = { data: [jdRecord('kou'), jdRecord('bates'), jdRecord('vg'), jdRecord()] };
+    humanizeAnalysisWireOutput(res);
+    expect(res.data.map((r: any) => r.model)).toEqual([
+      'Jump Diffusion (Kou)', 'Jump Diffusion (Bates)', 'Jump Diffusion (Variance Gamma)', 'Jump Diffusion',
+    ]);
+  });
+
+  test('an object naming its own jump model keeps it inside a record that names another', () => {
+    const record: any = { ...jdRecord('kou'), nested: { model: 'JumpDiffusion', jumpModel: 'merton' } };
+    humanizeAnalysisWireOutput(record);
+    expect(record.model).toBe('Jump Diffusion (Kou)');
+    expect(record.nested.model).toBe('Jump Diffusion (Merton)');
+  });
+
+  test('the default view does not collapse two jump models into one record', () => {
+    // The near-duplicate check ignored the jump model, so a Merton and a Kou
+    // run with the same inputs and price came back as one record.
+    const run = (id: number, timestamp: number, jumpModel: string) => ({
+      id, symbol: 'SPY', model: 'JumpDiffusion', timestamp,
+      data: { isCall: true, strike: 100, daysToMaturity: 30, volatility: 0.2, optionPrice: 5, greeks: { Delta: 0.5 } },
+      artifacts: { calibrationSummary: { model: 'JumpDiffusion', jumpModel } },
+    });
+    const t = 1_790_820_000_000;
+    expect(dedupeAnalysisHistoryRecords([run(1, t, 'merton'), run(2, t + 1000, 'kou')]).records).toHaveLength(2);
+    expect(dedupeAnalysisHistoryRecords([run(1, t, 'merton'), run(2, t + 1000, 'merton')]).records).toHaveLength(1);
+  });
+
+  test('other models are untouched', () => {
+    const record: any = { model: 'Heston', data: { model: 'Heston' }, artifacts: { calibrationSummary: { model: 'Heston', jumpModel: 'merton' } } };
+    humanizeAnalysisWireOutput(record);
+    expect(record.model).toBe('Heston');
+  });
+
+  test('the labeled name filters as Jump Diffusion', () => {
+    expect(modelBackendId('Jump Diffusion (Merton)')).toBe('JumpDiffusion');
+    expect(modelBackendId('Jump Diffusion (Variance Gamma)')).toBe('JumpDiffusion');
+    expect(modelBackendId('Jump Diffusion')).toBe('JumpDiffusion');
+    expect(modelBackendId('Heston (Merton)')).toBe('Heston (Merton)');
+  });
+});
+

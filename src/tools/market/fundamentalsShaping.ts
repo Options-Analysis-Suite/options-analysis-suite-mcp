@@ -1,3 +1,6 @@
+import { MAX_RESPONSE_BYTES, sanitizeMcpWireOutput, utf8ByteLength } from '../helpers.js';
+import { RESPONSE_MARGIN_BYTES } from './dealerPositioningShaping.js';
+
 type FundamentalsPayload = {
   [key: string]: unknown;
   symbol?: string;
@@ -25,6 +28,7 @@ type CompanyProfilePayload = {
   free_float_pct?: number;
   free_float_shares?: number;
   full_time_employees?: number;
+  currency?: string;
 };
 
 type InstrumentProfile = {
@@ -147,6 +151,132 @@ function summarizeCashFlow(row: StatementRow | null): Record<string, unknown>[] 
   }];
 }
 
+const currencyCode = (value: unknown): string | null => {
+  const code = typeof value === 'string' ? value.trim().toUpperCase() : '';
+  return /^[A-Z]{3}$/.test(code) ? code : null;
+};
+
+const STATEMENT_KEYS = ['income_stmt_quarterly', 'income_stmt', 'balance_sheet_quarterly', 'balance_sheet', 'cash_flow_quarterly', 'cash_flow'];
+
+/**
+ * The currency the newest statement on file reports in, and that statement's
+ * date. The TTM amounts are in the company's reporting currency too (TSM's
+ * key-metrics market cap is 64.8T, TWD, beside a 2.45T USD profile; across
+ * ~500 companies reporting in another currency the TTM-to-profile market cap
+ * ratio sits at the exchange rate, JPY 158, TWD 30, while the weekly
+ * market-cap history matches the profile, 1.000). But the TTM objects come
+ * from a daily file carrying no currency, refreshed apart from the
+ * statements, so around a change of reporting currency either can be the
+ * newer: the statement's currency is the TTM's usual one, never a certain one.
+ */
+function reportedCurrencyOf(data: FundamentalsPayload): { code: string; asOf: string | null; quarterOnly: boolean } | null {
+  const rows = STATEMENT_KEYS
+    .flatMap(key => (Array.isArray(data[key]) ? (data[key] as unknown[]).map(row => ({ key, row: getObject(row) })) : []))
+    .filter((entry): entry is { key: string; row: Record<string, unknown> } => entry.row !== null && currencyCode(entry.row.reportedCurrency) !== null)
+    .sort((left, right) => String(right.row.date ?? '').localeCompare(String(left.row.date ?? '')));
+  if (rows.length === 0) return null;
+  const { key, row } = rows[0];
+  const date = typeof row.date === 'string' && /^\d{4}-\d{2}-\d{2}/.test(row.date) ? row.date.slice(0, 10) : null;
+  // The summary shows each statement's latest annual period only: a newest
+  // statement from a quarterly list that no shown annual period shares the
+  // date of is a quarter it does not show (TSM: the 2026-06-30 quarter beside
+  // FY 2025-12-31). An annual row it passes over (an older year, the newest
+  // naming no currency) is no quarter (review).
+  const annualDays = new Set(['income_stmt', 'balance_sheet', 'cash_flow']
+    .map(list => pickLatestStatement(data[list])?.date)
+    .filter((d): d is string => typeof d === 'string')
+    .map(d => d.slice(0, 10)));
+  const quarterOnly = key.endsWith('_quarterly') && date !== null && !annualDays.has(date);
+  return { code: currencyCode(row.reportedCurrency) as string, asOf: date, quarterOnly };
+}
+
+/**
+ * The currencies beside the figures: the one the newest statement on file
+ * reports in, with its date, and the one the listing trades in (the profile
+ * and the market-cap history), with a note when they differ. Each statement
+ * names its own currency, and the TTM amounts are put in the statement's only
+ * as their usual one (see reportedCurrencyOf). `view` is the response the note
+ * sits in: the summary carries a `companyProfile` and each statement's latest
+ * annual period only, the full payload no profile and the quarters.
+ */
+export function currencyContext(payload: unknown, companyProfile: unknown, view: 'summary' | 'full'): Record<string, unknown> {
+  const data = getObject(payload) as FundamentalsPayload | null;
+  const newest = data ? reportedCurrencyOf(data) : null;
+  const reported = newest?.code ?? null;
+  const trading = currencyCode(getObject(companyProfile)?.currency);
+  if (!reported && !trading) return {};
+  const differ = reported !== null && trading !== null && reported !== trading;
+  const tradingFigures = view === 'summary' ? '`companyProfile` (marketCap, lastDividend) and `valuation.marketCap` are' : '`valuation.marketCap` is';
+  const statement = !newest?.asOf ? 'The newest statement on file'
+    : view === 'summary' && newest.quarterOnly ? `The newest statement on file (${newest.asOf}, a quarter: \`full: true\` lists the quarterly statements)`
+    : `The newest statement on file (${newest.asOf})`;
+  return {
+    currencies: { reported, reportedAsOf: newest?.asOf ?? null, trading },
+    ...(differ ? {
+      currencyNote: `${statement} reports in ${reported}; the listing trades here in ${trading}. Each statement names its own currency in \`reportedCurrency\`. `
+        + `The money amounts and per-share figures in \`ratiosTtm\` and \`keyMetricsTtm\` (marketCap, enterpriseValueTTM, workingCapitalTTM, cashPerShareTTM and the like) carry no currency of their own: they are normally in the company's reporting currency, ${reported} by that statement, but they are refreshed apart from the statements, so around a change of reporting currency the two can disagree. `
+        + `${tradingFigures} in ${trading}. The ratios, margins, returns and yields are the same in either currency.`,
+    } : {}),
+  };
+}
+
+/**
+ * full=true: the raw payload with as many of each statement's newest periods
+ * as fit the response budget. The raw statements (six lists, some 40 fields a
+ * period) sit at the 50 KB budget for most companies even after the size
+ * guard's array trimming, and past it once `valuation` and the currencies sit
+ * beside them (live 2026-10-04: TSM, MSFT and BABA over with `valuation`, TM
+ * over without it), and the guard then answered "Response too large" in place
+ * of the payload. Every list keeps its newest periods up to one shared count
+ * (a shorter list keeps all of its own), the most that fits beside the TTM
+ * figures and the extras; `fullMeta` gives the count, and each list's periods
+ * on file, when some are left. The fit assumes the rest is small (the TTM
+ * objects and extras run to a few KB); should it not be, the count reaches 0
+ * and the size guard has the last word.
+ */
+export function shapeFundamentalsFull(payload: unknown, extras: Record<string, unknown>): Record<string, unknown> {
+  const data = { ...(getObject(payload) ?? {}) } as Record<string, unknown>;
+  const lists: Array<[string, unknown[]]> = STATEMENT_KEYS
+    .filter(key => Array.isArray(data[key]))
+    .map(key => [key, [...(data[key] as unknown[])].sort((left, right) =>
+      String(getObject(right)?.date ?? '').localeCompare(String(getObject(left)?.date ?? '')))]);
+  const longest = lists.reduce((max, [, rows]) => Math.max(max, rows.length), 0);
+  const build = (periods: number): Record<string, unknown> => {
+    const out: Record<string, unknown> = { ...data };
+    for (const [key, rows] of lists) out[key] = rows.slice(0, periods);
+    const trimmed = lists.some(([, rows]) => rows.length > periods);
+    return {
+      ...out,
+      ...extras,
+      ...(trimmed ? { fullMeta: { periodsPerStatement: periods, periodsOnFile: Object.fromEntries(lists.map(([key, rows]) => [key, rows.length])), trimmedForSize: true } } : {}),
+    };
+  };
+  const fits = (out: unknown) => utf8ByteLength(JSON.stringify(sanitizeMcpWireOutput(out))) <= MAX_RESPONSE_BYTES - RESPONSE_MARGIN_BYTES;
+  const whole = build(longest);
+  if (fits(whole)) return whole;
+  // The most periods that fit: the size grows with the count.
+  let lo = 0;
+  let hi = longest - 1;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (fits(build(mid))) lo = mid; else hi = mid - 1;
+  }
+  return build(lo);
+}
+
+/**
+ * No fundamentals on record (the route 404s): a status, never a bare no-data
+ * answer. The ETF class has no company statements (their rows were removed
+ * with the phase A universe), so SPY answered "No data available" with no
+ * reason; the profile's is_etf (set on ETFs, and on some ETNs and trusts)
+ * names an exchange-traded product as one, as get_insider_trading does. A
+ * failed profile read says only "this symbol".
+ */
+export function noFundamentalsRecord(symbol: string, companyProfile: unknown): Record<string, unknown> {
+  const isEtf = getObject(companyProfile)?.is_etf === true;
+  return { symbol, fundamentalsStatus: `No company financial statements on record for this ${isEtf ? 'exchange-traded product' : 'symbol'}.` };
+}
+
 function summarizeCompanyProfile(profile: unknown): Record<string, unknown> | undefined {
   const data = getObject(profile) as CompanyProfilePayload | null;
   if (!data) return undefined;
@@ -166,6 +296,7 @@ function summarizeCompanyProfile(profile: unknown): Record<string, unknown> | un
     free_float_shares: round(data.free_float_shares, 0),
     free_float_pct: round(data.free_float_pct, 2),
     full_time_employees: round(data.full_time_employees, 0),
+    currency: currencyCode(data.currency) ?? undefined,
   };
 }
 
@@ -255,6 +386,13 @@ export function summarizeFundamentals(payload: unknown, companyProfile?: unknown
     balance_sheet: balanceSummary,
     cash_flow: cashFlowSummary,
     fetched_at: data.fetched_at,
+    // The daily TTM files' own date, as the full payload carries it: the TTM
+    // figures are refreshed both with the statements (fetched_at) and from
+    // those files, and neither stamp says which refresh wrote the figures
+    // shown (the files' date is their publication date, and a partial refresh
+    // leaves it as it was), so both are given, nothing derived from them.
+    ...(typeof data.ttm_bulk_as_of === 'string' ? { ttm_bulk_as_of: data.ttm_bulk_as_of } : {}),
+    ...currencyContext(payload, companyProfile, 'summary'),
     ...(note ? { _note: note } : {}),
     _summary_meta: { compact_view: true, has_coverage: !hasNoCoverage },
   };

@@ -34,6 +34,7 @@ const SAFE_UNDERSCORE_KEY_RENAMES: Record<string, string> = {
   _note: 'note',
   _stress_score_note: 'stressScoreNote',
   _exposures_note: 'exposuresNote',
+  _migration_note: 'migrationNote',
   _symbols_truncation_meta: 'symbolCoverage',
   _venues_note: 'venuesNote',
   _dealers_note: 'dealersNote',
@@ -160,11 +161,39 @@ const BARE_URL_RE = /^\s*https?:\/\/\S+\s*$/i;
 
 // A URL names a vendor as written, percent-decoded, or in the host the URL
 // parser resolves (which decodes an encoded host).
+/**
+ * A URL with its escapes decoded piece by piece, so one malformed or
+ * unrelated escape (%FF) cannot leave the rest encoded the way decoding the
+ * whole string at once would (it throws). In each run of consecutive
+ * escapes, every position takes the longest valid sequence of up to four
+ * escapes (one UTF-8 character, so %C2%A0 stays one character), and a byte
+ * that starts none stays encoded.
+ */
+function decodeEscapes(url: string): string {
+  return url.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+    const escapes = run.match(/%[0-9A-Fa-f]{2}/g) ?? [];
+    let out = '';
+    let index = 0;
+    while (index < escapes.length) {
+      let decoded: string | null = null;
+      let used = 1;
+      for (let width = Math.min(4, escapes.length - index); width >= 1; width -= 1) {
+        try {
+          decoded = decodeURIComponent(escapes.slice(index, index + width).join(''));
+          used = width;
+          break;
+        } catch { /* a shorter sequence */ }
+      }
+      out += decoded ?? escapes[index];
+      index += used;
+    }
+    return out;
+  });
+}
+
 function vendorUrl(url: string): boolean {
   if (namesVendor(url)) return true;
-  try {
-    if (namesVendor(decodeURIComponent(url))) return true;
-  } catch { /* malformed escapes: judged as written and by the host */ }
+  if (namesVendor(decodeEscapes(url))) return true;
   try {
     return namesVendor(new URL(url.trim()).hostname);
   } catch {
@@ -213,7 +242,79 @@ function replaceAligned(
   return [outOriginal + original.slice(last), outFolded + folded.slice(last)];
 }
 
-export function scrubVendorText(text: string): string {
+// Our own infrastructure, which means nothing to a reader and is not
+// public: the database product the proxy names as a provenance `provider`,
+// and the tables it names as a `source` (and inside snapshot ids). A field
+// whose whole value is the product is dropped by the walk below; anywhere
+// else the product reads "the platform database" (platformDatabase in a
+// key), a URL on it is removed however it is encoded, and each table reads
+// as a neutral label, in a key as well. A table name is matched as a whole
+// segment, so a word that merely contains one (rescan_tickers) is left alone.
+const INTERNAL_TABLE_LABELS: Record<string, string> = {
+  option_ticker_snapshots: 'eod-options-snapshot',
+  option_term_structure: 'eod-term-structure',
+  ticker_snapshots: 'eod-ticker-snapshot',
+  futures_strikes: 'eod-futures-strikes',
+  scan_tickers: 'eod-options-summary',
+  scan_strikes: 'eod-strike-data',
+};
+// Longest first, so option_ticker_snapshots is taken whole before
+// ticker_snapshots could match inside it.
+const INTERNAL_TABLE_RE = new RegExp(`(?<![A-Za-z0-9])(?:${Object.keys(INTERNAL_TABLE_LABELS).join('|')})(?![A-Za-z0-9])`, 'gi');
+const tableLabel = (table: string): string => INTERNAL_TABLE_LABELS[table.toLowerCase()];
+// The product as a standalone word reads "the platform database"; any other
+// occurrence, inside an identifier (supabaseClient), reads platformDatabase.
+const DATABASE_PRODUCT_WORD_RE = /(?<![A-Za-z0-9])supabase(?![A-Za-z0-9])/gi;
+const DATABASE_PRODUCT_ANY_RE = /supabase/gi;
+const DATABASE_PRODUCT_VALUE_RE = /^\s*supabase\s*$/i;
+
+/** A URL on the database product, as written, percent-decoded, or by the host it resolves to. */
+function infrastructureUrl(url: string): boolean {
+  if (/supabase/i.test(url)) return true;
+  if (/supabase/i.test(decodeEscapes(url))) return true;
+  try {
+    return /supabase/i.test(new URL(url.trim()).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function namesInfrastructure(text: string): boolean {
+  INTERNAL_TABLE_RE.lastIndex = 0;
+  const table = INTERNAL_TABLE_RE.test(text);
+  INTERNAL_TABLE_RE.lastIndex = 0;
+  return table || /supabase/i.test(text) || /https?:\/\/\S*%/i.test(text);
+}
+
+function scrubInfrastructureText(text: string): string {
+  if (!namesInfrastructure(text)) return text;
+  return text
+    .replace(URL_RE, (url) => (infrastructureUrl(url) ? 'a removed link' : url))
+    .replace(DATABASE_PRODUCT_WORD_RE, 'the platform database')
+    .replace(DATABASE_PRODUCT_ANY_RE, (word) => (word[0] === word[0].toUpperCase() ? 'PlatformDatabase' : 'platformDatabase'))
+    .replace(INTERNAL_TABLE_RE, tableLabel);
+}
+
+/**
+ * A KEY naming our infrastructure, renamed before its camelCase conversion:
+ * a table segment becomes its label in snake form (scan_tickers ->
+ * eod_options_summary -> eodOptionsSummary) and the product, anywhere in the
+ * key, platformDatabase.
+ */
+function scrubInfrastructureKey(key: string): string {
+  if (!namesInfrastructure(key)) return key;
+  // A snake_case key takes snake replacements, so its camelCase conversion
+  // still applies (supabase_provider -> platform_database_provider ->
+  // platformDatabaseProvider).
+  const snake = key.includes('_');
+  return key
+    .replace(INTERNAL_TABLE_RE, (table) => tableLabel(table).replace(/-/g, '_'))
+    .replace(DATABASE_PRODUCT_ANY_RE, (word) => (snake ? 'platform_database'
+      : word[0] === word[0].toUpperCase() ? 'PlatformDatabase' : 'platformDatabase'));
+}
+
+export function scrubVendorText(input: string): string {
+  const text = scrubInfrastructureText(stripInvisible(input));
   const folded = FULL_WIDTH_RE.test(text) ? foldFullWidth(text) : text;
   if (!/https?:\/\//i.test(folded) && !namesVendor(folded)) return text;
   let pair: [string, string] = [text, folded];
@@ -225,7 +326,7 @@ export function scrubVendorText(text: string): string {
 }
 
 function isVendorUrl(value: unknown): boolean {
-  return typeof value === 'string' && BARE_URL_RE.test(value) && vendorUrl(value);
+  return typeof value === 'string' && BARE_URL_RE.test(value) && (vendorUrl(value) || infrastructureUrl(value));
 }
 
 // An own property whatever its name: assigning "__proto__" into a plain
@@ -278,7 +379,7 @@ function scrubVendorDeep(source: unknown): unknown {
     const entries = Object.keys(record)
       .filter((name) => !isVendorUrl(record[name]))
       .map((name) => {
-        const outKey = scrubVendorText(name);
+        const outKey = scrubVendorText(scrubInfrastructureKey(stripInvisible(name)));
         return { name, outKey, vendor: outKey !== name };
       });
     settleVendorKeys(entries);
@@ -301,6 +402,16 @@ function camelWireKey(key: string): string {
   return out;
 }
 
+// Characters that print as nothing and carry no meaning in published text:
+// the zero-width space, the word joiner and the byte-order mark, which feeds
+// leave between words (a news summary in the thirty-third run). The
+// zero-width joiner and non-joiner stay: they shape some scripts and emoji.
+const INVISIBLE_RE = /[\u200B\u2060\uFEFF]/g;
+
+function stripInvisible(text: string): string {
+  return text.replace(INVISIBLE_RE, '');
+}
+
 export function sanitizeMcpWireOutput(data: unknown, depth = 0, dataKeyed = false): unknown {
   // What is published is what JSON.stringify makes of the value, so that is
   // what is sanitized: toJSON methods, functions, boxed primitives and
@@ -319,42 +430,59 @@ export function sanitizeMcpWireOutput(data: unknown, depth = 0, dataKeyed = fals
   if (Array.isArray(data)) return data.map((item) => sanitizeMcpWireOutput(item, depth + 1));
 
   const obj = data as Record<string, unknown>;
-  const syncBackedRow = isSyncBackedRow(obj);
-  const nestedSyncSnapshotPayload = isNestedSyncSnapshotPayload(obj);
+  // The keys as they will be read and published, invisible characters
+  // removed, for every rule that looks at the object's keys as a whole.
+  const rawKeys = Object.keys(obj);
+  const view: Record<string, unknown> = rawKeys.some((key) => stripInvisible(key) !== key)
+    ? Object.fromEntries(Object.entries(obj).map(([key, value]) => [stripInvisible(key), value]))
+    : obj;
+  const syncBackedRow = isSyncBackedRow(view);
+  const nestedSyncSnapshotPayload = isNestedSyncSnapshotPayload(view);
   const entries: Array<{ outKey: string; value: unknown; vendor: boolean; keyedParent: boolean }> = [];
 
-  for (const [key, value] of Object.entries(obj)) {
+  for (const [rawKey, value] of Object.entries(obj)) {
+    // Invisible characters leave a key before anything reads it, or a name
+    // they split would pass every rule below and be joined again after.
+    const key = stripInvisible(rawKey);
+    // A key that lost a character is a renamed key: it never overwrites one
+    // that arrived under that name.
+    const cleaned = key !== rawKey;
     if (hasOwn(SAFE_UNDERSCORE_KEY_RENAMES, key)) {
-      entries.push({ outKey: SAFE_UNDERSCORE_KEY_RENAMES[key], value, vendor: false, keyedParent: false });
+      entries.push({ outKey: SAFE_UNDERSCORE_KEY_RENAMES[key], value, vendor: cleaned, keyedParent: false });
       continue;
     }
     if (hasOwn(READABLE_KEY_RENAMES, key)) {
-      entries.push({ outKey: READABLE_KEY_RENAMES[key], value, vendor: false, keyedParent: false });
+      entries.push({ outKey: READABLE_KEY_RENAMES[key], value, vendor: cleaned, keyedParent: false });
       continue;
     }
     const dynamicMetaMatch = key.match(DYNAMIC_META_KEY_RE);
     if (dynamicMetaMatch) {
       const [, base] = dynamicMetaMatch;
       const plain = `${camelWireKey(base)}Meta`;
-      const outKey = scrubVendorText(plain);
-      entries.push({ outKey, value, vendor: outKey !== plain, keyedParent: false });
+      const outKey = scrubVendorText(`${camelWireKey(scrubInfrastructureKey(base))}Meta`);
+      entries.push({ outKey, value, vendor: outKey !== plain || cleaned, keyedParent: false });
       continue;
     }
     if (key.startsWith('_')) continue;
     if (isVendorUrl(value)) continue;
+    // A field that only names our database (provenance `provider`) says nothing.
+    if (typeof value === 'string' && DATABASE_PRODUCT_VALUE_RE.test(value)) continue;
     if (key === 'user_id' || key === 'created_at' || key === 'updated_at') continue;
     if (key === 'run_key') continue;
     if (INTERNAL_IDENTIFIER_KEYS.has(key)) continue;
     if (key === 'id' && (syncBackedRow || nestedSyncSnapshotPayload)) continue;
 
-    const camel = dataKeyed ? key : camelWireKey(key);
+    // A key naming our infrastructure is renamed first, so its camelCase
+    // form is built from the label (scan_tickers -> eodOptionsSummary).
+    const infraKey = scrubInfrastructureKey(key);
+    const camel = dataKeyed ? infraKey : camelWireKey(infraKey);
     // Never overwrite: a snake key whose camelCase twin is already present
     // stays as it is rather than replace a value.
-    const plain = camel !== key && hasOwn(obj, camel) ? key : camel;
+    const plain = camel !== infraKey && hasOwn(view, camel) ? infraKey : camel;
     // Renamed is whatever the scrub changed, however the name came to hold
     // a vendor's (a camelCase conversion can assemble one).
     const outKey = scrubVendorText(plain);
-    entries.push({ outKey, value, vendor: outKey !== plain, keyedParent: true });
+    entries.push({ outKey, value, vendor: outKey !== plain || infraKey !== rawKey, keyedParent: true });
   }
 
   settleVendorKeys(entries);
@@ -614,18 +742,75 @@ function renderIssuePath(path: unknown): string {
   return rendered;
 }
 
+/**
+ * A computed number at 15 significant digits, the most a double carries for
+ * every decimal: a sum of published Greeks times open interest comes out of
+ * binary arithmetic as -27496.350000000002, and this drops that noise. A
+ * whole number has none and passes exactly: an open-interest count of
+ * 1000000000000001 is not 1e15, and the largest double is not Infinity.
+ */
+export function significant(value: number, digits = 15): number {
+  return Number.isInteger(value) ? value : Number(value.toPrecision(digits));
+}
+
+/**
+ * Every number in a published payload through significant(): the one
+ * rounding every tool's answer goes through (toolHandler), so a ratio, mid or spread computed anywhere upstream goes out
+ * at 15 significant digits at most. A decimal printed with 15 or fewer
+ * digits, and a whole number, pass unchanged; nothing but numbers changes.
+ */
+export function significantDeep<T>(value: T): T {
+  if (typeof value === 'number') return significant(value) as T;
+  if (Array.isArray(value)) return value.map(significantDeep) as T;
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, significantDeep(entry)])) as T;
+  }
+  return value;
+}
+
+/** The value at a dot path, and whether it exists. */
+function atPath(root: unknown, path: string[]): { found: boolean; value: unknown } {
+  let node = root;
+  for (const key of path) {
+    if (node == null || typeof node !== 'object' || !hasOwn(node as object, key)) return { found: false, value: undefined };
+    node = (node as Record<string, unknown>)[key];
+  }
+  return { found: true, value: node };
+}
+
+/** Put back, at each dot path, the value the tool computed before rounding. */
+function restoreExactPaths(rounded: unknown, raw: unknown, paths: readonly string[]): void {
+  for (const dotted of paths) {
+    const path = dotted.split('.');
+    const source = atPath(raw, path);
+    const parent = atPath(rounded, path.slice(0, -1));
+    if (!source.found || !parent.found || parent.value == null || typeof parent.value !== 'object') continue;
+    setOwn(parent.value as Record<string, unknown>, path[path.length - 1], source.value);
+  }
+}
+
 export function toolHandler<T extends Record<string, unknown>>(
   fn: (args: T) => Promise<unknown>,
   /**
    * keepOnEmpty: fields of an empty result that still say something (a
    * stock's history state beside no rows) and are kept on the generic
    * no-data response instead of being dropped.
+   *
+   * exactPaths: dot paths the tool publishes exactly as it computed them,
+   * past the 15-significant-digit rounding every other number gets (an echo
+   * of the value rows were chosen with, which rounded would name a
+   * different one).
    */
-  opts?: { isSyncTool?: boolean; keepOnEmpty?: readonly string[] },
+  opts?: { isSyncTool?: boolean; keepOnEmpty?: readonly string[]; exactPaths?: readonly string[] },
 ): (args: T) => Promise<ToolResult> {
   return async (args: T): Promise<ToolResult> => {
     try {
       let data = await fn(args);
+      // What JSON makes of the result, settled first: a Date is its ISO
+      // string, a boxed number its value, and a value that serializes to
+      // null is no data like a null result.
+      const serialized = typeof data === 'object' && data !== null ? JSON.stringify(data) : undefined;
+      if (serialized !== undefined) data = JSON.parse(serialized) as unknown;
       if (data == null) {
         const message = 'No data available for this query.';
         return {
@@ -638,6 +823,13 @@ export function toolHandler<T extends Record<string, unknown>>(
       if (typeof data === 'object' && data !== null && (data as any)?._skipSizeGuard === true) {
         data = (data as any).data;
       }
+
+      // Every number at 15 significant digits: binary noise such as
+      // 4.4399999999999995 in a computed mid goes, whole numbers and
+      // decimals already that short pass unchanged (on the settled value).
+      const computed = data;
+      data = significantDeep(data);
+      if (opts?.exactPaths?.length) restoreExactPaths(data, computed, opts.exactPaths);
 
       // Handle empty response — sync tools get a specific message
       if (typeof data === 'object' && 'data' in (data as any) && Array.isArray((data as any).data) && (data as any).data.length === 0) {
@@ -683,9 +875,11 @@ export function toolHandler<T extends Record<string, unknown>>(
             structuredContent: structuredContentFromJson(json),
           };
         }
+        // JSON in the text too, like every other answer.
+        const empty = { dataAvailable: false, data: [], message: msg };
         return {
-          content: [{ type: 'text', text: msg }],
-          structuredContent: { dataAvailable: false, data: [], message: msg },
+          content: [{ type: 'text', text: JSON.stringify(empty) }],
+          structuredContent: empty,
         };
       }
 

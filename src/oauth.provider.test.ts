@@ -1136,6 +1136,58 @@ describe('OAuth page security headers', () => {
       expect(csp).not.toContain('script-src');
     });
   }
+
+  // Chrome applies form-action to the redirect a form submission ends in, so
+  // a page whose POST ends in a 302 to the client must list that client's
+  // origin, or the browser stops on our page and never reaches the client:
+  // every desktop-Chrome email and password connect did (2026-09-30, a burst
+  // of POST /oauth/authorize 302s and no /oauth/token). Exactly that origin
+  // and 'self', nothing wider.
+  const formAction = (csp: string) => csp.split(';').map((d) => d.trim())
+    .find((d) => d.startsWith('form-action '))!.split(/\s+/).slice(1);
+  const expectedFormAction: Record<string, string[]> = {
+    login: ["'self'", 'https://chatgpt.com'],
+    MFA: ["'self'", 'https://chatgpt.com'],
+    consent: ["'self'", 'https://smithery.run'],
+    notice: ["'self'"],
+  };
+  for (const [name, render] of pages) {
+    test(`the ${name} page may submit only to itself and the client it was opened for`, async () => {
+      const result = await render();
+      expect(formAction(result.headers['Content-Security-Policy'])).toEqual(expectedFormAction[name]);
+    });
+  }
+
+  test('the sign-in page names no one AI client, whichever opened it', () => {
+    // It said "connect your account to ChatGPT" to Claude's users too.
+    for (const uri of [REDIRECT_URI, 'https://claude.ai/api/mcp/auth_callback']) {
+      const { body } = handleAuthorizeGet(new URLSearchParams({
+        client_id: 'c', redirect_uri: uri, state: 's',
+        code_challenge: CODE_CHALLENGE, code_challenge_method: 'S256',
+      }));
+      expect(body).toContain('<p class="subtitle">Sign in to connect your account to your AI assistant</p>');
+      expect(body).not.toMatch(/to ChatGPT|to Claude/);
+    }
+  });
+
+  test('the sign-in page names the requesting client\'s origin, and none for a missing redirect', () => {
+    const page = (redirectUri: string) => handleAuthorizeGet(new URLSearchParams({
+      client_id: 'c', redirect_uri: redirectUri, state: 's',
+      code_challenge: CODE_CHALLENGE, code_challenge_method: 'S256',
+    }));
+    for (const [uri, origin] of [
+      ['https://claude.ai/api/mcp/auth_callback', 'https://claude.ai'],
+      ['https://claude.com/api/mcp/auth_callback', 'https://claude.com'],
+      ['https://grok.com/connectors-oauth-exchange-code/', 'https://grok.com'],
+      ['http://localhost:6274/oauth/callback', 'http://localhost:6274'],
+      ['https://chat.openai.com/aip/g-123/oauth/callback', 'https://chat.openai.com'],
+    ] as const) {
+      const result = page(uri);
+      expect(result.status, uri).toBe(200);
+      expect(formAction(result.headers['Content-Security-Policy']), uri).toEqual(["'self'", origin]);
+    }
+    expect(formAction(page('').headers['Content-Security-Policy'])).toEqual(["'self'"]);
+  });
 });
 
 describe('outstanding-authorization budget', () => {

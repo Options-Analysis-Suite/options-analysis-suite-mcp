@@ -68,6 +68,15 @@ function compactWeeklyPoint(point: WeeklyPoint): Record<string, unknown> {
   return compact;
 }
 
+/** The proxy's own summary fields, a numeric string ("-0.17") as a number. */
+function numericSummary(summary: unknown): Record<string, unknown> {
+  if (!summary || typeof summary !== 'object' || Array.isArray(summary)) return {};
+  return Object.fromEntries(Object.entries(summary as Record<string, unknown>).map(([key, value]) => [
+    key,
+    typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(value.trim()) ? Number(value.trim()) : value,
+  ]));
+}
+
 function deriveSummary(points: WeeklyPoint[], existingSummary: unknown): Record<string, unknown> | undefined {
   if (points.length === 0 && (existingSummary == null || typeof existingSummary !== 'object')) return undefined;
 
@@ -89,7 +98,7 @@ function deriveSummary(points: WeeklyPoint[], existingSummary: unknown): Record<
   const priorTradeAvg = avg(priorWindow.map((point) => point.totalTrades).filter((value): value is number => typeof value === 'number'));
 
   return {
-    ...(existingSummary && typeof existingSummary === 'object' ? existingSummary as Record<string, unknown> : {}),
+    ...numericSummary(existingSummary),
     latestWeek: points[0]?.weekEnding,
     avgWeeklyShares: round(avg(shareSeries), 0),
     avgWeeklyTrades: round(avg(tradeSeries), 0),
@@ -115,24 +124,28 @@ export function summarizeDarkPoolVenue(
   if (payload == null || typeof payload !== 'object') return payload;
   const venue = payload as VenuePayload;
   const sorted = sortNewestFirst(venue.weeklyData);
-  if (sorted.length === 0) return payload;
+  // No rows (the proxy's answer for a symbol with none): nothing to shape,
+  // but its summary still publishes numbers.
+  if (sorted.length === 0) {
+    return venue.summary && typeof venue.summary === 'object' ? { ...venue, summary: numericSummary(venue.summary) } : payload;
+  }
 
   const recent = sorted.slice(0, recentCap);
-  const recentDates = new Set(recent.map((point) => point.weekEnding));
-  const trendSample = pickEvenlySpaced(sorted, trendCap)
-    .filter((point) => !recentDates.has(point.weekEnding))
-    .map(compactWeeklyPoint);
+  // Sampled from the weeks older than the recent rows, so no sample repeats
+  // one; with none older there is nothing to sample and no trendSample.
+  const older = sorted.slice(recent.length);
+  const trendSample = older.length > 0 ? pickEvenlySpaced(older, trendCap).map(compactWeeklyPoint) : undefined;
 
   return {
     symbol: venue.symbol,
     summary: deriveSummary(sorted, venue.summary),
     weeklyData: recent.map(compactWeeklyPoint),
-    trendSample,
+    ...(trendSample ? { trendSample } : {}),
     _weeklyData_meta: sorted.length > recent.length
       ? {
           summarized: true,
           recent_weeks: recent.length,
-          trend_samples: trendSample.length,
+          trend_samples: trendSample?.length ?? 0,
           total_weeks: sorted.length,
         }
       : undefined,
