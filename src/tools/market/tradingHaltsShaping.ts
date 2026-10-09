@@ -176,6 +176,28 @@ function trimSymbolHistoryEntry(halt: TradingHalt): Record<string, unknown> {
   };
 }
 
+/**
+ * The proxy names the halt feeds it could not read (`partial: true`, `unavailable`): the
+ * answer then lists only the feeds that answered, and must say so, or a model reads a missing halt as none.
+ */
+function partialFields(payload: unknown): Record<string, unknown> {
+  const p = payload as { partial?: unknown; unavailable?: unknown } | null;
+  if (!p || typeof p !== 'object' || p.partial !== true) return {};
+  const feeds = Array.isArray(p.unavailable) ? p.unavailable.filter((f): f is string => typeof f === 'string') : [];
+  const named = feeds.length > 0 ? `${feeds.join(' and ')} halt feed${feeds.length > 1 ? 's' : ''}` : 'One halt feed';
+  return {
+    partial: true,
+    unavailable: feeds,
+    partialNote: `The ${named} could not be read; ${feeds.length > 1 ? 'their' : 'its'} halts are missing, so this is not a complete list.`,
+  };
+}
+
+function withPartial(payload: unknown): unknown {
+  return payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? { ...(payload as Record<string, unknown>), ...partialFields(payload) }
+    : payload;
+}
+
 export function summarizeTradingHalts(
   payload: unknown,
   now: Date | string = new Date(),
@@ -184,7 +206,7 @@ export function summarizeTradingHalts(
     ? ((payload as TradingHaltsPayload).halts as unknown[]).filter((halt): halt is TradingHalt => halt != null && typeof halt === 'object')
     : [];
 
-  if (halts.length === 0) return payload;
+  if (halts.length === 0) return withPartial(payload);
 
   const nowMs = typeof now === 'string' ? parseTimestamp(now) : now.getTime();
   const deduped = dedupeTradingHalts(halts).sort(compareByRecency);
@@ -223,6 +245,7 @@ export function summarizeTradingHalts(
     recentMaterialHalts: recentMaterialHalts.map(trimHalt),
     recentVolatilityHalts: recentVolatilityHalts.map(trimHalt),
     ...(Object.keys(haltsMeta).length > 0 ? { _halts_meta: haltsMeta } : {}),
+    ...partialFields(payload),
   };
 }
 
@@ -234,7 +257,14 @@ export function summarizeSymbolTradingHalts(payload: unknown): unknown {
     ? ((payload as SymbolTradingHaltPayload).history as unknown[]).filter((halt): halt is Record<string, unknown> => halt != null && typeof halt === 'object')
     : [];
 
-  if (history.length === 0) return payload;
+  if (history.length === 0) {
+    // No halt in the feed that answered: unknown while the other is unread (stated, null), never "not halted".
+    const out = withPartial(payload);
+    if (partialFields(payload).partial !== true || !out || typeof out !== 'object') return out;
+    const record = out as Record<string, unknown>;
+    const summary = record.summary && typeof record.summary === 'object' ? record.summary as Record<string, unknown> : {};
+    return { ...record, summary: { ...summary, currentlyHalted: null } };
+  }
 
   const normalizedHalts: TradingHalt[] = history.map((entry) => ({
     symbol,
@@ -273,7 +303,9 @@ export function summarizeSymbolTradingHalts(payload: unknown): unknown {
       ...summary,
       totalHalts: visibleHistory.length,
       activeHalts: activeHalts.length,
-      currentlyHalted: activeHalts.length > 0,
+      // An active halt in a feed that answered is a fact; none seen while a feed could not be read is unknown (null):
+      // the missing feed may hold the current halt.
+      currentlyHalted: activeHalts.length > 0 ? true : (partialFields(payload).partial === true ? null : false),
       latestHaltTime: visibleHistory[0]?.haltTime ?? null,
       duplicateRowsRemoved,
       olderActiveRowsCollapsed,
@@ -284,5 +316,6 @@ export function summarizeSymbolTradingHalts(payload: unknown): unknown {
     activeHalt: activeHalts[0] ? trimSymbolHistoryEntry(activeHalts[0]) : null,
     history: visibleHistory.map(trimSymbolHistoryEntry),
     ...(Object.keys(haltsMeta).length > 0 ? { _halts_meta: haltsMeta } : {}),
+    ...partialFields(payload),
   };
 }

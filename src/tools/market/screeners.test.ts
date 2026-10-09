@@ -359,3 +359,20 @@ describe('run_screener — irrelevant sub-params are ignored', () => {
     expect(call.params).not.toHaveProperty('metric');
   });
 });
+
+describe('run_screener - a partial screener answer', () => {
+  test('an unread enrichment is named with what is missing, never a row set read as whole', async () => {
+    const harness = createHarness({ metric: 'highest-vrp', data: [{ symbol: 'SPY', type: null }], partial: true, unavailable: ['tickerTypes', 'regimeLabels'] });
+    const parsed = JSON.parse((await harness.handler({ screener: 'vrp', side: 'high' }) as any).content[0].text);
+    expect(parsed.partial).toBe(true);
+    expect(parsed.unavailable).toEqual(['tickerTypes', 'regimeLabels']);
+    expect(parsed.partialNote).toMatch(/asset type of each row could not be read/);
+    expect(parsed.partialNote).toMatch(/regime labels could not be read/);
+  });
+
+  test('a whole answer carries no partial note (the control)', async () => {
+    const harness = createHarness({ metric: 'highest-vrp', data: [{ symbol: 'SPY', type: 'ETF' }] });
+    const parsed = JSON.parse((await harness.handler({ screener: 'vrp', side: 'high' }) as any).content[0].text);
+    expect('partialNote' in parsed).toBe(false);
+  });
+});

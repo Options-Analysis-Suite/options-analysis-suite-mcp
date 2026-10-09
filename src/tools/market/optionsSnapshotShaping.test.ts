@@ -359,3 +359,40 @@ describe('summarizeMetricsBatch ranking', () => {
     expect(shaped.metrics.map((r: any) => r.symbol)).toEqual(['IWM', 'SPY', 'QQQ']);
   });
 });
+
+describe('a snapshot whose curves could not be read', () => {
+  const base = { ticker: 'AAPL', date: '2026-10-07', spotPrice: 231.4, maxPain: 230, netGex: 1e9, atmIv: 0.27, putCallRatio: 0.8,
+    maxPainCurve: null, gexByStrike: null, dexByStrike: null, volSkew: null };
+
+  it('says the curves are unknown (null) with a note, never that they have not caught up (false)', () => {
+    const out = summarizeOptionsSnapshot({ ...base, partial: true, unavailable: ['curves'] } as any, { curves: ['maxPain'] }) as any;
+    expect(out.curvesAvailableForThisSession).toBeNull();
+    expect(out.partial).toBe(true);
+    expect(out.unavailable).toEqual(['curves']);
+    expect(out.partialNote).toMatch(/could not be read/);
+  });
+
+  it('curves absent with every read made: false, no partial fields (the control)', () => {
+    const out = summarizeOptionsSnapshot(base as any) as any;
+    expect(out.curvesAvailableForThisSession).toBe(false);
+    expect('partial' in out).toBe(false);
+  });
+});
+
+describe('a futures price row whose chain could not be read (review)', () => {
+  const row = { ticker: '/ESZ6', date: '2026-10-07', spotPrice: 7700 };
+
+  it('is never "a price row only": the chain is unknown, with partial, unavailable and a note', () => {
+    const out = sanitizeMcpWireOutput(shapeOptionsSnapshot({ ...row, partial: true, unavailable: ['chain'] } as any)) as any;
+    expect(out.partial).toBe(true);
+    expect(out.unavailable).toEqual(['chain']);
+    expect(JSON.stringify(out)).not.toMatch(/no options metrics to report|price row only/);
+    expect(out.message).toMatch(/could not be read/);
+  });
+
+  it('a price row whose chain was read (none on file): the price-only answer (the control)', () => {
+    const out = shapeOptionsSnapshot(row as any) as any;
+    expect(out.message).toMatch(/no options metrics to report/);
+    expect('partial' in out).toBe(false);
+  });
+});

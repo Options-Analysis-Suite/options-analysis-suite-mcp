@@ -74,7 +74,8 @@ function normalizeRow(row: FtdRow): Record<string, unknown> {
     quantity,
     price,
     value: value != null ? round(value, 2) : null,
-    onThresholdList: Boolean(row.onThresholdList),
+    // An unread threshold list leaves the membership unknown (null), never false (review).
+    onThresholdList: row.onThresholdList === null || row.thresholdSource === 'unread' ? null : Boolean(row.onThresholdList),
     thresholdSource: row.thresholdSource ?? 'none',
   };
 }
@@ -88,6 +89,16 @@ export function summarizeFailToDeliver(
   const rows = Array.isArray(payload.data)
     ? payload.data.map(normalizeRow)
     : [];
+  // The proxy marks a threshold list it could not read (partial, unavailable: ['thresholdList']):
+  // the rows' threshold status is unknown, never "no overlap" or 0 days.
+  const thresholdUnread = (payload as Record<string, unknown>).partial === true
+    && Array.isArray((payload as Record<string, unknown>).unavailable)
+    && ((payload as Record<string, unknown>).unavailable as unknown[]).includes('thresholdList');
+  const thresholdPartial = {
+    partial: true,
+    unavailable: ['thresholdList'],
+    partialNote: 'The SEC threshold list could not be read for these dates, so whether any of them were on it is unknown.',
+  };
 
   if (rows.length === 0) {
     return {
@@ -103,12 +114,13 @@ export function summarizeFailToDeliver(
         recentTrend: 'stable',
         latestFTD: null,
         dateRange: { start: null, end: null },
-        daysOnThreshold: 0,
+        daysOnThreshold: thresholdUnread ? null : 0,
       },
       recentHistory: [],
       notableSpikes: [],
-      thresholdEvents: [],
+      thresholdEvents: thresholdUnread ? null : [],
       trendSample: [],
+      ...(thresholdUnread ? thresholdPartial : {}),
     };
   }
 
@@ -132,7 +144,6 @@ export function summarizeFailToDeliver(
     : 0;
   const summary = (payload.summary ?? {}) as Record<string, unknown>;
   const trendPct = toNumber(summary.trend) ?? 0;
-
   return {
     symbol: payload.symbol ?? null,
     latestFTD: rows[0],
@@ -146,7 +157,7 @@ export function summarizeFailToDeliver(
       maxFTDDate: summary.maxFTDDate ?? rows[0]?.date ?? null,
       recentTrendPct: round(trendPct),
       recentTrend: describeTrend(trendPct),
-      daysOnThreshold: toNumber(summary.daysOnThreshold) ?? thresholdEvents.length,
+      daysOnThreshold: thresholdUnread ? null : (toNumber(summary.daysOnThreshold) ?? thresholdEvents.length),
       latestFTD: rows[0],
       dateRange: summary.dateRange ?? {
         start: rows[rows.length - 1]?.date ?? null,
@@ -155,7 +166,7 @@ export function summarizeFailToDeliver(
     },
     recentHistory,
     notableSpikes,
-    thresholdEvents,
+    thresholdEvents: thresholdUnread ? null : thresholdEvents,
     trendSample,
     _recent_history_meta: { showing: recentHistory.length, total: rows.length, truncated: rows.length > recentHistory.length },
     _spikes_meta: { showing: notableSpikes.length, scope: 'requested_window', kind: 'highest_quantity' },
@@ -164,8 +175,10 @@ export function summarizeFailToDeliver(
           _trend_sample_meta: { samples: trendSample.length, total_rows: rows.length, evenly_spaced: true },
         }
       : {}),
-    ...(thresholdEvents.length === 0
-      ? { _threshold_note: 'No threshold-list overlap in the requested window.' }
-      : {}),
+    ...(thresholdUnread
+      ? thresholdPartial
+      : thresholdEvents.length === 0
+        ? { _threshold_note: 'No threshold-list overlap in the requested window.' }
+        : {}),
   };
 }

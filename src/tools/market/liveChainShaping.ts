@@ -1,4 +1,5 @@
 import { MAX_RESPONSE_BYTES, sanitizeMcpWireOutput, utf8ByteLength } from '../helpers.js';
+import { omittedRowsSentence, readOmittedRows } from './omittedRows.js';
 
 /**
  * Shape a LIVE single-expiration chain for a model.
@@ -259,6 +260,7 @@ export function summarizeLiveChain(response: LiveChainResponse, options: ShapeOp
   const singleForeignRoot = roots !== null && roots.length === 1 && primaryRoot !== null && primaryRoot !== ownSpelling ? primaryRoot : null;
   // A row the broker named no root for is not under it, and goes out root null.
   const rootedContracts = [...calls, ...puts].filter((option) => option.root === primaryRoot).length;
+  const omitted = readOmittedRows((response as { omittedRows?: unknown }).omittedRows);
   const excluded = Array.isArray(response.excludedRoots) && response.excludedRoots.length > 0
     ? response.excludedRoots
         .filter((entry) => typeof entry?.root === 'string' && typeof entry?.contracts === 'number')
@@ -284,6 +286,7 @@ export function summarizeLiveChain(response: LiveChainResponse, options: ShapeOp
     ...(response.openInterestUnpublished === true ? { openInterestUnpublished: true as const } : {}),
     ...(roots !== null ? { root: primaryRoot, roots } : {}),
     ...(excluded !== null ? { excludedRoots: excluded } : {}),
+    ...(omitted !== null ? { omittedRows: omitted } : {}),
     view: {
       shaped: true,
       strikeRange: effective,
@@ -298,7 +301,8 @@ export function summarizeLiveChain(response: LiveChainResponse, options: ShapeOp
             ? ` Every contract is under the ${singleForeignRoot} root, not ${ownSpelling}.`
             : ` ${rootedContracts} of ${calls.length + puts.length} contracts are under the ${singleForeignRoot} root, not ${ownSpelling}; the rest name root null, none from the broker.`)
           : '')
-        + (excluded !== null ? ' ' + excluded.map((entry) => `${entry.contracts} contracts under the ${entry.root} root`).join(' and ') + ' (an adjusted series, a different deliverable at the same strikes) are left out of the rows and the totals.' : ''),
+        + (excluded !== null ? ' ' + excluded.map((entry) => `${entry.contracts} contracts under the ${entry.root} root`).join(' and ') + ' (an adjusted series, a different deliverable at the same strikes) are left out of the rows and the totals.' : '')
+        + (omitted !== null ? ' ' + omittedRowsSentence(omitted, 'the rows and the totals') : ''),
     },
     totals: {
       calls: callTotals,

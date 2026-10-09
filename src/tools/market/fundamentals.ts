@@ -3,7 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ProxyClient } from '../../proxy/proxyClient.js';
 import { toolHandler } from '../helpers.js';
 import { marketDataOutputSchema } from '../outputSchemas.js';
-import { currencyContext, noFundamentalsRecord, shapeFundamentalsFull, summarizeFundamentals } from './fundamentalsShaping.js';
+import { currencyContext, dividendYieldUnreadFields, noFundamentalsRecord, shapeFundamentalsFull, summarizeFundamentals } from './fundamentalsShaping.js';
 import { READ_FAILED, shapeValuation } from './marketIntelShaping.js';
 
 export const FUNDAMENTALS_DESCRIPTION =
@@ -36,7 +36,8 @@ export function register(server: McpServer, client: ProxyClient): void {
         // Trailing dividend yield from the shared /dividend-yield endpoint (stored ratios-ttm for
         // companies, profile last_div / close for funds) - reused, not re-derived. Funds carry no
         // ratios-ttm dividendYieldTTM, so this is the only place an ETF yield surfaces here.
-        client.get(`/dividend-yield/${upperSymbol}`).catch(() => null),
+        // A failed call is an unread yield (stated), never silent absence.
+        client.get(`/dividend-yield/${upperSymbol}`).catch(() => ({ reason: 'read_failed' })),
         (client.get('/market/sector-metrics', { kind: 'sector' }) as Promise<any>).catch(failed),
         (client.get('/market/sector-metrics', { kind: 'industry' }) as Promise<any>).catch(failed),
         (client.get(`/market-cap-history/${upperSymbol}`) as Promise<any>).catch(failed),
@@ -44,7 +45,7 @@ export function register(server: McpServer, client: ProxyClient): void {
       // No statements on record (a 404) is an answer: the status says what it means, on either path.
       if (res == null) return noFundamentalsRecord(symbol.toUpperCase(), companyProfile);
       const valuation = shapeValuation(res, companyProfile, sectors, industries, capHistory, full ? 'full' : 'summary');
-      if (full) return { _skipSizeGuard: true, data: shapeFundamentalsFull(res, { valuation, ...currencyContext(res, companyProfile, 'full') }) };
+      if (full) return { _skipSizeGuard: true, data: shapeFundamentalsFull(res, { valuation, ...currencyContext(res, companyProfile, 'full'), ...dividendYieldUnreadFields(res, dividendYield) }) };
       // A failed profile read reads as no profile there (any non-object is absent).
       const summary = summarizeFundamentals(res, companyProfile, dividendYield);
       return summary && typeof summary === 'object' ? { ...summary, valuation } : summary;

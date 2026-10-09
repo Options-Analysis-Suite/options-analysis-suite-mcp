@@ -302,3 +302,76 @@ describe('a halt is active only while it is the symbol\'s latest', () => {
     expect(still.activeHalt.haltTime).toBe('2026-09-30T18:00:00.000Z');
   });
 });
+
+describe('a partial halts answer', () => {
+  const HALT = {
+    symbol: 'AAPL', name: 'Apple Inc.', market: 'NASDAQ', haltTime: '2026-10-08T18:30:00.000Z', haltCode: 'T1',
+    haltDescription: 'News Pending', resumptionTime: null, status: 'Halted', source: 'NASDAQ',
+  };
+  const note = /The NYSE halt feed could not be read/;
+
+  it('the market summary carries partial, the feed and a note, so the list is never read as complete', () => {
+    const out = summarizeTradingHalts({ halts: [HALT], summary: {}, partial: true, unavailable: ['NYSE'] }, '2026-10-08T20:00:00Z') as any;
+    expect(out.partial).toBe(true);
+    expect(out.unavailable).toEqual(['NYSE']);
+    expect(out.partialNote).toMatch(note);
+  });
+
+  it('an empty partial answer is not "no halts": the note comes with it', () => {
+    const out = summarizeTradingHalts({ halts: [], summary: { totalHalts: 0 }, partial: true, unavailable: ['NYSE'] }) as any;
+    expect(out.partial).toBe(true);
+    expect(out.partialNote).toMatch(note);
+  });
+
+  it('the symbol summary too, with or without its history', () => {
+    const withRows = summarizeSymbolTradingHalts({
+      symbol: 'AAPL', history: [{ haltTime: HALT.haltTime, code: 'T1', description: 'News Pending', market: 'NASDAQ', source: 'NASDAQ', resumptionTime: null }],
+      summary: {}, partial: true, unavailable: ['NYSE'],
+    }) as any;
+    expect(withRows.partialNote).toMatch(note);
+    const empty = summarizeSymbolTradingHalts({ symbol: 'F', history: [], summary: { totalHalts: 0 }, partial: true, unavailable: ['NYSE'] }) as any;
+    expect(empty.partial).toBe(true);
+    expect(empty.partialNote).toMatch(note);
+  });
+
+  it('a complete answer carries no partial fields (the control)', () => {
+    const out = summarizeTradingHalts({ halts: [HALT], summary: {} }, '2026-10-08T20:00:00Z') as any;
+    expect('partial' in out).toBe(false);
+    expect('partialNote' in out).toBe(false);
+  });
+
+  it('the fields survive the wire sanitizer the tools publish through', async () => {
+    const { sanitizeMcpWireOutput } = await import('../helpers.js');
+    const out = sanitizeMcpWireOutput(summarizeTradingHalts({ halts: [], summary: {}, partial: true, unavailable: ['NYSE'] })) as any;
+    expect(out.partial).toBe(true);
+    expect(out.unavailable).toEqual(['NYSE']);
+    expect(out.partialNote).toMatch(note);
+  });
+});
+
+describe('currentlyHalted when a feed could not be read (review)', () => {
+  const resumed = { haltTime: '2026-10-06T14:00:00.000Z', resumptionTime: '2026-10-06T14:05:00.000Z', code: 'LUDP', description: 'Volatility Trading Pause', market: 'NYSE', source: 'NYSE' };
+  const active = { haltTime: '2026-10-08T18:30:00.000Z', resumptionTime: null, code: 'T1', description: 'News Pending', market: 'NYSE', source: 'NYSE' };
+
+  it('only resumed halts in the feed that answered, the other unread: unknown (null), never false', () => {
+    const out = summarizeSymbolTradingHalts({ symbol: 'AAPL', history: [resumed], summary: {}, partial: true, unavailable: ['NASDAQ'] }) as any;
+    expect(out.summary.currentlyHalted).toBeNull();
+    expect(out.activeHalt).toBeNull();
+  });
+
+  it('an empty partial answer: unknown too, stated (the key present and null)', () => {
+    const out = summarizeSymbolTradingHalts({ symbol: 'AAPL', history: [], summary: { totalHalts: 0 }, partial: true, unavailable: ['NASDAQ'] }) as any;
+    expect('currentlyHalted' in out.summary).toBe(true);
+    expect(out.summary.currentlyHalted).toBeNull();
+  });
+
+  it('an active halt in the feed that answered is a fact (true) even when the other was unread', () => {
+    const out = summarizeSymbolTradingHalts({ symbol: 'AAPL', history: [active], summary: {}, partial: true, unavailable: ['NASDAQ'] }) as any;
+    expect(out.summary.currentlyHalted).toBe(true);
+  });
+
+  it('a complete answer with only resumed halts: false (the control)', () => {
+    const out = summarizeSymbolTradingHalts({ symbol: 'AAPL', history: [resumed], summary: {} }) as any;
+    expect(out.summary.currentlyHalted).toBe(false);
+  });
+});

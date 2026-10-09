@@ -213,6 +213,12 @@ function summarizeSkew(raw: unknown, limit: number) {
  */
 const OPTIONS_SHAPE_KEYS = ['maxPain', 'netGex', 'atmIv', 'putCallRatio'] as const;
 
+/** The sources the proxy marked unread on a partial answer (partial: true, unavailable: [...]); none otherwise. */
+function unreadSources(snapshot: SnapshotResponse): string[] {
+  const r = snapshot as Record<string, unknown>;
+  return r.partial === true && Array.isArray(r.unavailable) ? r.unavailable.filter((u): u is string => typeof u === 'string') : [];
+}
+
 export function isPriceOnlyRow(snapshot: SnapshotResponse): boolean {
   return 'spotPrice' in snapshot && !OPTIONS_SHAPE_KEYS.some((key) => key in snapshot);
 }
@@ -226,6 +232,21 @@ export function shapeOptionsSnapshot(response: SnapshotResponse, options: ShapeS
   const snapshot = response ?? {};
   if (isPriceOnlyRow(snapshot)) {
     const symbol = str(snapshot.ticker);
+    // A price row whose chain could not be read (partial, unavailable: ['chain']) is not a price row only: whether it
+    // has options metrics is unknown (review).
+    const unavailable = unreadSources(snapshot);
+    if (unavailable.includes('chain')) {
+      return {
+        symbol,
+        date: str(snapshot.date),
+        dataSource: 'eod' as const,
+        dataAvailable: false as const,
+        partial: true as const,
+        unavailable,
+        message: `The options chain for ${symbol ?? 'this symbol'} could not be read on this call, so whether it has `
+          + 'options metrics is unknown; only its price row was read.',
+      };
+    }
     return {
       symbol,
       date: str(snapshot.date),
@@ -252,6 +273,10 @@ export function summarizeOptionsSnapshot(response: SnapshotResponse, options: Sh
   // has not caught up to this session, which is a different fact from "absent".
   const curveKeys = ['maxPainCurve', 'gexByStrike', 'dexByStrike', 'volSkew'] as const;
   const curvesPresent = curveKeys.some((key) => snapshot[key] !== null && snapshot[key] !== undefined);
+  // The proxy marks a snapshot whose curves read failed (partial, unavailable: ['curves']):
+  // then nothing is known about the curves - neither present nor behind this session.
+  const unavailable = unreadSources(snapshot);
+  const curvesUnread = unavailable.includes('curves');
 
   const curves: Record<string, unknown> = {};
   if (requested.includes('maxPain')) curves.maxPain = summarizeMaxPainCurve(snapshot.maxPainCurve, spot, limit);
@@ -266,10 +291,17 @@ export function summarizeOptionsSnapshot(response: SnapshotResponse, options: Sh
     metrics,
     units: { expectedMove30dFraction: EXPECTED_MOVE_30D_FRACTION_UNIT },
     curvesRequested: [...requested],
-    curvesAvailableForThisSession: curvesPresent,
+    curvesAvailableForThisSession: curvesUnread ? null : curvesPresent,
     ...(requested.length > 0 ? { curves } : {}),
     analyticsExpiry: str(snapshot.analyticsExpiry),
     chainExpiry: str(snapshot.chainExpiry),
+    ...(unavailable.length > 0 ? {
+      partial: true,
+      unavailable,
+      partialNote: curvesUnread
+        ? 'The strike curves (max pain, exposures, skew) could not be read for this snapshot; the metrics above were read, the curves are unknown.'
+        : `Part of this snapshot could not be read: ${unavailable.join(', ')}.`,
+    } : {}),
   };
 }
 

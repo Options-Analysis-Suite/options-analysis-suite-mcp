@@ -88,3 +88,69 @@ describe('shapeActivistFilingsResponse', () => {
     expect(shaped._snapshotStatus).toBe('No current above-threshold holders');
   });
 });
+
+describe('filings whose details could not be read', () => {
+  it('never reads as "no current holders": the unparsed count and a note travel with the empty snapshot', () => {
+    const shaped = shapeActivistFilingsResponse({
+      symbol: 'ABC',
+      filings: [
+        // The filing document and its header could not be fetched: no filer name, no ownership figures.
+        { formType: 'SC 13D', filerName: null, filingDate: '2026-10-01', ownershipStatus: 'unknown' } as any,
+        { formType: '13G/A', filerName: 'Example Fund', filingDate: '2026-09-01', ownershipStatus: 'unknown' } as any,
+      ],
+    }) as Record<string, any>;
+    expect(shaped.currentHolderSnapshot).toEqual([]);
+    expect(shaped.summary.unparsedFilings).toBe(2);
+    expect(shaped.holdersNote).toMatch(/2 of the filings could not be read/);
+    expect(shaped._snapshotStatus).toBeUndefined();
+  });
+
+  // The proxy names the filings it could not read in full (partial, unavailable).
+  // A document read whose header was cut off by the deadline carries the ownership figures with no filer.
+  it('a filing the proxy names unread, with figures but no filer: never "No current above-threshold holders"', () => {
+    const shaped = shapeActivistFilingsResponse({
+      symbol: 'PRU',
+      filings: [{ formType: '13G', filerName: null, filingDate: '2026-10-08', percentOwnership: 6.2, sharesOwned: 5000, ownershipStatus: 'above_threshold', accessionNumber: '0000000000-26-000001' } as any],
+      partial: true,
+      unavailable: ['0000000000-26-000001'],
+    }) as Record<string, any>;
+    expect(shaped._snapshotStatus).toBeUndefined();
+    expect(shaped.summary.unparsedFilings).toBe(1);
+    expect(shaped.holdersNote).toMatch(/^1 of the filings could not be read in full, so their holder or ownership is unknown/);
+    expect(shaped.partial).toBe(true);
+    expect(shaped.unavailable).toEqual(['0000000000-26-000001']);
+  });
+
+  it('an above-threshold filing with no filer name is never "no holders", partial or not (a header SEC has no copy of)', () => {
+    const shaped = shapeActivistFilingsResponse({
+      symbol: 'PRU',
+      filings: [{ formType: '13G', filerName: null, filingDate: '2026-10-08', percentOwnership: 6.2, ownershipStatus: 'above_threshold' } as any],
+    }) as Record<string, any>;
+    expect(shaped._snapshotStatus).toBeUndefined();
+    expect(shaped.summary.unparsedFilings).toBe(1);
+    expect('partial' in shaped).toBe(false);
+  });
+
+  it('an unread filing counts once, however many ways it is incomplete', () => {
+    const shaped = shapeActivistFilingsResponse({
+      symbol: 'PRU',
+      filings: [
+        { formType: '13D', filerName: null, filingDate: '2026-10-08', ownershipStatus: 'unknown', accessionNumber: 'a-1' } as any,
+        { formType: '13G', filerName: 'Holder', filingDate: '2026-10-07', percentOwnership: 9, ownershipStatus: 'above_threshold', accessionNumber: 'a-2' } as any,
+      ],
+      partial: true,
+      unavailable: ['a-1'],
+    }) as Record<string, any>;
+    expect(shaped.summary.unparsedFilings).toBe(1);
+    expect(shaped.currentHolderSnapshot.map((f: any) => f.filerName)).toEqual(['Holder']);
+  });
+
+  it('every filing read: no unparsed count, no note (the control)', () => {
+    const shaped = shapeActivistFilingsResponse({
+      symbol: 'ABC',
+      filings: [{ formType: '13G/A', filerName: 'Example Fund', filingDate: '2026-01-01', ownershipStatus: 'below_threshold' } as any],
+    }) as Record<string, any>;
+    expect('unparsedFilings' in shaped.summary).toBe(false);
+    expect('holdersNote' in shaped).toBe(false);
+  });
+});

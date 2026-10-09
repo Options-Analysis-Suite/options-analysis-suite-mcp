@@ -199,3 +199,22 @@ describe('slippage and events', () => {
     expect((summarizeStrategyScan(scan({ events: null })) as any).events).toBeNull();
   });
 });
+
+// The scanned chain's rows left out, and a partial levels window, are carried.
+describe('rows left out and a partial levels window', () => {
+  const OMITTED = { total: 1, quarantined: 1, invalidStrike: 0, notSuccess: 0, unquoted: 0 };
+  it('carries the scanned chain\'s omittedRows and the levels\' partial, emptyExpirations and omittedRows', () => {
+    const shaped: any = summarizeStrategyScan(scan({
+      omittedRows: OMITTED,
+      levels: { scope: 'window', expirations: ['2026-10-16', '2026-10-23'], gammaFlip: 97.5, callWall: 110, putWall: 90, gammaMagnet: 100, netGex: -5.5e8, regime: 'positive', coverage: coverage(), partial: true, emptyExpirations: ['2026-10-23'], omittedRows: OMITTED },
+    }));
+    expect(shaped.omittedRows).toEqual(OMITTED);
+    expect(shaped.levels).toMatchObject({ partial: true, emptyExpirations: ['2026-10-23'], omittedRows: OMITTED });
+  });
+
+  it('none: no fields (control)', () => {
+    const shaped: any = summarizeStrategyScan(scan());
+    expect(shaped.omittedRows).toBeUndefined();
+    expect(shaped.levels.partial).toBeUndefined();
+  });
+});

@@ -18,6 +18,7 @@
  */
 
 import { MAX_RESPONSE_BYTES, significant } from '../helpers.js';
+import { omittedRowsSentence, readOmittedRows } from './omittedRows.js';
 
 export interface DealerPositioningOptions {
   /** Total per-strike rows kept nearest spot (the cap, with strikeWindowPct). */
@@ -423,8 +424,10 @@ export function summarizeDealerPositioning(
     // Null when the route's calendar read failed (or it sent none); the
     // three fields are then unknown, not "no event".
     const rawEvents = entry.events !== null && typeof entry.events === 'object' ? record(entry.events) : null;
+    const entryOmitted = readOmittedRows(entry.omittedRows);
     return {
       expiration: str(entry.expiration),
+      ...(entryOmitted !== null ? { omittedRows: entryOmitted } : {}),
       daysToExpiration: Number.isSafeInteger(entry.daysToExpiration) ? entry.daysToExpiration as number : null,
       netGex: gamma.value,
       netDex: delta.value,
@@ -480,6 +483,14 @@ export function summarizeDealerPositioning(
   // The expirations whose open interest the broker did not publish: a window
   // of null levels says why, rather than reading as a thin book.
   const unpublished = arr(body.openInterestUnpublishedExpirations).map(isoDate).filter((date): date is string => date !== null);
+  // A window date the broker answered with no contracts (though it lists it), and rows it sent that could not be
+  // used: the totals leave both out, so they are said.
+  const emptyExpirations = arr(body.emptyExpirations).map(isoDate).filter((date): date is string => date !== null);
+  const omittedRows = readOmittedRows(body.omittedRows);
+  if (emptyExpirations.length > 0) {
+    limitations.push(`The broker answered ${emptyExpirations.join(', ')} with no contracts, though it lists ${emptyExpirations.length === 1 ? 'that date' : 'those dates'}; the totals leave ${emptyExpirations.length === 1 ? 'it' : 'them'} out, so the window is partial.`);
+  }
+  if (omittedRows !== null) limitations.push(omittedRowsSentence(omittedRows));
   if (unpublished.length > 0) {
     const named = unpublished.length === 1 ? unpublished[0]
       : `${unpublished.slice(0, -1).join(', ')} and ${unpublished[unpublished.length - 1]}`;
@@ -530,6 +541,9 @@ export function summarizeDealerPositioning(
       expirationsAvailable: num(body.expirationsAvailable),
       strikesUsed: num(body.strikesUsed),
       ...(unpublished.length > 0 ? { openInterestUnpublishedExpirations: unpublished } : {}),
+      ...(body.partial === true ? { partial: true as const } : {}),
+      ...(emptyExpirations.length > 0 ? { emptyExpirations } : {}),
+      ...(omittedRows !== null ? { omittedRows } : {}),
     },
 
     byExpiration,

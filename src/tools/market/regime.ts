@@ -198,6 +198,21 @@ function attachMigration(scans: any[]): void {
   }
 }
 
+/**
+ * The proxy marks a regime answer whose intraday scan or per-symbol breakdown it could not read (partial,
+ * unavailable): the answer says so, never the end-of-day row as the latest reading or a
+ * missing breakdown as an empty one.
+ */
+function regimePartialFields(res: unknown): Record<string, unknown> {
+  const r = res as { partial?: unknown; unavailable?: unknown } | null;
+  if (!r || typeof r !== 'object' || r.partial !== true) return {};
+  const unavailable = Array.isArray(r.unavailable) ? r.unavailable.filter((u): u is string => typeof u === 'string') : [];
+  const notes: string[] = [];
+  if (unavailable.includes('intraday')) notes.push('The intraday scan could not be read, so this is the end-of-day regime; a newer intraday reading may exist.');
+  if (unavailable.includes('symbols')) notes.push('The per-symbol breakdown could not be read; it is missing, not empty.');
+  return { partial: true, unavailable, partialNote: notes.join(' ') || 'Part of this answer could not be read.' };
+}
+
 export function register(server: McpServer, client: ProxyClient): void {
   server.registerTool(
     'get_regime',
@@ -354,9 +369,10 @@ export function register(server: McpServer, client: ProxyClient): void {
         // states the guard is the safety net so we never silently emit a
         // 100+ KB blob ChatGPT cannot consume.
         // The note sits beside `market`, where the other scopes carry it.
-        if (include_symbols) return res && typeof res === 'object' ? { ...res, _stress_score_note: STRESS_SCORE_NOTE, _exposures_note: SYMBOLS_EXPOSURES_NOTE } : res;
+        const partial = regimePartialFields(res);
+        if (include_symbols) return res && typeof res === 'object' ? { ...res, _stress_score_note: STRESS_SCORE_NOTE, _exposures_note: SYMBOLS_EXPOSURES_NOTE, ...partial } : res;
         if (res && typeof res === 'object' && 'market' in res) {
-          return shapeMarketRegimeResponse({ market: res.market, _stress_score_note: STRESS_SCORE_NOTE });
+          return { ...(shapeMarketRegimeResponse({ market: res.market, _stress_score_note: STRESS_SCORE_NOTE }) as Record<string, unknown>), ...partial };
         }
         return res;
       }

@@ -536,3 +536,18 @@ describe('unknown counts in whole-chain totals', () => {
     expect(shaped.totals.calls.contractsMissingVolume).toBe(0);
   });
 });
+
+// The rows the broker sent that the chain could not use are carried and said.
+describe('rows the chain left out', () => {
+  const OMITTED = { total: 3, quarantined: 1, invalidStrike: 0, notSuccess: 0, unquoted: 2 };
+  it('omittedRows is carried, and the note says the rows and totals leave them out', () => {
+    const shaped: any = summarizeLiveChain({ ...wideChain(), omittedRows: OMITTED } as any);
+    expect(shaped.omittedRows).toEqual(OMITTED);
+    expect(shaped.view.note).toMatch(/The broker sent 3 rows that could not be used \(1 failed validation, 2 whose quotes could not be read\)/);
+  });
+
+  it('none, or a malformed one: no field (control)', () => {
+    expect((summarizeLiveChain(wideChain()) as any).omittedRows).toBeUndefined();
+    expect((summarizeLiveChain({ ...wideChain(), omittedRows: { total: 'x' } } as any) as any).omittedRows).toBeUndefined();
+  });
+});

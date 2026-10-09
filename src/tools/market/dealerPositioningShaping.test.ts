@@ -813,3 +813,27 @@ describe('inDeltaBand', () => {
     expect(inDeltaBand([{ expiration: 'x', call: null, put: null }], 0.1)).toBe(false);
   });
 });
+
+// A window date the broker answered with no contracts, and rows left out, are said.
+describe('a partial window', () => {
+  const OMITTED = { total: 2, quarantined: 0, invalidStrike: 0, notSuccess: 0, unquoted: 2 };
+  it('carries partial, emptyExpirations and omittedRows on the window, per expiration, and says them in limitations', () => {
+    const shaped: any = summarizeDealerPositioning(live({
+      partial: true,
+      emptyExpirations: ['2026-09-25'],
+      omittedRows: OMITTED,
+      byExpiration: [{ expiration: '2026-09-18', daysToExpiration: 8, netGamma: 1, netDelta: 1, coverage: { gamma: { total: 2, included: 2 }, delta: { total: 2, included: 2 } }, omittedRows: OMITTED }],
+    }));
+    expect(shaped.window).toMatchObject({ partial: true, emptyExpirations: ['2026-09-25'], omittedRows: OMITTED });
+    expect(shaped.byExpiration[0].omittedRows).toEqual(OMITTED);
+    expect(shaped.limitations.some((l: string) => l.includes('2026-09-25'))).toBe(true);
+    expect(shaped.limitations.some((l: string) => /2 rows that could not be used/.test(l))).toBe(true);
+  });
+
+  it('a complete window carries none of it (control)', () => {
+    const shaped: any = summarizeDealerPositioning(live());
+    expect(shaped.window.partial).toBeUndefined();
+    expect(shaped.window.emptyExpirations).toBeUndefined();
+    expect(shaped.window.omittedRows).toBeUndefined();
+  });
+});

@@ -428,3 +428,24 @@ describe('the TTM figures\' refresh stamps', () => {
     expect('ttm_bulk_as_of' in (summarizeFundamentals({ symbol: 'X', ratios_ttm: { priceToEarningsRatioTTM: 29 } }) as any)).toBe(false);
   });
 });
+
+describe('a dividend yield that could not be read', () => {
+  const payload = { symbol: 'SPY', ratios_ttm: {}, key_metrics_ttm: {}, fetched_at: '2026-10-07T06:00:00Z' };
+
+  test('no ratios yield and the endpoint unread: null with a note, never left as plain absence', () => {
+    const out = summarizeFundamentals(payload, null, { symbol: 'SPY', dividendYield: null, observedYield: null, reason: 'read_failed' }) as any;
+    expect(out.ratios_ttm?.dividendYieldTTM ?? out.ratios?.dividendYieldTTM ?? null).toBeNull();
+    expect(out.dividendYieldNote).toMatch(/could not be read/);
+    expect(sanitizeMcpWireOutput(out) as any).toHaveProperty('dividendYieldNote');
+  });
+
+  test('a yield in the ratios beside an unread endpoint: the yield is known, no unread note (the control)', () => {
+    const out = summarizeFundamentals({ ...payload, ratios_ttm: { dividendYieldTTM: 0.0123 } }, null, { symbol: 'SPY', dividendYield: null, observedYield: null, reason: 'read_failed' }) as any;
+    expect('dividendYieldNote' in out).toBe(false);
+  });
+
+  test('a yield the endpoint withheld on purpose: no unread note (the control)', () => {
+    const out = summarizeFundamentals(payload, null, { symbol: 'SPY', dividendYield: null, observedYield: null, source: 'default', note: null }) as any;
+    expect('dividendYieldNote' in out).toBe(false);
+  });
+});

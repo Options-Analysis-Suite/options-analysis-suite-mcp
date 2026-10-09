@@ -700,3 +700,27 @@ describe('scope=intraday migration', () => {
     expect('migrationNote' in parsed).toBe(false);
   });
 });
+
+describe('a partial regime answer', () => {
+  const market = { date: '2026-10-07', label: 'NORMAL', stress_score: 0.2, scan_source: 'eod', top_driver: null };
+
+  test('an unread intraday scan: partial, named, with a note that this is the end-of-day regime', async () => {
+    const { handler } = createHarness({ market, partial: true, unavailable: ['intraday'] });
+    const parsed = JSON.parse((await handler({ scope: 'market' }) as any).content[0].text);
+    expect(parsed.partial).toBe(true);
+    expect(parsed.unavailable).toEqual(['intraday']);
+    expect(parsed.partialNote).toMatch(/intraday scan could not be read/);
+  });
+
+  test('an unread breakdown with include_symbols: the note says the breakdown is missing, not empty', async () => {
+    const { handler } = createHarness({ market, partial: true, unavailable: ['symbols'] });
+    const parsed = JSON.parse((await handler({ scope: 'market', include_symbols: true }) as any).content[0].text);
+    expect(parsed.partialNote).toMatch(/per-symbol breakdown could not be read/);
+  });
+
+  test('a whole answer: no partial fields (the control)', async () => {
+    const { handler } = createHarness({ market });
+    const parsed = JSON.parse((await handler({ scope: 'market' }) as any).content[0].text);
+    expect('partial' in parsed).toBe(false);
+  });
+});

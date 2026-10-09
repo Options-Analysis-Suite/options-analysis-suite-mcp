@@ -317,6 +317,19 @@ function extractEndpointDividendYield(info: unknown): number | undefined {
   return Number.isFinite(n) && n >= 0 ? n : undefined;
 }
 
+/**
+ * The /dividend-yield endpoint says when it could not read the yield (reason 'read_failed'; the
+ * tool passes the same reason when the call itself failed): with no ratios yield either, the yield is unknown, not
+ * withheld - said in the summary and in the full view alike (review).
+ */
+export function dividendYieldUnreadFields(payload: unknown, dividendYieldInfo: unknown): Record<string, unknown> {
+  const ratios = getObject(getObject(payload)?.ratios_ttm);
+  const ratiosHasYield = pickNumeric(ratios, 'dividendYieldTTM', 4) != null;
+  const unread = !ratiosHasYield && dividendYieldInfo != null && typeof dividendYieldInfo === 'object'
+    && (dividendYieldInfo as Record<string, unknown>).reason === 'read_failed';
+  return unread ? { dividendYieldNote: 'The dividend yield could not be read; it is unknown here, not zero.' } : {};
+}
+
 export function summarizeFundamentals(payload: unknown, companyProfile?: unknown, dividendYieldInfo?: unknown): unknown {
   if (payload == null || typeof payload !== 'object') return payload;
   const data = payload as FundamentalsPayload;
@@ -393,6 +406,7 @@ export function summarizeFundamentals(payload: unknown, companyProfile?: unknown
     // leaves it as it was), so both are given, nothing derived from them.
     ...(typeof data.ttm_bulk_as_of === 'string' ? { ttm_bulk_as_of: data.ttm_bulk_as_of } : {}),
     ...currencyContext(payload, companyProfile, 'summary'),
+    ...dividendYieldUnreadFields(payload, dividendYieldInfo),
     ...(note ? { _note: note } : {}),
     _summary_meta: { compact_view: true, has_coverage: !hasNoCoverage },
   };

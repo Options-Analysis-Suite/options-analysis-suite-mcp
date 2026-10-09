@@ -66,3 +66,25 @@ describe('summarizeYieldCurve', () => {
     expect(String(summarized._curve_note)).toContain('fallback benchmark rate');
   });
 });
+
+describe('a partial yield curve', () => {
+  const curve = [{ term: '3M', yield: 4.3 }, { term: '10Y', yield: 4.1 }];
+  it('carries partial, the missing terms and a note naming them', () => {
+    const out = summarizeYieldCurve({ curve, partial: true, unavailable: ['2Y', '30Y'] } as any) as any;
+    expect(out.partial).toBe(true);
+    expect(out.unavailable).toEqual(['2Y', '30Y']);
+    expect(out.partialNote).toMatch(/2Y and 30Y could not be read/);
+  });
+
+  it('a complete curve carries no partial fields (the control)', () => {
+    const out = summarizeYieldCurve({ curve } as any) as any;
+    expect('partial' in out).toBe(false);
+  });
+
+  it('the fields survive the wire sanitizer', async () => {
+    const { sanitizeMcpWireOutput } = await import('../helpers.js');
+    const out = sanitizeMcpWireOutput(summarizeYieldCurve({ curve, partial: true, unavailable: ['2Y'] } as any)) as any;
+    expect(out.partial).toBe(true);
+    expect(out.partialNote).toMatch(/2Y could not be read/);
+  });
+});

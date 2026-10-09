@@ -384,6 +384,15 @@ export function estimatesCurrencyContext(payload: unknown, companyProfile: unkno
   const reported = currencyCode(data?.reported_currency);
   const asOf = typeof data?.reported_currency_as_of === 'string' && /^\d{4}-\d{2}-\d{2}/.test(data.reported_currency_as_of) ? data.reported_currency_as_of.slice(0, 10) : null;
   const trading = currencyCode(profile?.currency);
+  // The proxy marks a reporting currency it could not read (partial, unavailable: ['reportedCurrency']):
+  // the estimates' currency is then unknown, and the answer says so rather than nothing.
+  const currencyUnread = data?.partial === true && Array.isArray(data?.unavailable) && (data.unavailable as unknown[]).includes('reportedCurrency');
+  if (currencyUnread) {
+    return {
+      estimates_currency: { reported: null, reportedAsOf: null, trading },
+      estimates_currency_note: `The company's reporting currency could not be read, so the currency of the estimates is unknown: they are normally in the reporting currency, which can differ from the listing's${trading ? ` (${trading})` : ''}.`,
+    };
+  }
   if (!reported && !trading) return {};
   const differ = reported !== null && trading !== null && reported !== trading;
   const statement = asOf ? `its newest statement on file (${asOf})` : 'its newest statement on file';

@@ -123,6 +123,19 @@ export function shapeActivistFilingsResponse(payload: ActivistFilingsResponse): 
     .slice(0, MAX_RECENT_BELOW_THRESHOLD)
     .map(trimFiling);
 
+  // A filing whose document could not be read has no ownership figures (and, when its header failed too, no filer
+  // name): its holder may be among the current ones, so an empty snapshot is never "no holders" while any is unread.
+  // The proxy also names the filings it could not read in full (partial: true, unavailable by accession number): a
+  // document read whose header was cut off carries above-threshold figures with no filer, which the per-filer snapshot
+  // cannot place - so an above-threshold filing with no filer name counts too, named or not.
+  const unread = new Set(payload.partial === true && Array.isArray(payload.unavailable)
+    ? payload.unavailable.filter((accession): accession is string => typeof accession === 'string')
+    : []);
+  const unparsedFilings = filings.filter((filing) =>
+    (typeof filing.accessionNumber === 'string' && unread.has(filing.accessionNumber))
+    || (filing.ownershipStatus !== 'above_threshold' && filing.ownershipStatus !== 'below_threshold')
+    || (filing.ownershipStatus === 'above_threshold' && !(typeof filing.filerName === 'string' && filing.filerName.trim()))).length;
+
   return {
     symbol: payload.symbol ?? null,
     companyName: payload.companyName ?? null,
@@ -131,13 +144,18 @@ export function shapeActivistFilingsResponse(payload: ActivistFilingsResponse): 
       totalFilings: filings.length,
       currentAboveThresholdFilers: currentHolderSnapshot.length,
       recentBelowThresholdFilings: belowThreshold.length,
+      ...(unparsedFilings > 0 ? { unparsedFilings } : {}),
     },
     keyHolderHighlights,
     currentHolderSnapshot,
     recentBelowThreshold,
     ...(currentHolderSnapshot.length > 0
       ? { _snapshotMeta: { currentHolderSnapshots: currentHolderSnapshot.length, totalFilings: filings.length, prioritizedLatestPerFiler: true } }
-      : { _snapshotStatus: 'No current above-threshold holders' }),
+      : unparsedFilings > 0 ? {} : { _snapshotStatus: 'No current above-threshold holders' }),
+    ...(unparsedFilings > 0
+      ? { holdersNote: `${unparsedFilings} of the filings could not be read in full, so their holder or ownership is unknown; the holders above are from the filings that were read, and holders above 5% may be among the unread ones.` }
+      : {}),
+    ...(unread.size > 0 ? { partial: true, unavailable: [...unread] } : {}),
     ...(recentBelowThreshold.length > 0
       ? { _belowThresholdMeta: { summarizedSeparately: true } }
       : {}),

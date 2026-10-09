@@ -55,6 +55,20 @@ describe('summarizeScenario', () => {
     expect(shaped.grid.pnl).toEqual([[[null, 1.01]]]);
   });
 
+  it('a correlation whose closes could not be read keeps its reason and the fit\'s warning', () => {
+    const failedRead = {
+      ...payload,
+      portfolioFit: {
+        ...payload.portfolioFit,
+        correlation: { ...payload.portfolioFit.correlation, pairs: [{ symbol: 'AAPL', rho: null, observations: 0, asOf: null, unconfirmed: 0, reason: 'history-read-failed' }] },
+        warnings: ['portfolioFit: daily closes for AAPL could not be read; its correlations are null (history-read-failed)'],
+      },
+    };
+    const shaped = summarizeScenario(failedRead, { full: false }) as any;
+    expect(shaped.portfolioFit.correlation.pairs).toEqual(failedRead.portfolioFit.correlation.pairs);
+    expect(shaped.portfolioFit.warnings).toEqual(failedRead.portfolioFit.warnings);
+  });
+
   it('full returns the route\'s answer untouched', () => {
     expect(summarizeScenario(payload, { full: true })).toEqual(payload);
   });

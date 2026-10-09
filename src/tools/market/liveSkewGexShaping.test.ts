@@ -295,3 +295,28 @@ describe('rank_live_skew_gex shaping', () => {
     expect(out.results[0].gex.value).toBe(1_250_000_000);
   });
 });
+
+// Rows the broker left out are carried on the gex and skew blocks.
+describe('rows left out', () => {
+  const OMITTED = { total: 4, quarantined: 4, invalidStrike: 0, notSuccess: 0, unquoted: 0 };
+  test('gex and skew carry omittedRows; none, no field', () => {
+    const out = wire(shapeLiveSkewGex(body([result('AAA', { gex: { omittedRows: OMITTED }, skew: { omittedRows: { ...OMITTED, total: 1, quarantined: 1 } } }), result('BBB')]), { requestedSymbols: ['AAA', 'BBB'] }));
+    const aaa = out.results.find((r: any) => r.symbol === 'AAA');
+    expect(aaa.gex.omittedRows).toEqual(OMITTED);
+    expect(aaa.skew.omittedRows).toEqual({ ...OMITTED, total: 1, quarantined: 1 });
+    const bbb = out.results.find((r: any) => r.symbol === 'BBB');
+    expect(bbb.gex.omittedRows).toBeUndefined();
+  });
+
+  test('a partial window or skew is marked, its change as the proxy withheld it (review)', () => {
+    const out = wire(shapeLiveSkewGex(body([result('AAA', { gex: { partial: true, change: null, changePct: null }, skew: { partial: true, change: null } }), result('BBB')]), { requestedSymbols: ['AAA', 'BBB'] }));
+    const aaa = out.results.find((r: any) => r.symbol === 'AAA');
+    expect(aaa.gex.partial).toBe(true);
+    expect(aaa.gex.change).toBeNull();
+    expect(aaa.skew.partial).toBe(true);
+    expect(aaa.skew.change).toBeNull();
+    const bbb = out.results.find((r: any) => r.symbol === 'BBB');
+    expect(bbb.gex.partial).toBeUndefined();
+    expect(bbb.skew.partial).toBeUndefined();
+  });
+});

@@ -10,6 +10,7 @@
 
 import { MAX_RESPONSE_BYTES } from '../helpers.js';
 import { exDividend, isoDate, measuredLevel, measuredValue, metricCoverage, readRegime, RESOLUTION_DIGITS, RESPONSE_MARGIN_BYTES, significant } from './dealerPositioningShaping.js';
+import { readOmittedRows } from './omittedRows.js';
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
@@ -91,6 +92,17 @@ export function summarizeStrategyScan(response: Record<string, unknown>) {
       const dates = arr(rawLevels.openInterestUnpublishedExpirations).map(isoDate).filter((e): e is string => e !== null);
       return dates.length > 0 ? { openInterestUnpublishedExpirations: dates } : {};
     })(),
+    // A window date the broker answered with no contracts and rows it sent that could not be used, left out of the
+    // levels; partial when a date or a quote could not be read.
+    ...(rawLevels.partial === true ? { partial: true as const } : {}),
+    ...(() => {
+      const dates = arr(rawLevels.emptyExpirations).map(isoDate).filter((e): e is string => e !== null);
+      return dates.length > 0 ? { emptyExpirations: dates } : {};
+    })(),
+    ...(() => {
+      const omitted = readOmittedRows(rawLevels.omittedRows);
+      return omitted !== null ? { omittedRows: omitted } : {};
+    })(),
   };
 
   const candidates = arr(body.candidates).map((value) => {
@@ -158,6 +170,11 @@ export function summarizeStrategyScan(response: Record<string, unknown>) {
     expiration: str(body.expiration),
     daysToExpiration: count(body.daysToExpiration),
     spotPrice: spot,
+    // The scanned chain's rows the broker sent that could not be used: no candidate is built on them.
+    ...(() => {
+      const omitted = readOmittedRows(body.omittedRows);
+      return omitted !== null ? { omittedRows: omitted } : {};
+    })(),
     // A spot that printed before the last session's open skews everything read
     // against it; resolved.S carries the flag, and this says what it touches.
     ...(record(record(body.resolved).S).stale === true

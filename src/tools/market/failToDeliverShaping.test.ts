@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { summarizeFailToDeliver } from './failToDeliverShaping.js';
+import { sanitizeMcpWireOutput } from '../helpers.js';
 
 describe('summarizeFailToDeliver', () => {
   it('builds a compact summary with recent rows, spikes, and trend samples', () => {
@@ -48,5 +49,45 @@ describe('summarizeFailToDeliver', () => {
     expect(summarized.recentHistory).toEqual([]);
     expect(summarized.notableSpikes).toEqual([]);
     expect(summarized.thresholdEvents).toEqual([]);
+  });
+});
+
+describe('a threshold list that could not be read', () => {
+  const rows = [
+    { date: '2026-10-06', symbol: 'AAPL', quantity: 1000, price: 231.4, value: 231400, onThresholdList: null, thresholdSource: 'unread' },
+    { date: '2026-10-05', symbol: 'AAPL', quantity: 500, price: 230.1, value: 115050, onThresholdList: null, thresholdSource: 'unread' },
+  ];
+
+  it('never says "No threshold-list overlap" nor 0 days: unknown, with a note', () => {
+    const out = summarizeFailToDeliver({ symbol: 'AAPL', data: rows, summary: { daysOnThreshold: null }, partial: true, unavailable: ['thresholdList'] } as any) as any;
+    expect(out.summary.daysOnThreshold).toBeNull();
+    expect(out._threshold_note).toBeUndefined();
+    expect(out.partial).toBe(true);
+    expect(out.partialNote).toMatch(/threshold list could not be read/);
+  });
+
+  // Review: the row shaping turned the unknown membership into false in every list.
+  it('each row keeps its membership unknown (null), never false, in every list; no threshold events claimed', () => {
+    const out = sanitizeMcpWireOutput(summarizeFailToDeliver({ symbol: 'AAPL', data: rows, summary: { daysOnThreshold: null }, partial: true, unavailable: ['thresholdList'] } as any)) as any;
+    for (const row of [out.latestFTD, out.summary.latestFTD, ...out.recentHistory, ...out.notableSpikes]) {
+      expect(row.onThresholdList).toBeNull();
+      expect(row.thresholdSource).toBe('unread');
+    }
+    expect(out.thresholdEvents).toBeNull();
+  });
+
+  it('no FTD rows beside an unread threshold list: the partial fields are carried there too', () => {
+    const out = summarizeFailToDeliver({ symbol: 'AAPL', data: [], summary: { daysOnThreshold: null }, partial: true, unavailable: ['thresholdList'] } as any) as any;
+    expect(out.partial).toBe(true);
+    expect(out.unavailable).toEqual(['thresholdList']);
+    expect(out.summary.daysOnThreshold).toBeNull();
+  });
+
+  it('a read with no overlap keeps its note and 0 (the control)', () => {
+    const out = summarizeFailToDeliver({ symbol: 'AAPL', data: rows.map(r => ({ ...r, onThresholdList: false, thresholdSource: 'none' })), summary: { daysOnThreshold: 0 } } as any) as any;
+    expect(out.summary.daysOnThreshold).toBe(0);
+    expect(out._threshold_note).toBe('No threshold-list overlap in the requested window.');
+    expect(out.recentHistory.every((r: any) => r.onThresholdList === false)).toBe(true);
+    expect(out.thresholdEvents).toEqual([]);
   });
 });

@@ -113,6 +113,22 @@ function findCurveExtremes(curveByTerm: Record<string, number | null>): Record<s
   };
 }
 
+/**
+ * The proxy names the tenors it could not read (`partial: true`, `unavailable`): they are
+ * missing from the curve, and the shape and spreads use the tenors that were read.
+ */
+function partialFields(payload: YieldCurveResponse): Record<string, unknown> {
+  const p = payload as { partial?: unknown; unavailable?: unknown };
+  if (p.partial !== true) return {};
+  const terms = Array.isArray(p.unavailable) ? p.unavailable.filter((t): t is string => typeof t === 'string') : [];
+  const named = terms.length > 1 ? `${terms.slice(0, -1).join(', ')} and ${terms[terms.length - 1]}` : (terms[0] ?? 'Some tenors');
+  return {
+    partial: true,
+    unavailable: terms,
+    partialNote: `Yields for ${named} could not be read; they are missing from the curve, and the shape and spreads use the tenors that were read.`,
+  };
+}
+
 export function summarizeYieldCurve(
   payload: YieldCurveResponse,
   sampleCount = DEFAULT_SAMPLE_COUNT,
@@ -129,6 +145,7 @@ export function summarizeYieldCurve(
       },
       source: payload.source ?? null,
       _curve_note: 'Full Treasury curve data was not available in this payload; only the fallback benchmark rate was returned.',
+      ...partialFields(payload),
     };
   }
 
@@ -173,5 +190,6 @@ export function summarizeYieldCurve(
     ...(historical.length > sampledHistory.length
       ? { _historical_meta: { sampled: sampledHistory.length, total: historical.length, evenly_spaced: true } }
       : {}),
+    ...partialFields(payload),
   };
 }

@@ -192,6 +192,22 @@ describe('get_fundamentals valuation', () => {
     expect(out.valuation.marketCap).toMatchObject({ latest: 4.9e12, date: '2026-10-02' });
   });
 
+  test('a /dividend-yield call that fails is an unread yield, stated, never plain absence', async () => {
+    const t = tool(registerFundamentals, fundamentalsRoutes({ '/dividend-yield/AAPL': new Error('HTTP 503') }));
+    const out = (await t.run({ symbol: 'AAPL' })).structuredContent;
+    expect(out.dividendYieldNote).toMatch(/could not be read/);
+    const ok = tool(registerFundamentals, fundamentalsRoutes());
+    expect('dividendYieldNote' in (await ok.run({ symbol: 'AAPL' })).structuredContent).toBe(false);
+  });
+
+  test('the full view says so too (review: the note was summary-only)', async () => {
+    const t = tool(registerFundamentals, fundamentalsRoutes({ '/dividend-yield/AAPL': new Error('HTTP 503') }));
+    const res = await t.run({ symbol: 'AAPL', full: true });
+    expect(JSON.stringify(res.structuredContent)).toContain('The dividend yield could not be read');
+    const ok = tool(registerFundamentals, fundamentalsRoutes());
+    expect(JSON.stringify((await ok.run({ symbol: 'AAPL', full: true })).structuredContent)).not.toContain('dividendYieldNote');
+  });
+
   test('valuation reads that fail leave the fundamentals standing and say so', async () => {
     const down = new Error('HTTP 503');
     const t = tool(registerFundamentals, fundamentalsRoutes({

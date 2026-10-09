@@ -328,3 +328,16 @@ describe('the analysts\' rating counts and individual price targets (phase D1)',
     expect(Buffer.byteLength(res.content[0].text, 'utf8')).toBeLessThan(48 * 1024);
   });
 });
+
+describe('a reporting currency that could not be read', () => {
+  test('says the estimates currency is unknown instead of staying silent', () => {
+    const out = estimatesCurrencyContext({ reported_currency: null, partial: true, unavailable: ['reportedCurrency'] }, { currency: 'USD' }) as any;
+    expect(out.estimates_currency.reported).toBeNull();
+    expect(out.estimates_currency_note).toMatch(/could not be read/);
+  });
+
+  test('a currency read with nothing on file stays silent (the control)', () => {
+    const out = estimatesCurrencyContext({ reported_currency: null }, { currency: 'USD' }) as any;
+    expect('estimates_currency_note' in out).toBe(false);
+  });
+});

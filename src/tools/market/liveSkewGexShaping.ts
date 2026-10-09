@@ -18,6 +18,7 @@
  */
 import { MAX_RESPONSE_BYTES, utf8ByteLength } from '../helpers.js';
 import { isoDate, measuredValue, metricCoverage, type FieldStatus } from './dealerPositioningShaping.js';
+import { readOmittedRows } from './omittedRows.js';
 
 export const LIVE_SKEW_GEX_METRICS = ['skew', 'gex'] as const;
 export type LiveSkewGexMetric = typeof LIVE_SKEW_GEX_METRICS[number];
@@ -110,6 +111,11 @@ function shapeSkew(raw: unknown, rowBaselineDate: string | null) {
     skew10d: model(r.ivSkew10d),
     expiration: isoDate(r.expiration),
     dte: count(r.dte),
+    ...(() => {
+      const omitted = readOmittedRows(r.omittedRows);
+      return omitted !== null ? { omittedRows: omitted } : {};
+    })(),
+    ...(r.partial === true ? { partial: true as const } : {}),
     prior: model(prior.value),
     priorStatus: str(prior.status),
     change: model(r.change),
@@ -138,6 +144,13 @@ function shapeGex(raw: unknown, rowBaselineDate: string | null) {
     expirations: dates(r.expirations),
     ...(empty.length > 0 ? { emptyExpirations: empty } : {}),
     ...(unpublished.length > 0 ? { openInterestUnpublishedExpirations: unpublished } : {}),
+    // Rows the broker sent for the window's chains that could not be used: the GEX leaves them out.
+    ...(() => {
+      const omitted = readOmittedRows(r.omittedRows);
+      return omitted !== null ? { omittedRows: omitted } : {};
+    })(),
+    // The window could not be read whole (a date or a quote): the proxy withholds the change on unread quotes.
+    ...(r.partial === true ? { partial: true as const } : {}),
     // Every priced strike in one of the three: the total is their sum, not sent.
     strikes: {
       otmSide: count(strikes.strikesOtmSide),

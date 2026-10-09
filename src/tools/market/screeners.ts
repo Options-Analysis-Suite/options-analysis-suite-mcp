@@ -70,6 +70,24 @@ interface ScreenerRoute {
   query?: Record<string, string>;
 }
 
+/**
+ * The proxy marks a screener whose enrichment read failed (partial, unavailable): its rows
+ * were read, the named fields were not. The note says what is missing, so a model never reads the nulls as values.
+ */
+const UNAVAILABLE_SOURCE_NOTES: Record<string, string> = {
+  tickerTypes: 'The asset type of each row could not be read, so the rows carry no type (ETFs and stocks are not told apart).',
+  termStructure: 'The term-structure IVs could not be read, so the front and back IV columns are missing, not zero.',
+  regimeLabels: 'The regime labels could not be read, so the regime and stress columns are missing.',
+};
+
+function withPartialNote(res: unknown): unknown {
+  if (!res || typeof res !== 'object' || Array.isArray(res)) return res;
+  const r = res as Record<string, unknown>;
+  if (r.partial !== true || !Array.isArray(r.unavailable)) return res;
+  const notes = (r.unavailable as unknown[]).map((u) => UNAVAILABLE_SOURCE_NOTES[String(u)] ?? `Part of this answer (${String(u)}) could not be read.`);
+  return { ...r, partialNote: notes.join(' ') };
+}
+
 function humanizeScreenerOutput(value: unknown, depth = 0): unknown {
   if (depth > 20 || value == null || typeof value !== 'object') return value;
   if (Array.isArray(value)) {
@@ -266,7 +284,7 @@ export function register(server: McpServer, client: ProxyClient): void {
       // Proxy responses standardize on { data: [...], ... }. Normalize the
       // few enum-like labels LLMs tend to quote verbatim, then let the shared
       // size guard handle any unusually large payload.
-      return humanizeScreenerOutput(res);
+      return withPartialNote(humanizeScreenerOutput(res));
     }),
   );
 }
