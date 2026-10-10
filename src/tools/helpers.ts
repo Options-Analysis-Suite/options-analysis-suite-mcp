@@ -811,17 +811,21 @@ export function toolHandler<T extends Record<string, unknown>>(
       // null is no data like a null result.
       const serialized = typeof data === 'object' && data !== null ? JSON.stringify(data) : undefined;
       if (serialized !== undefined) data = JSON.parse(serialized) as unknown;
-      if (data == null) {
+      const noData = (): ToolResult => {
         const message = 'No data available for this query.';
         return {
           content: [{ type: 'text', text: message }],
           structuredContent: { dataAvailable: false, message },
         };
-      }
+      };
+      if (data == null) return noData();
 
       // Backward-compat: unwrap legacy full-mode shape from tool handlers.
       if (typeof data === 'object' && data !== null && (data as any)?._skipSizeGuard === true) {
         data = (data as any).data;
+        // A full-mode wrapper around an absent answer (the proxy client's null for a 404) is no data too, never an
+        // internal error from reading the null below.
+        if (data == null) return noData();
       }
 
       // Every number at 15 significant digits: binary noise such as

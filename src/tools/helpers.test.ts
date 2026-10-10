@@ -308,6 +308,17 @@ describe('toolHandler — _skipSizeGuard bypass removal', () => {
     // Output is well under the 50KB cap
     expect(new TextEncoder().encode(result.content[0].text).byteLength).toBeLessThan(50 * 1024);
   });
+
+  // Proxy failure campaign (review): a full-mode wrapper around the client's null for a 404 is no data, never an
+  // internal error from reading the null.
+  test('a full-mode wrapper around null or undefined is no data, not an error', async () => {
+    for (const inner of [null, undefined]) {
+      const result = await toolHandler(async () => ({ _skipSizeGuard: true, data: inner }))({});
+      expect(result.isError).not.toBe(true);
+      expect(result.content[0].text).toBe('No data available for this query.');
+      expect(result.structuredContent).toEqual({ dataAvailable: false, message: 'No data available for this query.' });
+    }
+  });
 });
 
 describe('toolHandler — structuredContent', () => {

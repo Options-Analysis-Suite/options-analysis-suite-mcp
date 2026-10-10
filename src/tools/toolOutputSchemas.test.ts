@@ -27,7 +27,7 @@ describe('MCP tool output schemas', () => {
 
     registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
 
-    expect(tools).toHaveLength(45);
+    expect(tools).toHaveLength(46);
     expect(tools.map((tool) => tool.name).sort()).toEqual([...new Set(tools.map((tool) => tool.name))].sort());
     for (const tool of tools) {
       expect(tool.config.outputSchema, `${tool.name} outputSchema`).toBeTruthy();

@@ -24,3 +24,15 @@ export const platformInfoOutputSchema = z.object({
     .describe('Platform context topic returned by the tool.'),
   text: z.string().describe('Static platform context text for the requested topic.'),
 }).passthrough().describe('Static Options Analysis Suite platform context.');
+
+export const customIndicatorSpecOutputSchema = z.object({
+  apiVersion: z.number().describe('The custom indicator script format version (changes are additive).'),
+  section: z.string().describe("'index', or the id of the fetched section."),
+  text: z.string().describe('The usage text of the index, or the fetched section (markdown).'),
+  part: z.string().optional().describe("The fetched section's part: format, ta, examples or pineConversion."),
+  title: z.string().optional().describe("The fetched section's heading."),
+  chars: z.number().optional().describe("The fetched section's length in characters."),
+  sections: z.array(z.object({
+    id: z.string(), part: z.string(), title: z.string(), chars: z.number(),
+  })).optional().describe('The index: every fetchable section with its part, heading and size.'),
+}).passthrough().describe('The custom indicator script format reference, by section.');

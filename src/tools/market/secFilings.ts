@@ -83,7 +83,9 @@ export function register(server: McpServer, client: ProxyClient): void {
         return { _skipSizeGuard: true, data: { ...response, ...flags } };
       }
 
-      return { ...shapeSecFilingsResponse(response, limit), ...flags };
+      // The client's null for a 404 is the confirmed absence of filings: an empty list beside the deal flags (their own
+      // read), never a shaper reading the null.
+      return { ...shapeSecFilingsResponse(response ?? { filings: [] }, limit), ...flags };
     }),
   );
 }

@@ -11,7 +11,8 @@ function createHarness(stubByPath: Record<string, unknown> = {}, errorByPath: Re
     get: async (path: string, params?: Record<string, string>) => {
       calls.push({ path, params });
       if (errorByPath[path]) throw errorByPath[path];
-      return stubByPath[path] ?? {};
+      // A stub of null is the proxy client's answer to a 404 (it maps 404 to null).
+      return path in stubByPath ? stubByPath[path] : {};
     },
     post: async () => ({}),
   } as unknown as ProxyClient;
@@ -76,6 +77,19 @@ describe('get_short_data — full mode', () => {
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed).toEqual(stub);
   });
+});
+
+// Proxy failure campaign (review): no settlement on file is the route's 404, which the client maps to null - the
+// tool answers "No data available" in BOTH modes, never an internal error (full mode wrapped the null and crashed).
+describe('get_short_data — no settlement on file (404 -> null)', () => {
+  for (const full of [false, true]) {
+    test(`type=interest full=${full}: no data, not an error`, async () => {
+      const { handler } = createHarness({ '/finra/short-interest/ACCV': null, '/company-profile/ACCV': {} });
+      const result = await handler({ type: 'interest', symbol: 'ACCV', full });
+      expect(result.isError).not.toBe(true);
+      expect(result.content[0].text).toBe('No data available for this query.');
+    });
+  }
 });
 
 describe('get_short_data — interest tolerates company-profile failure', () => {

@@ -219,6 +219,10 @@
       "description": "Get platform background information"
     },
     {
+      "name": "get_custom_indicator_spec",
+      "description": "Get the format reference for custom indicator scripts on the Stock Charts page (the text the page's Copy-AI-prompt button gives a model): an index of sections by default, one section by id, to write or convert an indicator the user pastes into the page"
+    },
+    {
       "name": "get_analysis_history",
       "description": "Get user's options pricing analysis history, with near-identical reruns collapsed in the default view and full=true for less-summarized sanitized history"
     },

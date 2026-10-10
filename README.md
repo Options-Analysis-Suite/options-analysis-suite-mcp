@@ -12,11 +12,11 @@ MCP server that gives Claude, ChatGPT, Perplexity, and Grok direct access to you
 
 ## Current Tool Surface
 
-The MCP currently exposes **45 tools** - consolidated into enum-driven unified tools where tool shapes are a clean family match (calendars, regime views, Treasury rates, FINRA short-side series, user snapshots, and options-market screeners).
+The MCP currently exposes **46 tools** - consolidated into enum-driven unified tools where tool shapes are a clean family match (calendars, regime views, Treasury rates, FINRA short-side series, user snapshots, and options-market screeners).
 
 - **38 market, research and pricing tools**, six of them live
 - **6 synced user-data tools**
-- **1 platform-context tool**
+- **2 platform-context tools**
 
 Six tools read in real time from the broker connected to your account: `get_live_quote`, `get_intraday_bars`, `get_live_options_chain`, `get_live_dealer_positioning`, `scan_option_strategies` and `rank_live_skew_gex` (Pro and above). The other market tools answer from the platform's stored data - end-of-day snapshots and history, plus the intraday regime scans behind `get_regime` with `scope='intraday'` - and the synced tools from your own account data. `compute_black_scholes` prices from the inputs you give it. `compute_scenario` reprices a strategy you describe, with an optional fit against the positions you hold. `get_regime_fits`, `compute_black_scholes` and `compute_scenario` also need Pro; none needs a broker. A tool that needs more than the account has says so, with the upgrade link, rather than being hidden.
 
@@ -89,6 +89,7 @@ These require account sync to be enabled.
 ## Platform Context
 
 - **Platform Info** (`get_platform_info`) - Pricing models, Greeks definitions, data-source notes, and platform capabilities
+- **Custom Indicator Spec** (`get_custom_indicator_spec`) - The format reference for custom indicator scripts on the Stock Charts page (the text the page's Copy-AI-prompt button gives a model), an index of sections by default and one section by id, so an assistant can write or convert an indicator you paste into the page
 
 ## Enabling Sync
 

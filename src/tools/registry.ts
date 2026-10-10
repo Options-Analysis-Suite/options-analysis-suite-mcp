@@ -49,6 +49,7 @@ import { register as computeScenario } from './market/computeScenario.js';
 
 // Platform info
 import { registerPlatformInfo } from './platformInfo.js';
+import { registerCustomIndicatorSpec } from './customIndicatorSpec.js';
 
 // User data tools (synced from browser)
 import { register as analysisHistory } from './user/analysisHistory.js';
@@ -161,8 +162,9 @@ export function registerAllTools(
   // A strategy across spot, vol and time with an optional fit against held positions (Pro, no broker).
   computeScenario(server, liveClient);
 
-  // Platform info (1 tool).
+  // Platform context (2 tools): the platform info and the custom indicator spec.
   registerPlatformInfo(server);
+  registerCustomIndicatorSpec(server);
 
   // User data (synced from browser via /sync/* endpoints)
   analysisHistory(server, client);

@@ -34,7 +34,7 @@ describe('MCP package manifest tool annotations', () => {
     // runtime does not register: the two lists are the same set, not the same
     // length. A count alone let the four proxy-backed tools go unpackaged for
     // as long as they were gated off.
-    expect(manifest.tools?.length).toBe(45);
+    expect(manifest.tools?.length).toBe(46);
     expect(new Set((manifest.tools ?? []).map((tool) => tool.name))).toEqual(new Set(registered.keys()));
     for (const tool of manifest.tools ?? []) {
       // Anthropic's .mcpb manifest schema rejects arbitrary per-tool
@@ -78,7 +78,7 @@ describe('tool display names', () => {
     const client = new Client({ name: 'test-client', version: '0.0.0' });
     await client.connect(clientTransport);
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(45);
+    expect(tools).toHaveLength(46);
     for (const tool of tools) {
       expect(typeof tool.title === 'string' && tool.title.length > 0, `${tool.name} title`).toBe(true);
       expect(tool.annotations?.title, `${tool.name} annotations.title`).toBe(tool.title);

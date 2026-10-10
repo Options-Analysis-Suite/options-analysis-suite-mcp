@@ -290,6 +290,19 @@ describe('LiveApiClient', () => {
     expect((err.details?.warnings as string[]).join(' ')).toMatch(/supply q explicitly/);
   });
 
+  // An input whose READ failed is the retryable 503; the model is told which one.
+  it('carries the unread inputs of a retryable 503, apart from the missing ones', async () => {
+    const err = await caught(client(503, {
+      error: 'Could not read r for SPY',
+      code: 'UPSTREAM_UNAVAILABLE', retryable: true,
+      missingFields: ['r', 'q'],
+      unreadFields: ['r'],
+      warnings: ['Risk-free rate unresolved'],
+    }).get('/live/x')) as LiveApiError;
+    expect(err.details?.missingFields).toEqual(['r', 'q']);
+    expect(err.details?.unreadFields).toEqual(['r']);
+  });
+
   it('carries the per-leg recovery fields of a basket refusal', async () => {
     const err = await caught(client(422, {
       error: 'MultiAsset resolution failed',

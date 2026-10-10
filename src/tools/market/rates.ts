@@ -42,6 +42,8 @@ export function register(server: McpServer, client: ProxyClient): void {
       const effectiveWeeks = weeks ?? 12;
       const res = await client.get('/treasury/yield-curve', { weeks: String(effectiveWeeks) }) as any;
       if (full) return { _skipSizeGuard: true, data: res };
+      // The client's null for a 404 is no data (toolHandler says so), never a shaper reading the null.
+      if (res == null) return null;
       return summarizeYieldCurve(res);
     }),
   );

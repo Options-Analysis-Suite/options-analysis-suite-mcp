@@ -26,6 +26,8 @@ export function register(server: McpServer, client: ProxyClient): void {
       if (full) {
         return { _skipSizeGuard: true, data: response };
       }
+      // The client's null for a 404 is no data (toolHandler says so), never a shaper reading the null.
+      if (response == null) return null;
       return summarizeFailToDeliver(response);
     }),
   );

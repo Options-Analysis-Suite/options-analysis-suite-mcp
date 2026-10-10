@@ -126,6 +126,8 @@ interface ErrorBody {
   brokerStatus?: unknown;
   issues?: unknown;
   missingFields?: unknown;
+  /** UPSTREAM_UNAVAILABLE: the missing inputs whose read failed (a retry may resolve them). */
+  unreadFields?: unknown;
   warnings?: unknown;
 }
 
@@ -343,6 +345,9 @@ export class LiveApiClient {
     // and indistinguishable from an outage. The explanation is the whole point
     // of refusing rather than publishing a number nobody can question.
     if (Array.isArray(body?.missingFields)) details.missingFields = body.missingFields;
+    // The missing inputs whose READ failed (UPSTREAM_UNAVAILABLE, retryable): the ones a retry may resolve, apart from
+    // those with nothing on file that the caller must supply.
+    if (Array.isArray(body?.unreadFields)) details.unreadFields = body.unreadFields;
     // ADJUSTED_SERIES_ONLY names the adjusted roots (a different deliverable)
     // a date is listed under, with their counts: the whole explanation.
     if (Array.isArray(body?.excludedRoots)) details.excludedRoots = body.excludedRoots;
