@@ -148,11 +148,17 @@ const decodePattern = (encoded: string) => Buffer.from(encoded, 'base64').toStri
 // The equity vendor's full name and its cloud product, in any case and
 // spacing.
 const VENDOR_NAME_CI = decodePattern('ZmluYW5jaWFsW1xzXy4tXSptb2RlbGluZ1tcc18uLV0qcHJlcHxmbXBbXHNfLi1dKmNsb3Vk');
-// The two short names as a word or a camelCase/snake_case segment (lower
-// case with no letter before it, a capitalized form with no capital before
-// it), so a word that merely contains one is left alone. The acronym's
-// plural is included.
-const VENDOR_ACRONYM = decodePattern('KD88IVtBLVphLXpdKSg/OmZtcHM/fG9yYXRzKSg/IVthLXpdKXwoPzwhW0EtWl0pKD86Rk1QW3NTXT98Rm1wcz98T1JBVFN8T3JhdHMpKD8hW2Etel0p');
+// The two short names in any spelling, as a word or a camelCase/snake_case
+// segment: a spelling whose first letter is lower case needs no letter
+// before it, one whose first letter is a capital no capital before it, and no
+// lower case letter may follow, so a word that merely contains one is left
+// alone. Only the first letter's case places the start; the other letters
+// may be any mix (a spelling with capitals inside it is the name, as the
+// all-capitals and capitalized ones are). The acronym's plural is included.
+const VENDOR_SHORT_NAMES = [decodePattern('Zm1w'), decodePattern('b3JhdHM=')];
+const anyCaseSegment = (name: string) => `(?:(?<![A-Za-z])${name[0]}|(?<![A-Z])${name[0].toUpperCase()})`
+  + [...name.slice(1)].map((letter) => `[${letter}${letter.toUpperCase()}]`).join('');
+const VENDOR_ACRONYM = `(?:${anyCaseSegment(VENDOR_SHORT_NAMES[0])}[sS]?|${anyCaseSegment(VENDOR_SHORT_NAMES[1])})(?![a-z])`;
 const VENDOR_NAME_CI_RE = new RegExp(VENDOR_NAME_CI, 'gi');
 const VENDOR_ACRONYM_RE = new RegExp(VENDOR_ACRONYM, 'g');
 const VENDOR_NAME_TEST_RE = [new RegExp(VENDOR_NAME_CI, 'i'), new RegExp(VENDOR_ACRONYM)];
@@ -167,28 +173,69 @@ const BARE_URL_RE = /^\s*https?:\/\/\S+\s*$/i;
  * whole string at once would (it throws). In each run of consecutive
  * escapes, every position takes the longest valid sequence of up to four
  * escapes (one UTF-8 character, so %C2%A0 stays one character), and a byte
- * that starts none stays encoded.
+ * that starts none stays encoded. The sequence is found by reading the bytes,
+ * not by letting decodeURIComponent throw on each width: four throws for
+ * every %FF made a 64 KB run of them cost 60 ms per read, a dozen reads per
+ * value in a full answer.
  */
-function decodeEscapes(url: string): string {
+export function decodeEscapes(url: string): string {
   return url.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
     const escapes = run.match(/%[0-9A-Fa-f]{2}/g) ?? [];
+    const bytes = escapes.map((escape) => Number.parseInt(escape.slice(1), 16));
     let out = '';
     let index = 0;
     while (index < escapes.length) {
-      let decoded: string | null = null;
-      let used = 1;
-      for (let width = Math.min(4, escapes.length - index); width >= 1; width -= 1) {
-        try {
-          decoded = decodeURIComponent(escapes.slice(index, index + width).join(''));
-          used = width;
-          break;
-        } catch { /* a shorter sequence */ }
+      // Whole characters, as many as fit in four escapes.
+      const limit = Math.min(index + 4, escapes.length);
+      let end = index;
+      while (end < limit) {
+        const length = utf8CharLength(bytes, end, limit);
+        if (length === 0) break;
+        end += length;
       }
-      out += decoded ?? escapes[index];
-      index += used;
+      if (end === index) {
+        out += escapes[index];
+        index += 1;
+      } else {
+        out += decodeURIComponent(escapes.slice(index, end).join(''));
+        index = end;
+      }
     }
     return out;
   });
+}
+
+/**
+ * The length of the UTF-8 character starting at bytes[start], or 0 where none
+ * does or it runs past `limit`: the well-formed sequences, which are the ones
+ * decodeURIComponent accepts (no overlong form, no surrogate, nothing past
+ * U+10FFFF).
+ */
+function utf8CharLength(bytes: number[], start: number, limit: number): number {
+  const lead = bytes[start];
+  if (lead < 0x80) return 1;
+  let length: number;
+  let low = 0x80;
+  let high = 0xbf;
+  if (lead >= 0xc2 && lead <= 0xdf) {
+    length = 2;
+  } else if (lead >= 0xe0 && lead <= 0xef) {
+    length = 3;
+    if (lead === 0xe0) low = 0xa0;
+    if (lead === 0xed) high = 0x9f;
+  } else if (lead >= 0xf0 && lead <= 0xf4) {
+    length = 4;
+    if (lead === 0xf0) low = 0x90;
+    if (lead === 0xf4) high = 0x8f;
+  } else {
+    return 0;
+  }
+  if (start + length > limit) return 0;
+  if (bytes[start + 1] < low || bytes[start + 1] > high) return 0;
+  for (let k = 2; k < length; k += 1) {
+    if (bytes[start + k] < 0x80 || bytes[start + k] > 0xbf) return 0;
+  }
+  return length;
 }
 
 function vendorUrl(url: string): boolean {
@@ -283,7 +330,34 @@ function namesInfrastructure(text: string): boolean {
   INTERNAL_TABLE_RE.lastIndex = 0;
   const table = INTERNAL_TABLE_RE.test(text);
   INTERNAL_TABLE_RE.lastIndex = 0;
-  return table || /supabase/i.test(text) || /https?:\/\/\S*%/i.test(text);
+  return table || /supabase/i.test(text) || hasEscapedUrl(text);
+}
+
+const URL_START_RE = /https?:\/\//gi;
+const SPACE_OR_PERCENT_RE = /[\s%]/g;
+
+/**
+ * Whether a URL start is followed, before any whitespace, by a percent sign
+ * (what /https?:\/\/\S*%/i finds), in one pass. That pattern rescanned the
+ * rest of the run from every URL start in it, so "http://" repeated cost the
+ * square of its length (80 KB took 0.6 s). Here the first space or percent
+ * sign after a start decides, and the next start is looked for past that
+ * space: a start inside the same run ends where it does.
+ */
+function hasEscapedUrl(text: string): boolean {
+  URL_START_RE.lastIndex = 0;
+  for (let start = URL_START_RE.exec(text); start !== null; start = URL_START_RE.exec(text)) {
+    SPACE_OR_PERCENT_RE.lastIndex = URL_START_RE.lastIndex;
+    const stop = SPACE_OR_PERCENT_RE.exec(text);
+    if (stop === null) break;
+    if (stop[0] === '%') {
+      URL_START_RE.lastIndex = 0;
+      return true;
+    }
+    URL_START_RE.lastIndex = stop.index + 1;
+  }
+  URL_START_RE.lastIndex = 0;
+  return false;
 }
 
 function scrubInfrastructureText(text: string): string {
@@ -340,14 +414,25 @@ const hasOwn = (record: object, key: string) => Object.prototype.hasOwnProperty.
 /**
  * A key renamed for a vendor never lands on a name another key of the same
  * object publishes: it takes the first free numbered form (vendor, vendor2).
+ * Each name remembers the number its search reached: every form below it is
+ * taken (names are only ever added), so the next key renamed to that name
+ * starts there. Restarting at the bare name made k keys renamed to one name
+ * cost k squared probes (8,000 took 6 s).
  */
-function settleVendorKeys(entries: Array<{ outKey: string; vendor: boolean }>): void {
+export function settleVendorKeys(entries: Array<{ outKey: string; vendor: boolean }>): void {
   const taken = new Set(entries.filter((entry) => !entry.vendor).map((entry) => entry.outKey));
+  // 1 is the bare name, then name2, name3 and on.
+  const nextNumber = new Map<string, number>();
   for (const entry of entries) {
     if (!entry.vendor) continue;
-    let candidate = entry.outKey;
-    for (let n = 2; taken.has(candidate); n += 1) candidate = `${entry.outKey}${n}`;
+    let n = nextNumber.get(entry.outKey) ?? 1;
+    let candidate = n === 1 ? entry.outKey : `${entry.outKey}${n}`;
+    while (taken.has(candidate)) {
+      n += 1;
+      candidate = `${entry.outKey}${n}`;
+    }
     taken.add(candidate);
+    nextNumber.set(entry.outKey, n + 1);
     entry.outKey = candidate;
   }
 }
@@ -801,11 +886,13 @@ export function toolHandler<T extends Record<string, unknown>>(
    * of the value rows were chosen with, which rounded would name a
    * different one).
    */
-  opts?: { isSyncTool?: boolean; keepOnEmpty?: readonly string[]; exactPaths?: readonly string[] },
+  opts?: { isSyncTool?: boolean; keepOnEmpty?: readonly string[]; exactPaths?: readonly string[]; shape?: (data: unknown) => unknown },
 ): (args: T) => Promise<ToolResult> {
   return async (args: T): Promise<ToolResult> => {
     try {
       let data = await fn(args);
+      // shape: a reading applied to the whole result before the generic steps (the regime states as display words beside their keys).
+      if (opts?.shape) data = opts.shape(data);
       // What JSON makes of the result, settled first: a Date is its ISO
       // string, a boxed number its value, and a value that serializes to
       // null is no data like a null result.

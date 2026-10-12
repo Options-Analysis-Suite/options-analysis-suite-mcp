@@ -4,7 +4,7 @@ import type { ProxyClient } from '../../proxy/proxyClient.js';
 import { toolHandler } from '../helpers.js';
 import { marketDataOutputSchema } from '../outputSchemas.js';
 import { modelDisplayName } from '../modelLabels.js';
-import { humanizeFeature } from './marketRegimeShaping.js';
+import { humanizeFeature, displayRegimeLabels } from './marketRegimeShaping.js';
 
 /**
  * One unified tool for every options-market screener the platform
@@ -284,7 +284,7 @@ export function register(server: McpServer, client: ProxyClient): void {
       // Proxy responses standardize on { data: [...], ... }. Normalize the
       // few enum-like labels LLMs tend to quote verbatim, then let the shared
       // size guard handle any unusually large payload.
-      return withPartialNote(humanizeScreenerOutput(res));
+      return withPartialNote(displayRegimeLabels(humanizeScreenerOutput(res)));   // a regime state reads as its word, the stored key beside it (2026-10-11)
     }),
   );
 }

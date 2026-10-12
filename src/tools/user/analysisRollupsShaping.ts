@@ -1,4 +1,5 @@
 import { modelDisplayNames } from '../modelLabels.js';
+import { LEGACY_TIME_CONVENTION, statedTimeConvention } from './timeConvention.js';
 
 type RawRollupRow = {
   [key: string]: unknown;
@@ -20,6 +21,10 @@ type CompactRollupRow = {
   avgVegaUnit?: 'per_unit_vol';
   avgVegaWithheld?: string;
   avgTheta?: number;
+  avgThetaConvention?: string;
+  avgThetaBasis?: string;
+  thetaCount?: number;
+  legacyThetaExcluded?: number;
   avgVol?: number;
   minVol?: number;
   maxVol?: number;
@@ -82,6 +87,25 @@ export const ROLLUP_VEGA_UNITS =
   + 'withholds avgVega when it mixed Digital with other models (avgVegaWithheld says so) and carries it per unit '
   + 'of volatility when it was Digital-only (avgVegaUnit: "per_unit_vol").';
 
+/**
+ * avgTheta's convention: the web app's rollups never average Theta across time conventions - a period with
+ * analyses saved on the time-passing sign averages theirs only (thetaCount of them, legacyThetaExcluded older ones left
+ * out); a period with only older analyses keeps their mean, marked legacy. A row computed before carries no convention
+ * and reads legacy too.
+ */
+export const ROLLUP_THETA_UNITS =
+  'per day of time passing (negative: the option loses value as a day passes) where avgThetaConvention is '
+  + '"time-passing", the day avgThetaBasis names ("tradingDay": one of 252 a year): the mean of the period\'s analyses '
+  + 'saved on that sign and day (thetaCount of them; legacyThetaExcluded '
+  + `older ones left out). "${LEGACY_TIME_CONVENTION}" where the period has only analyses saved before the time sign `
+  + 'was normalized, or the row was computed before it: a GPU Monte Carlo or Local Vol Theta among them may have the '
+  + 'opposite sign.';
+
+/** A raw synced row's avgTheta convention, stated in place for the `full` path */
+export function stateRollupThetaConvention(data: Record<string, unknown>): void {
+  data.avgThetaConvention = statedTimeConvention(data, 'avgThetaConvention');
+}
+
 function describeRollupVega(data: Record<string, unknown> | null): { withheld?: string; unit?: 'per_unit_vol' } {
   if (!data || data.avgVegaUnit === 'per_vol_point') return {};
   const models = Array.isArray(data.models) ? data.models.filter((m): m is string => typeof m === 'string') : [];
@@ -125,6 +149,10 @@ export function shapeAnalysisRollupRecord(record: unknown): CompactRollupRow | u
     ...(vega.unit ? { avgVegaUnit: vega.unit } : {}),
     ...(vega.withheld ? { avgVegaWithheld: vega.withheld } : {}),
     avgTheta: numericValue(nested?.avgTheta),
+    avgThetaConvention: statedTimeConvention(nested, 'avgThetaConvention'),
+    ...(nested?.avgThetaBasis === 'tradingDay' || nested?.avgThetaBasis === 'calendarDay' ? { avgThetaBasis: nested.avgThetaBasis } : {}),
+    ...(typeof nested?.thetaCount === 'number' ? { thetaCount: nested.thetaCount } : {}),
+    ...(typeof nested?.legacyThetaExcluded === 'number' ? { legacyThetaExcluded: nested.legacyThetaExcluded } : {}),
     avgVol: numericValue(nested?.avgVol),
     minVol: numericValue(nested?.minVol),
     maxVol: numericValue(nested?.maxVol),
@@ -169,7 +197,7 @@ export function summarizeAnalysisRollupsResponse(payload: unknown): unknown {
   return {
     ...response,
     data: shapedRows,
-    units: { avgVega: ROLLUP_VEGA_UNITS },
+    units: { avgVega: ROLLUP_VEGA_UNITS, avgTheta: ROLLUP_THETA_UNITS },
     summary: {
       periodsReturned: shapedRows.length,
       totalAnalyses: counts.reduce((sum, value) => sum + value, 0),

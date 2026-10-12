@@ -129,6 +129,8 @@ interface ErrorBody {
   /** UPSTREAM_UNAVAILABLE: the missing inputs whose read failed (a retry may resolve them). */
   unreadFields?: unknown;
   warnings?: unknown;
+  /** An earnings call summary refusal: the calls on file with each one's summary state. */
+  callsOnFile?: unknown;
 }
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined);
@@ -352,6 +354,9 @@ export class LiveApiClient {
     // a date is listed under, with their counts: the whole explanation.
     if (Array.isArray(body?.excludedRoots)) details.excludedRoots = body.excludedRoots;
     if (Array.isArray(body?.warnings) && body.warnings.length > 0) details.warnings = body.warnings;
+    // An earnings call summary refusal (NOT_FOUND / SUMMARY_UNAVAILABLE) lists the calls on file with each one's
+    // summary state: the quarters that WOULD answer, as availableExpirations does for a chain.
+    if (Array.isArray(body?.callsOnFile)) details.callsOnFile = body.callsOnFile;
     // A broker that did not answer: the kind of failure and the broker's
     // HTTP status, so a refusal says why (the proxy logs nothing for it). The
     // proxy's `detail` text is never passed on: a malformed answer's parse

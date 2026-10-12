@@ -52,6 +52,11 @@ export function register(server: McpServer, client: ProxyClient): void {
       if (date) params.date = date;
 
       const res = await client.get('/scanner/options-chain', params) as any;
+      // The proxy answers 404 for a symbol with no chain on file (an unknown ticker, or one with no strike rows at all),
+      // which this client reads as null: say which symbol, in either view
+      if (res == null) {
+        return { symbol: params.ticker, dataAvailable: false, message: `No options chain on file for ${params.ticker}.` };
+      }
 
       if (full) return { _skipSizeGuard: true, data: res };
       return summarizeOptionsChain(res);

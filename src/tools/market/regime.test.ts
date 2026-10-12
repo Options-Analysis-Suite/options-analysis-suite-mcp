@@ -428,7 +428,7 @@ describe('get_regime - the label is a state with hysteresis, on every scope', ()
   // short and points at the description, which keeps the full rule and a
   // corrected example; and the market scope's note sits beside `market`
   // like every other scope's, not inside it.
-  const hysteresis = /^stressScore is a raw composite regime score, not a 0-100 index\. `label` is a state with hysteresis against the prior label, not a band read off the score \(entry NORMAL -0\.5, ELEVATED 0\.5, STRESS 1\.5, CRISIS 2\.5; exit -1\.0, 0\.0, 1\.0, 2\.0\), so a score inside one band can carry the label above it; the tool description has the full rule\.$/;
+  const hysteresis = /^stressScore is a raw composite regime score, not a 0-100 index\. `label` is a state with hysteresis against the prior label, not a band read off the score \(entry Normal -0\.5, Elevated 0\.5, Stress 1\.5, Crisis 2\.5; exit -1\.0, 0\.0, 1\.0, 2\.0\), so a score inside one band can carry the label above it; `label` is the display word and `labelKey` the stored key; the tool description has the full rule\.$/;
 
   test('the intraday shape carries the note and says its scan order', async () => {
     const stub = {
@@ -489,7 +489,7 @@ describe('get_regime - the label is a state with hysteresis, on every scope', ()
     const parsed = JSON.parse((await createHarness(stub).handler({ scope: 'market' })).content[0].text);
     expect(parsed.stressScoreNote).toMatch(hysteresis);
     expect(parsed.market.stressScoreNote).toBeUndefined();
-    expect(parsed.market.label).toBe('NORMAL');
+    expect(parsed.market).toMatchObject({ label: 'Normal', labelKey: 'NORMAL' });   // the display word, the stored key beside it (2026-10-11)
     // And with the per-symbol breakdown, once, beside `market`.
     const withSymbols = JSON.parse((await createHarness({ ...stub, symbols: { bellwether: [] } }).handler({ scope: 'market', include_symbols: true })).content[0].text);
     expect(withSymbols.stressScoreNote).toMatch(hysteresis);
@@ -630,8 +630,8 @@ describe('get_regime intraday prior label', () => {
     });
     const parsed = JSON.parse((await handler({ scope: 'intraday', symbol: 'SPY' })).content[0].text);
     const byInterval = Object.fromEntries(parsed.scans.map((s: any) => [s.interval, s]));
-    expect(byInterval.midday).toMatchObject({ priorLabel: 'NORMAL', priorLabelSource: 'earlier scan' });
-    expect(byInterval.afternoon).toMatchObject({ priorLabel: 'ELEVATED', priorLabelSource: 'daily label' });
+    expect(byInterval.midday).toMatchObject({ priorLabel: 'Normal', priorLabelKey: 'NORMAL', priorLabelSource: 'earlier scan' });
+    expect(byInterval.afternoon).toMatchObject({ priorLabel: 'Elevated', priorLabelKey: 'ELEVATED', priorLabelSource: 'daily label' });
     expect(byInterval.open.priorLabel).toBeNull();
     expect(byInterval.open.priorLabelSource).toBeNull();
     expect('priorLabel' in byInterval.morning).toBe(false);

@@ -83,6 +83,14 @@ describe('run_screener — single-view leaderboards', () => {
 });
 
 describe('run_screener — output labels', () => {
+  test('regime-stress and the regime dod-change rows show the state as a word with the stored key beside it (2026-10-11)', async () => {
+    const harness = createHarness({ data: [{ symbol: 'SPY', label: 'ELEVATED', stressScore: 0.7 }, { symbol: 'QQQ', label: 'STRESS', stressScore: 1.6 }], metric: 'regime-stress-leaders', currentDate: '2026-10-10' });
+    const parsed = JSON.parse((await harness.handler({ screener: 'regime-stress' })).content[0].text);
+    expect(parsed.data.map((r: any) => [r.label, r.labelKey])).toEqual([['Elevated', 'ELEVATED'], ['Stress', 'STRESS']]);
+    const change = JSON.parse((await createHarness({ data: [{ symbol: 'SPY', label: 'NORMAL', stressScore: 0.1, priorLabel: 'CALM' }], metric: 'biggest-regime-stress-change', currentDate: '2026-10-10', priorDate: '2026-10-09' }).handler({ screener: 'dod-change', metric: 'regime' })).content[0].text);
+    expect(change.data[0]).toMatchObject({ label: 'Normal', labelKey: 'NORMAL', priorLabel: 'Calm', priorLabelKey: 'CALM' });
+  });
+
   test('regime-stress humanizes backend feature identifiers in topDriver', async () => {
     const harness = createHarness({
       data: [
@@ -102,6 +110,11 @@ describe('run_screener — output labels', () => {
     ]);
     expect(result.content[0].text).not.toContain('skew_pressure');
     expect(result.content[0].text).not.toContain('term_structure');
+  });
+
+  test('model-divergence rows carry their regime state as a word with the key beside it (regimeLabel)', async () => {
+    const parsed = JSON.parse((await createHarness({ data: [{ symbol: 'SPY', regimeLabel: 'NORMAL', bestModel: 'heston' }], metric: 'model-divergence', currentDate: '2026-10-10' }).handler({ screener: 'model-divergence' })).content[0].text);
+    expect(parsed.data[0]).toMatchObject({ regimeLabel: 'Normal', regimeLabelKey: 'NORMAL' });
   });
 
   test('model-divergence humanizes model identifiers in best/worst model fields', async () => {

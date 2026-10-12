@@ -9,7 +9,7 @@
  */
 
 import { MAX_RESPONSE_BYTES } from '../helpers.js';
-import { exDividend, isoDate, measuredLevel, measuredValue, metricCoverage, readRegime, RESOLUTION_DIGITS, RESPONSE_MARGIN_BYTES, significant } from './dealerPositioningShaping.js';
+import { exDividend, excludedRootsPhrase, isoDate, measuredLevel, measuredValue, metricCoverage, readExcludedRoots, readRegime, RESOLUTION_DIGITS, RESPONSE_MARGIN_BYTES, significant } from './dealerPositioningShaping.js';
 import { readOmittedRows } from './omittedRows.js';
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
@@ -44,7 +44,20 @@ export function summarizeStrategyScan(response: Record<string, unknown>) {
     pctOfSpot: num(move.pctOfSpot),
     atmIv: num(move.atmIv),
     ivOneSigma: num(move.ivOneSigma),
+    // On a date listed under several roots (SPX and SPXW): the series the straddle is.
+    ...(str(move.root) !== null ? { root: str(move.root) } : {}),
   } : null;
+
+  // A date listed under several roots (SPX and SPXW) is scanned on one series,
+  // the primary: every leg, the smile and the straddle are that root's. The
+  // series settle differently, so the candidates are unidentified without it.
+  const roots = arr(body.roots).filter((r): r is string => typeof r === 'string' && r !== '');
+  const root = str(body.root);
+  const severalRoots = roots.length > 1 && root !== null;
+  // Adjusted series (a digit root, a different deliverable) the proxy left out
+  // of the scanned chain and of the levels' window.
+  const excludedRoots = readExcludedRoots(body.excludedRoots);
+  const levelExcludedRoots = readExcludedRoots(record(body.levels).excludedRoots);
 
   // The levels are gated as get_live_dealer_positioning gates them: the flip
   // on the flip's own coverage, the walls and magnet on gamma coverage.
@@ -103,6 +116,12 @@ export function summarizeStrategyScan(response: Record<string, unknown>) {
       const omitted = readOmittedRows(rawLevels.omittedRows);
       return omitted !== null ? { omittedRows: omitted } : {};
     })(),
+    // The status above measures the symbol's own contracts: "complete" never
+    // includes an adjusted series the window's books left out, so it is named.
+    ...(levelExcludedRoots !== null ? {
+      excludedRoots: levelExcludedRoots,
+      excludedRootsNote: `${excludedRootsPhrase(levelExcludedRoots)} left out of the levels and their coverage, which measure the symbol's own contracts alone, so a "complete" status does not include them.`,
+    } : {}),
   };
 
   const candidates = arr(body.candidates).map((value) => {
@@ -175,6 +194,15 @@ export function summarizeStrategyScan(response: Record<string, unknown>) {
       const omitted = readOmittedRows(body.omittedRows);
       return omitted !== null ? { omittedRows: omitted } : {};
     })(),
+    ...(severalRoots ? {
+      root,
+      roots,
+      rootNote: `The date is listed under the ${roots.join(' and ')} roots, different series (their settlement and the day their trading stops differ): every candidate's legs, the smile its probabilities read and the expected move are the ${root} root's (the most open interest), so the contracts are ${root}'s.`,
+    } : {}),
+    ...(excludedRoots !== null ? {
+      excludedRoots,
+      excludedRootsNote: `${excludedRootsPhrase(excludedRoots)} left out of the scanned chain: no candidate is built on them.`,
+    } : {}),
     // A spot that printed before the last session's open skews everything read
     // against it; resolved.S carries the flag, and this says what it touches.
     ...(record(record(body.resolved).S).stale === true

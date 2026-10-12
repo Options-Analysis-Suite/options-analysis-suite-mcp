@@ -4,7 +4,7 @@ import type { ProxyClient } from '../../proxy/proxyClient.js';
 import { toolHandler } from '../helpers.js';
 import { syncedDataOutputSchema } from '../outputSchemas.js';
 import { humanizeAnalysisWireOutput, sanitizeFullSyncResponse, stripSyncRecordMetadata } from './syncResponseShaping.js';
-import { ROLLUP_VEGA_UNITS, summarizeAnalysisRollupsResponse, withholdLegacyMixedVega } from './analysisRollupsShaping.js';
+import { ROLLUP_THETA_UNITS, ROLLUP_VEGA_UNITS, stateRollupThetaConvention, summarizeAnalysisRollupsResponse, withholdLegacyMixedVega } from './analysisRollupsShaping.js';
 
 export function register(server: McpServer, client: ProxyClient): void {
   server.registerTool(
@@ -31,9 +31,12 @@ export function register(server: McpServer, client: ProxyClient): void {
 	        // vega is withheld here too, not just in the summary view.
 	        if (Array.isArray(res.data)) {
 	          for (const record of res.data) {
-	            if (record && typeof record.data === 'object' && record.data !== null) withholdLegacyMixedVega(record.data);
+	            if (record && typeof record.data === 'object' && record.data !== null) {
+	              withholdLegacyMixedVega(record.data);
+	              stateRollupThetaConvention(record.data);
+	            }
 	          }
-	          res.units = { avgVega: ROLLUP_VEGA_UNITS };
+	          res.units = { avgVega: ROLLUP_VEGA_UNITS, avgTheta: ROLLUP_THETA_UNITS };
 	        }
 	        return { _skipSizeGuard: true, data: res };
 	      }

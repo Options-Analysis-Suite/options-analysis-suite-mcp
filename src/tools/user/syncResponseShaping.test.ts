@@ -13,7 +13,9 @@ import {
   shapeRiskDetails,
   replaceDuplicatedDataField,
   sanitizeFullSyncResponse,
+  stateAnalysisTimeConventions,
   stripSyncRecordMetadata,
+  LEGACY_TIME_CONVENTION,
 } from './syncResponseShaping.js';
 import { modelBackendId } from '../modelLabels.js';
 
@@ -1020,6 +1022,49 @@ describe('dedupeRiskSnapshotRecords', () => {
   });
 });
 
+// Greek exposure v2: a tagged snapshot's partial Greek fields are null, so two snapshots that differ
+// only in how many positions a Greek covered (1 of 3 vs 2 of 3), or in being tagged at all, must never collapse
+describe('the snapshot dedupe signatures carry the Greek tags and coverage', () => {
+  const tags = { greekTimeConvention: 'time-passing', greekTimeBasis: 'calendarDay', brokerThetaBasis: 'assumedCalendarDay' };
+  const portfolio = (timestamp: number, extra: Record<string, unknown>) => ({
+    timestamp,
+    data: { positionCount: 3, totalValue: 1000, totalPnL: 0, totalPnLPercent: 0, cashBalance: 0, delta: 90, vanna: null, topHoldings: [], ...extra },
+  });
+  const risk = (timestamp: number, extra: Record<string, unknown>) => ({
+    timestamp,
+    data: { portfolioValue: 1000, var95: 2, dollarDelta: 45000, dollarVanna: null, ...extra },
+  });
+  const cover = (field: string, included: number) => ({ greekCoverage: { [field]: { included, total: 3 } } });
+
+  test('portfolio: 1 of 3 and 2 of 3 stay apart, a legacy row stays apart from a tagged one, identical rows collapse', () => {
+    const records = [
+      portfolio(4000, { ...tags, ...cover('vanna', 2) }),
+      portfolio(3000, { ...tags, ...cover('vanna', 1) }),
+      portfolio(2000, { ...tags, ...cover('vanna', 1) }),
+      portfolio(1000, {}),
+    ];
+    const deduped = dedupePortfolioSnapshotRecords(records);
+    expect(deduped.records.map((record) => record.timestamp)).toEqual([4000, 3000, 1000]);
+    expect(deduped.omittedCount).toBe(1);
+  });
+
+  test('risk: the same', () => {
+    const records = [
+      risk(3000, { ...tags, ...cover('dollarVanna', 2) }),
+      risk(2000, { ...tags, ...cover('dollarVanna', 1) }),
+      risk(1000, {}),
+    ];
+    const deduped = dedupeRiskSnapshotRecords(records);
+    expect(deduped.records.map((record) => record.timestamp)).toEqual([3000, 2000, 1000]);
+    expect(deduped.omittedCount).toBe(0);
+  });
+
+  test('two rejected rows, every Greek null and no coverage, differ only in their tags: they stay apart', () => {
+    const deduped = dedupeRiskSnapshotRecords([risk(2000, { ...tags }), risk(1000, {})]);
+    expect(deduped.records.map((record) => record.timestamp)).toEqual([2000, 1000]);
+  });
+});
+
 describe('compactPortfolioHistoryResponse', () => {
   test('trims top holdings before the global size guard has to collapse the history', () => {
     const makeHoldings = (count: number) => Array.from({ length: count }, (_, i) => ({
@@ -1145,3 +1190,44 @@ describe('jump-diffusion analysis records name their jump model', () => {
   });
 });
 
+// Greek exposure methodology v2: an Analysis record's time Greeks are on the time-passing sign when it says
+// so; one saved before carries no tag (Charm, Color and DcharmDvol on the remaining-maturity sign, a GPU Monte Carlo
+// Theta the opposite) and is stated legacy, and records on different conventions are never collapsed as reruns
+describe('Analysis records\' time convention', () => {
+  const record = (id: number, timestamp: number, tags: Record<string, unknown>) => ({
+    id, symbol: 'SPY', model: 'MonteCarlo', timestamp,
+    data: { isCall: true, strike: 100, daysToMaturity: 30, volatility: 0.2, optionPrice: 5, greeks: { Delta: 0.5, Charm: -0.002 }, ...tags },
+  });
+  const tags = { greekTimeConvention: 'time-passing', greekTimeBasis: 'tradingDay' };
+  const t = 1_790_820_000_000;
+
+  test('the legacy wording', () => {
+    expect(LEGACY_TIME_CONVENTION).toBe('legacy: model-dependent time sign');
+  });
+
+  test('a time-passing record and a legacy rerun of the same inputs are two analyses', () => {
+    expect(dedupeAnalysisHistoryRecords([record(1, t, tags), record(2, t + 1000, {})]).records).toHaveLength(2);
+    expect(dedupeAnalysisHistoryRecords([record(1, t, tags), record(2, t + 1000, { ...tags, greekTimeBasis: 'calendarDay' })]).records).toHaveLength(2);
+    // the same day basis, one record untagged: still two analyses
+    expect(dedupeAnalysisHistoryRecords([record(1, t, tags), record(2, t + 1000, { greekTimeBasis: 'tradingDay' })]).records).toHaveLength(2);
+    expect(dedupeAnalysisHistoryRecords([record(1, t, tags), record(2, t + 1000, tags)]).records).toHaveLength(1);
+    expect(dedupeAnalysisHistoryRecords([record(1, t, {}), record(2, t + 1000, {})]).records).toHaveLength(1);
+  });
+
+  test('the compact record states its convention, legacy when untagged', () => {
+    const tagged: any = record(1, t, tags);
+    const legacy: any = record(2, t, {});
+    shapeAnalysisResultRecord(tagged);
+    shapeAnalysisResultRecord(legacy);
+    expect(tagged.data).toMatchObject({ greekTimeConvention: 'time-passing', greekTimeBasis: 'tradingDay' });
+    expect(legacy.data.greekTimeConvention).toBe(LEGACY_TIME_CONVENTION);
+    expect('greekTimeBasis' in legacy.data).toBe(false);
+  });
+
+  test('the full response states it too', () => {
+    const res: any = { data: [record(1, t, tags), record(2, t, {})] };
+    stateAnalysisTimeConventions(res);
+    expect(res.data[0].data.greekTimeConvention).toBe('time-passing');
+    expect(res.data[1].data.greekTimeConvention).toBe(LEGACY_TIME_CONVENTION);
+  });
+});

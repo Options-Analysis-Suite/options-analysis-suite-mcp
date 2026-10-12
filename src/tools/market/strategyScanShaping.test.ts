@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { summarizeStrategyScan } from './strategyScanShaping.js';
 import { plainDecimal, register } from './strategyScan.js';
 import { toolHandler } from '../helpers.js';
+import { marketDataOutputSchema } from '../outputSchemas.js';
 
 const full = (n: number) => ({ total: n, included: n });
 const coverage = (over: Record<string, unknown> = {}) => ({
@@ -84,7 +85,7 @@ describe('summarizeStrategyScan', () => {
     // Without a regime from the route, the net's sign stands in, as the live tool does.
     const noRegime = summarizeStrategyScan(scan({ levels: { ...scan().levels, regime: undefined } }));
     expect(noRegime.levels.dealerRegime).toBe('negative');
-    // Review's input: complete coverage but no finite net gamma (an overflow
+    // the review's input: complete coverage but no finite net gamma (an overflow
     // serialized as null) is no measured book, so no regime, as the live tool.
     for (const scope of ['expiration', 'window']) {
       const unmeasured = summarizeStrategyScan(scan({ levels: { ...scan().levels, scope, netGex: null, regime: 'positive', coverage: coverage({ gamma: { total: 1, included: 1 } }) } }));
@@ -216,5 +217,70 @@ describe('rows left out and a partial levels window', () => {
     const shaped: any = summarizeStrategyScan(scan());
     expect(shaped.omittedRows).toBeUndefined();
     expect(shaped.levels.partial).toBeUndefined();
+  });
+});
+
+// Review: the proxy names the series a scan of
+// a date under several roots read, and the adjusted series its chain and its
+// levels window left out; this shaper dropped all of it, so SPX candidates had
+// no series and an AAPL window read "complete" with AAPL1 contracts unsaid.
+describe('the scanned series and the adjusted series left out', () => {
+  const levels = (over: Record<string, unknown> = {}) => ({
+    scope: 'window', expirations: ['2026-10-16', '2026-10-23'], gammaFlip: 97.5, callWall: 110, putWall: 90, gammaMagnet: 100,
+    netGex: -5.5e8, regime: 'positive', coverage: coverage(), ...over,
+  });
+
+  it('names the series the candidates, smile and straddle are, on a date listed under several roots', () => {
+    const shaped: any = summarizeStrategyScan(scan({
+      symbol: 'SPX', root: 'SPXW', roots: ['SPX', 'SPXW'],
+      expectedMove: { strike: 100, callMid: 2.5, putMid: 2.4, straddle: 4.9, pctOfSpot: 0.049, lower: 95.1, upper: 104.9, atmIv: 0.3, ivOneSigma: 5.2, root: 'SPXW' },
+    }));
+    expect(shaped).toMatchObject({ root: 'SPXW', roots: ['SPX', 'SPXW'] });
+    expect(shaped.expectedMove.root).toBe('SPXW');
+    expect(shaped.rootNote).toBe('The date is listed under the SPX and SPXW roots, different series (their settlement and the day their trading stops differ): every candidate\'s legs, the smile its probabilities read and the expected move are the SPXW root\'s (the most open interest), so the contracts are SPXW\'s.');
+  });
+
+  it('names the adjusted series left out of the scanned chain and of the levels, and qualifies the levels\' "complete"', () => {
+    const shaped: any = summarizeStrategyScan(scan({
+      symbol: 'AAPL',
+      excludedRoots: [{ root: 'AAPL1', contracts: 3 }],
+      levels: levels({ excludedRoots: [{ root: 'AAPL1', contracts: 5 }] }),
+    }));
+    expect(shaped.excludedRoots).toEqual([{ root: 'AAPL1', contracts: 3 }]);
+    expect(shaped.excludedRootsNote).toBe('3 contracts under the AAPL1 root (an adjusted series, a different deliverable at the same strikes) are left out of the scanned chain: no candidate is built on them.');
+    expect(shaped.levels.excludedRoots).toEqual([{ root: 'AAPL1', contracts: 5 }]);
+    // The levels stay published: they measure the symbol's own contracts in full, and the note says so.
+    expect(shaped.levels).toMatchObject({ gammaFlip: 97.5, status: { gammaFlip: 'complete' } });
+    expect(shaped.levels.excludedRootsNote).toBe('5 contracts under the AAPL1 root (an adjusted series, a different deliverable at the same strikes) are left out of the levels and their coverage, which measure the symbol\'s own contracts alone, so a "complete" status does not include them.');
+    // One contract reads in the singular.
+    const one: any = summarizeStrategyScan(scan({ excludedRoots: [{ root: 'AAPL1', contracts: 1 }] }));
+    expect(one.excludedRootsNote).toStartWith('1 contract under the AAPL1 root (an adjusted series, a different deliverable at the same strikes) is left out');
+  });
+
+  it('a date under one root, and a window that left nothing out, name none of it (control)', () => {
+    // Roots with no series named (the proxy always names one) say nothing rather than a null series.
+    for (const body of [scan(), scan({ root: 'SPY', roots: ['SPY'] }), scan({ roots: ['SPX', 'SPXW'] }), scan({ excludedRoots: [], levels: levels({ excludedRoots: [] }) })]) {
+      const shaped: any = summarizeStrategyScan(body);
+      for (const key of ['root', 'roots', 'rootNote', 'excludedRoots', 'excludedRootsNote']) expect(shaped).not.toHaveProperty(key);
+      expect(shaped.levels).not.toHaveProperty('excludedRoots');
+      expect(shaped.levels).not.toHaveProperty('excludedRootsNote');
+      expect(shaped.expectedMove).not.toHaveProperty('root');
+    }
+  });
+
+  it('reaches the model through the tool, keys and values intact', async () => {
+    let handler: any;
+    const server = { registerTool: (_name: string, _config: unknown, h: unknown) => { handler = h; } };
+    register(server as any, { get: async () => scan({
+      symbol: 'SPX', root: 'SPXW', roots: ['SPX', 'SPXW'], excludedRoots: [{ root: 'SPX7', contracts: 2 }],
+      levels: levels({ excludedRoots: [{ root: 'SPX7', contracts: 4 }] }),
+    }) } as any);
+    const result = await handler({ symbol: 'SPX', expiration: '2026-10-16', strategy: 'short_put', levels: 'window' });
+    expect(result.structuredContent).toMatchObject({
+      root: 'SPXW', roots: ['SPX', 'SPXW'], excludedRoots: [{ root: 'SPX7', contracts: 2 }],
+      levels: { excludedRoots: [{ root: 'SPX7', contracts: 4 }] },
+    });
+    // The tool's advertised output schema (a passthrough of the shared market fields) accepts it whole.
+    expect(marketDataOutputSchema.safeParse(result.structuredContent).success).toBe(true);
   });
 });

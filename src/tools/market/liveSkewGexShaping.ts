@@ -17,7 +17,7 @@
  *    size guard, which trims arrays without saying which rows went.
  */
 import { MAX_RESPONSE_BYTES, utf8ByteLength } from '../helpers.js';
-import { isoDate, measuredValue, metricCoverage, type FieldStatus } from './dealerPositioningShaping.js';
+import { excludedRootsPhrase, isoDate, measuredValue, metricCoverage, readExcludedRoots, type FieldStatus } from './dealerPositioningShaping.js';
 import { readOmittedRows } from './omittedRows.js';
 
 export const LIVE_SKEW_GEX_METRICS = ['skew', 'gex'] as const;
@@ -61,6 +61,14 @@ const text = (v: unknown): string | null => {
   return s === null ? null : s.length > MAX_TEXT ? `${s.slice(0, MAX_TEXT - 3)}...` : s;
 };
 const bytes = (value: unknown) => utf8ByteLength(JSON.stringify(value));
+
+/**
+ * The proxy's warning for an adjusted series it left out carries this; the
+ * metric's own `excludedRootsNote` says the same from the structured fields,
+ * whole, so the warning is not relayed twice (nor cut at MAX_TEXT, nor pushed
+ * past MAX_WARNINGS by the rate warnings before it).
+ */
+const ADJUSTED_SERIES_WARNING = '(an adjusted series, a different deliverable at the same strikes)';
 
 /**
  * A model output at the precision it has. Fifty rows of skews, yields and
@@ -116,6 +124,15 @@ function shapeSkew(raw: unknown, rowBaselineDate: string | null) {
       return omitted !== null ? { omittedRows: omitted } : {};
     })(),
     ...(r.partial === true ? { partial: true as const } : {}),
+    // On a date listed under several roots (SPX and SPXW): the series the smile was read from.
+    ...(str(r.root) !== null ? { root: str(r.root) } : {}),
+    ...(() => {
+      const excluded = readExcludedRoots(r.excludedRoots);
+      return excluded === null ? {} : {
+        excludedRoots: excluded,
+        excludedRootsNote: `${excludedRootsPhrase(excluded)} left out of the skew's expiration, whose smile is read from the symbol's own contracts alone.`,
+      };
+    })(),
     prior: model(prior.value),
     priorStatus: str(prior.status),
     change: model(r.change),
@@ -135,6 +152,8 @@ function shapeGex(raw: unknown, rowBaselineDate: string | null) {
   const fraction = num(r.changePct);
   const empty = dates(r.emptyExpirations);
   const unpublished = dates(r.openInterestUnpublishedExpirations);
+  const adjustedOnly = dates(r.adjustedOnlyExpirations);
+  const excluded = readExcludedRoots(r.excludedRoots);
   return {
     value: dollars(measured.value),
     status: measured.status,
@@ -143,8 +162,16 @@ function shapeGex(raw: unknown, rowBaselineDate: string | null) {
     oiShare: model(r.oiShare),
     expirations: dates(r.expirations),
     ...(empty.length > 0 ? { emptyExpirations: empty } : {}),
+    // Adjusted series (a digit root, a different deliverable) left out: a date listed only under one adds nothing and
+    // is no outage; the status measures the symbol's own contracts, so "complete" never includes them.
+    ...(adjustedOnly.length > 0 ? { adjustedOnlyExpirations: adjustedOnly } : {}),
+    ...(excluded !== null ? {
+      excludedRoots: excluded,
+      excludedRootsNote: `${excludedRootsPhrase(excluded)} left out of the GEX, which measures the symbol's own contracts alone, so a "complete" status does not include them`
+        + (adjustedOnly.length > 0 ? `; ${adjustedOnly.join(', ')} ${adjustedOnly.length === 1 ? 'is' : 'are'} listed only under adjusted series, so ${adjustedOnly.length === 1 ? 'it adds' : 'they add'} nothing.` : '.'),
+    } : {}),
     ...(unpublished.length > 0 ? { openInterestUnpublishedExpirations: unpublished } : {}),
-    // Rows the broker sent for the window's chains that could not be used: the GEX leaves them out.
+    // Rows the broker sent for the window's chains that could not be used: the GEX leaves them out (phase D).
     ...(() => {
       const omitted = readOmittedRows(r.omittedRows);
       return omitted !== null ? { omittedRows: omitted } : {};
@@ -175,7 +202,8 @@ function shapeRow(raw: unknown, metrics: readonly LiveSkewGexMetric[], stale: Re
   const spot = record(r.spot);
   const q = record(r.q);
   const baseline = record(r.baseline);
-  const warnings = arr(r.warnings).map(text).filter((w): w is string => w !== null);
+  const warnings = arr(r.warnings).filter((w) => !(typeof w === 'string' && w.includes(ADJUSTED_SERIES_WARNING)))
+    .map(text).filter((w): w is string => w !== null);
   const valuation = str(r.valuation);
   const skipped = count(baseline.sessionsSkipped);
   const missing = dates(baseline.missingExpirations);

@@ -2007,3 +2007,18 @@ describe('get_compute_runs wire output', () => {
     });
   });
 });
+
+describe('get_compute_runs time convention', () => {
+  test('the full view states an untagged run legacy and a tagged one time-passing', async () => {
+    const legacy = makeRun(0);
+    const tagged = makeRun(1);
+    Object.assign(tagged.data.summary, { greekTimeConvention: 'time-passing', greekTimeBasis: 'tradingDay' });
+    const { handler } = createHarness({ data: [tagged, legacy], count: 2 });
+    const parsed = JSON.parse((await handler({ limit: 2, full: true })).content[0].text);
+    const conventions = parsed.data.map((row: any) => row.data.summary.greekTimeConvention).sort();
+    expect(conventions).toEqual(['legacy: model-dependent time sign', 'time-passing']);
+    expect(parsed.data.every((row: any) => row.data.summary.greekTimeScope === 'model Greeks and their aggregates (not the exposure sweep)'
+      && /^remaining-maturity sign, per calendar day/.test(row.data.summary.exposureSweepCharmConvention))).toBe(true);
+  });
+});
+

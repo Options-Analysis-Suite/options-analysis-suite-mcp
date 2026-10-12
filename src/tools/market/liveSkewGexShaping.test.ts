@@ -320,3 +320,37 @@ describe('rows left out', () => {
     expect(bbb.skew.partial).toBeUndefined();
   });
 });
+
+// Review: the ranking names an adjusted series (a
+// digit root, a different deliverable) it left out, a window date listed only
+// under one, and the series a skew of a multi-root date was read from.
+describe('rank_live_skew_gex: adjusted series and the skew\'s series', () => {
+  const GEX_WARNING = '7 contracts under the AAPL1 root (an adjusted series, a different deliverable at the same strikes) are left out of the GEX, which measures the symbol\'s own contracts alone, so a "complete" status does not include them; 2026-10-21 is listed only under adjusted series, so it adds nothing.';
+  const rateWarning = 'Risk-free: DGS1MO unavailable; falling back to DGS3MO';
+
+  test('carries the exclusions and a note on each metric; the proxy\'s own sentence is not relayed twice, other warnings are', () => {
+    const out = wire(shapeLiveSkewGex(body([result('AAPL', {
+      gex: { expirations: ['2026-10-20', '2026-10-22', '2026-10-23'], adjustedOnlyExpirations: ['2026-10-21'], excludedRoots: [{ root: 'AAPL1', contracts: 7 }] },
+      skew: { excludedRoots: [{ root: 'AAPL1', contracts: 1 }] },
+      warnings: [rateWarning, GEX_WARNING],
+    })]), { requestedSymbols: ['AAPL'] }));
+    const row = out.results[0];
+    expect(row.gex).toMatchObject({ status: 'complete', adjustedOnlyExpirations: ['2026-10-21'], excludedRoots: [{ root: 'AAPL1', contracts: 7 }], excludedRootsNote: GEX_WARNING });
+    expect(row.gex).not.toHaveProperty('emptyExpirations');
+    expect(row.gex).not.toHaveProperty('partial');
+    expect(row.skew).toMatchObject({ excludedRoots: [{ root: 'AAPL1', contracts: 1 }], excludedRootsNote: '1 contract under the AAPL1 root (an adjusted series, a different deliverable at the same strikes) is left out of the skew\'s expiration, whose smile is read from the symbol\'s own contracts alone.' });
+    expect(row.warnings).toEqual([rateWarning]);
+  });
+
+  test('names the series a skew was read from on a date under several roots', () => {
+    const out = wire(shapeLiveSkewGex(body([result('SPX', { skew: { root: 'SPXW' } })]), { requestedSymbols: ['SPX'] }));
+    expect(out.results[0].skew.root).toBe('SPXW');
+  });
+
+  test('a plain row names none of it (control)', () => {
+    const out = wire(shapeLiveSkewGex(body([result('SPY', { warnings: [rateWarning] })]), { requestedSymbols: ['SPY'] }));
+    for (const key of ['adjustedOnlyExpirations', 'excludedRoots', 'excludedRootsNote']) expect(out.results[0].gex).not.toHaveProperty(key);
+    for (const key of ['root', 'excludedRoots', 'excludedRootsNote']) expect(out.results[0].skew).not.toHaveProperty(key);
+    expect(out.results[0].warnings).toEqual([rateWarning]);
+  });
+});

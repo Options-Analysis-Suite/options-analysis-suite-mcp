@@ -8,6 +8,8 @@
  * removing those duplicated heavy payloads.
  */
 import { modelDisplayName } from '../modelLabels.js';
+import { statedTimeConvention } from './timeConvention.js';
+export { LEGACY_TIME_CONVENTION, TIME_PASSING_CONVENTION, statedTimeConvention } from './timeConvention.js';
 
 const MAX_SUMMARY_DEPTH = 3;
 const MAX_INLINE_SCALAR_ARRAY_ITEMS = 5;
@@ -170,6 +172,15 @@ function getAnalysisDelta(record: any): number | undefined {
   return undefined;
 }
 
+/** States each record's time convention in place (the full response): an untagged record reads legacy */
+export function stateAnalysisTimeConventions(response: any): void {
+  if (!response || !Array.isArray(response.data)) return;
+  for (const record of response.data) {
+    const data = asRecord(record?.data);
+    if (data) data.greekTimeConvention = statedTimeConvention(data);
+  }
+}
+
 function getAnalysisSignature(record: any): {
   symbol?: string;
   model?: string;
@@ -181,6 +192,8 @@ function getAnalysisSignature(record: any): {
   optionPrice?: number;
   delta?: number;
   timestamp?: number;
+  timeConvention: string;
+  timeBasis: string | null;
 } {
   const data = asRecord(record?.data);
   const symbol = typeof record?.symbol === 'string'
@@ -217,6 +230,9 @@ function getAnalysisSignature(record: any): {
     optionPrice,
     delta: getAnalysisDelta(record),
     timestamp,
+    // opposite time signs are different analyses, never a rerun
+    timeConvention: statedTimeConvention(data),
+    timeBasis: typeof data?.greekTimeBasis === 'string' ? data.greekTimeBasis : null,
   };
 }
 
@@ -228,6 +244,8 @@ function isNearDuplicateAnalysisRecord(left: any, right: any): boolean {
     !current.symbol || !existing.symbol || current.symbol !== existing.symbol ||
     !current.model || !existing.model || current.model !== existing.model ||
     current.jumpModel !== existing.jumpModel ||
+    current.timeConvention !== existing.timeConvention ||
+    current.timeBasis !== existing.timeBasis ||
     current.isCall == null || existing.isCall == null || current.isCall !== existing.isCall ||
     current.strike == null || existing.strike == null || current.strike !== existing.strike ||
     current.daysToMaturity == null || existing.daysToMaturity == null || current.daysToMaturity !== existing.daysToMaturity ||
@@ -276,6 +294,16 @@ function serializeSnapshotSignature(value: unknown): string {
   return JSON.stringify(roundNestedNumbers(value, SNAPSHOT_SIGNATURE_DECIMALS));
 }
 
+/** A Portfolio or Risk snapshot's Greek tags and coverage counts, as a dedupe signature reads them */
+function snapshotGreekTagSignature(data: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  return {
+    greekTimeConvention: data?.greekTimeConvention,
+    greekTimeBasis: data?.greekTimeBasis,
+    brokerThetaBasis: data?.brokerThetaBasis,
+    greekCoverage: data?.greekCoverage,
+  };
+}
+
 function getPortfolioSnapshotSignature(record: any): unknown {
   const data = asRecord(record?.data);
   const details = asRecord(record?.details);
@@ -310,6 +338,9 @@ function getPortfolioSnapshotSignature(record: any): unknown {
     charm: data?.charm,
     vomma: data?.vomma,
     veta: data?.veta,
+    // Greek exposure v2: the Greek convention and each field's coverage - complete-only fields are null
+    // when partial, so 1 of 3 and 2 of 3 differ only in their counts and must never collapse
+    ...snapshotGreekTagSignature(data),
     topHoldings,
     greeks: detailGreeks
       ? {
@@ -350,6 +381,7 @@ function getRiskSnapshotSignature(record: any): unknown {
     dollarCharm: data?.dollarCharm,
     dollarVomma: data?.dollarVomma,
     dollarVeta: data?.dollarVeta,
+    ...snapshotGreekTagSignature(data),
     fullMargin: fullMargin
       ? {
           usagePercent: fullMargin.usagePercent,
@@ -590,6 +622,7 @@ export function shapeAnalysisResultRecord(record: any): void {
   }
 
   const data = record?.data && typeof record.data === 'object' && !Array.isArray(record.data) ? record.data : null;
+  if (data) data.greekTimeConvention = statedTimeConvention(data);
   const greeks = data?.greeks;
 
   if (record?.facts && typeof record.facts === 'object' && !Array.isArray(record.facts)) {

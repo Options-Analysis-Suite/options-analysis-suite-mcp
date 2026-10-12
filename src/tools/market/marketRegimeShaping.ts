@@ -92,3 +92,27 @@ export function shapeMarketRegimeResponse(payload: unknown): unknown {
 
   return { ...payload, market: shaped };
 }
+
+/** The five regime states as the web app shows them (the web app's REGIME_DISPLAY map): the stored
+ *  keys stay what the proxy and the regime worker write; only what a reader sees changes. */
+export const REGIME_DISPLAY: Readonly<Record<string, string>> = { CALM: 'Calm', NORMAL: 'Normal', ELEVATED: 'Elevated', STRESS: 'Stress', CRISIS: 'Crisis' };
+
+const LABEL_FIELDS: readonly string[] = ['label', 'priorLabel', 'prevLabel', 'regimeLabel'];   // regimeLabel: the model-divergence screener's rows
+
+/** A copy of `value` in which every `label` / `priorLabel` / `prevLabel` / `regimeLabel` holding one of the five stored states reads as its display word,
+ *  with the stored key kept beside it as `labelKey` / `priorLabelKey` / `prevLabelKey` / `regimeLabelKey` for a client that compares or filters on it. Any other string
+ *  passes through; arrays and nested records are walked (depth-capped), primitives and null return as they came; the input is never mutated. */
+export function displayRegimeLabels<T>(value: T, depth = 0): T {
+  if (depth > 20 || value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((v) => displayRegimeLabels(v, depth + 1)) as unknown as T;
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (LABEL_FIELDS.includes(key) && typeof child === 'string' && Object.prototype.hasOwnProperty.call(REGIME_DISPLAY, child)) {
+      out[key] = REGIME_DISPLAY[child];
+      out[`${key}Key`] = child;
+      continue;
+    }
+    out[key] = displayRegimeLabels(child, depth + 1);
+  }
+  return out as T;
+}

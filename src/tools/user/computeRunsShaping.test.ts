@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { isCurrentComputeRunRecord, recordMatchesComputeFilters, sanitizeComputeRunsWireOutput, shapeComputeRunRecord, summarizeComputeRunsResponse, trimFullComputeRunsResponse } from './computeRunsShaping.js';
+import { isCurrentComputeRunRecord, recordMatchesComputeFilters, sanitizeComputeRunsWireOutput, shapeComputeRunRecord, stateComputeRunTimeConventions, summarizeComputeRunsResponse, trimFullComputeRunsResponse } from './computeRunsShaping.js';
 
 const CORE_CURRENT_MODEL_IDS = [
   'BlackScholes',
@@ -3811,5 +3811,50 @@ describe('summarizeComputeRunsResponse', () => {
     expect(summarized.requestedLimit).toBe(3);
     expect(summarized.matchedCount).toBe(3);
     expect(summarized.hasMore).toBe(true);
+  });
+});
+
+// Greek exposure methodology v2: a run states its time Greeks' convention in every view; a run computed
+// before carries no tag (Charm, Color and DcharmDvol on the remaining-maturity sign, GPU Monte Carlo Theta the opposite)
+describe('compute runs\' time convention', () => {
+  const tagged = () => {
+    const record: any = makeCurrentTerminalRecord();
+    Object.assign(record.data.summary, { greekTimeConvention: 'time-passing', greekTimeBasis: 'tradingDay' });
+    return record;
+  };
+
+  test('the compact and detailed views state it, legacy for an untagged run', () => {
+    expect(shapeComputeRunRecord(tagged())).toMatchObject({ greekTimeConvention: 'time-passing', greekTimeBasis: 'tradingDay' });
+    const legacy = shapeComputeRunRecord(makeCurrentTerminalRecord()) as Record<string, any>;
+    expect(legacy.greekTimeConvention).toBe('legacy: model-dependent time sign');
+    expect(legacy.greekTimeBasis).toBeNull();
+    const detailed = summarizeComputeRunsResponse({ data: [tagged()] }, 'detailed') as Record<string, any>;
+    expect(detailed.data[0]).toMatchObject({ greekTimeConvention: 'time-passing', greekTimeBasis: 'tradingDay' });
+    // Review: what the statement covers, on a tagged and a legacy run alike
+    for (const shaped of [shapeComputeRunRecord(tagged()), legacy, detailed.data[0]] as Array<Record<string, any>>) {
+      expect(shaped.greekTimeScope).toBe('model Greeks and their aggregates (not the exposure sweep)');
+    }
+  });
+
+  test('the full response states an untagged run legacy and keeps a tagged one', () => {
+    const payload: any = { data: [tagged(), makeCurrentTerminalRecord()] };
+    stateComputeRunTimeConventions(payload);
+    expect(payload.data[0].data.summary.greekTimeConvention).toBe('time-passing');
+    expect(payload.data[1].data.summary.greekTimeConvention).toBe('legacy: model-dependent time sign');
+    // Review: the full view carries the exposure sweep's strike charm, on its own convention on every run
+    for (const row of payload.data) {
+      expect(row.data.summary).toMatchObject({
+        greekTimeScope: 'model Greeks and their aggregates (not the exposure sweep)',
+        exposureSweepCharmConvention: 'remaining-maturity sign, per calendar day (charm per year / 365), times open interest, multiplier and spot, negated for the dealer',
+      });
+    }
+  });
+
+  test('a compact run trimmed for the budget keeps it', () => {
+    const compact = shapeComputeRunRecord(tagged()) as Record<string, any>;
+    const budgetPayload: any = { data: [{ ...compact, oversized: 'x'.repeat(900_000) }], count: 1 };
+    trimFullComputeRunsResponse(budgetPayload);
+    expect(budgetPayload.data[0].greekTimeConvention).toBe('time-passing');
+    expect(budgetPayload.data[0].greekTimeScope).toBe('model Greeks and their aggregates (not the exposure sweep)');
   });
 });

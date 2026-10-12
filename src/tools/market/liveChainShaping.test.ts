@@ -136,22 +136,40 @@ describe('summarizeLiveChain', () => {
     expect(unknown).toMatchObject({ spotTime: null, spotStale: null });
   });
 
-  it('names the roots a chain was merged from, and a row priced from another root says so', () => {
+  // Review: "Distinct SPX settlement series are merged into synthetic
+  // contracts": the proxy no longer merges a date's roots, so SPX and SPXW
+  // arrive as two rows at a strike, each its own contract. Every row names
+  // its root, the at-the-money pair and the wings are the primary root's,
+  // and the note no longer says anything was summed.
+  it('a date under several roots: every row names its root, a strike shows a row per root, and the ATM pair and wings are the primary\'s', () => {
     const chain = wideChain();
-    const merged: LiveChainResponse = {
-      ...chain, root: 'SPXW', roots: ['SPX', 'SPXW'],
-      calls: chain.calls!.map((o) => ({ ...o, root: o.strike === 501 ? 'SPX' : 'SPXW', openInterestByRoot: { SPX: 227, SPXW: 939 }, volumeByRoot: { SPX: null, SPXW: 25 } })),
-      puts: chain.puts!.map((o) => ({ ...o, root: 'SPXW' })),
+    const spx = (o: LiveOption): LiveOption => ({ ...o, root: 'SPX', bid: 9, ask: 9.5, openInterest: 227 });
+    const several: LiveChainResponse = {
+      ...chain, symbol: 'SPX', root: 'SPXW', roots: ['SPX', 'SPXW'],
+      // SPX's rows first, as a broker can list them.
+      calls: [...chain.calls!.map(spx), ...chain.calls!.map((o) => ({ ...o, root: 'SPXW' }))],
+      puts: [...chain.puts!.map(spx), ...chain.puts!.map((o) => ({ ...o, root: 'SPXW' }))],
     };
-    const shaped = summarizeLiveChain(merged) as any;
+    const shaped = summarizeLiveChain(several, { strikeRange: 2 }) as any;
     expect(shaped).toMatchObject({ root: 'SPXW', roots: ['SPX', 'SPXW'] });
-    // Each root's own open interest and volume ride on the row beside the sum.
-    expect(shaped.nearTheMoney.calls[0]).toMatchObject({ openInterestByRoot: { SPX: 227, SPXW: 939 }, volumeByRoot: { SPX: null, SPXW: 25 } });
-    expect(shaped.nearTheMoney.puts[0].openInterestByRoot).toBeUndefined();
-    expect(shaped.view.note).toMatch(/SPX and SPXW/);
-    const near = shaped.nearTheMoney.calls as any[];
-    expect(near.find((r) => r.strike === 501).root).toBe('SPX');
-    expect(near.find((r) => r.strike === 500).root).toBeUndefined();
+    expect(shaped.nearTheMoney.calls.map((r: any) => [r.strike, r.root])).toEqual([
+      [498, 'SPXW'], [498, 'SPX'], [499, 'SPXW'], [499, 'SPX'], [500, 'SPXW'], [500, 'SPX'], [501, 'SPXW'], [501, 'SPX'], [502, 'SPXW'], [502, 'SPX'],
+    ]);
+    expect(shaped.nearTheMoney.calls.find((r: any) => r.strike === 500 && r.root === 'SPX')).toMatchObject({ bid: 9, ask: 9.5, openInterest: 227 });
+    expect(shaped.nearTheMoney.calls.find((r: any) => r.strike === 500 && r.root === 'SPXW')).toMatchObject({ bid: 1, ask: 1.2, openInterest: 100 });
+    expect(shaped.atm.call).toMatchObject({ strike: 500, root: 'SPXW', bid: 1 });
+    expect(shaped.atm.put).toMatchObject({ strike: 500, root: 'SPXW', bid: 1 });
+    expect(shaped.wings.call25Delta.root).toBe('SPXW');
+    expect(shaped.wings.put25Delta.root).toBe('SPXW');
+    for (const r of [...shaped.nearTheMoney.calls, ...shaped.nearTheMoney.puts]) {
+      expect(r).not.toHaveProperty('openInterestByRoot');
+      expect(r).not.toHaveProperty('volumeByRoot');
+    }
+    // The totals count every root's contracts.
+    expect(shaped.totals.calls).toMatchObject({ contracts: 2 * chain.calls!.length, openInterest: (227 + 100) * chain.calls!.length });
+    expect(shaped.view.note).toMatch(/listed under the SPX and SPXW roots, different series/);
+    expect(shaped.view.note).toMatch(/never merged/);
+    expect(shaped.view.note).not.toMatch(/summed across/);
     const plain = summarizeLiveChain(wideChain()) as any;
     expect(plain.roots).toBeUndefined();
     expect(plain.nearTheMoney.calls[0].root).toBeUndefined();
@@ -202,18 +220,17 @@ describe('summarizeLiveChain', () => {
     expect(shaped.view.note).toMatch(/0 contracts in the full chain\. 2 contracts under the AAPL1 root and 1 contracts under the AAPL2 root/);
   });
 
-  it('on a merged chain a row the broker named no root for says so with null, never by silence', () => {
+  it('under several roots a row the broker named no root for says so with null, never by silence', () => {
     const chain = wideChain();
-    const merged: LiveChainResponse = {
+    const several: LiveChainResponse = {
       ...chain, root: 'SPX', roots: ['SPX', 'SPXW'],
       calls: chain.calls!.map((o) => (o.strike === 500 ? { ...o } : { ...o, root: 'SPX' })),
       puts: chain.puts!.map((o) => ({ ...o, root: 'SPX' })),
     };
-    const shaped = summarizeLiveChain(merged) as any;
+    const shaped = summarizeLiveChain(several) as any;
     const near = shaped.nearTheMoney.calls as any[];
     expect(near.find((r) => r.strike === 500).root).toBeNull();
-    expect(near.find((r) => r.strike === 499).root).toBeUndefined();
-    expect(shaped.view.note).toMatch(/null where the broker named none/);
+    expect(near.find((r) => r.strike === 499).root).toBe('SPX');
   });
 
   it('carries provenance into the summary, not just the envelope', () => {

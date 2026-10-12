@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { shapeMarketRegimeResponse } from './marketRegimeShaping.js';
+import { REGIME_DISPLAY, displayRegimeLabels, shapeMarketRegimeResponse } from './marketRegimeShaping.js';
 
 describe('shapeMarketRegimeResponse', () => {
   test('replaces raw vector internals with compact feature z-scores in default market summaries', () => {
@@ -104,5 +104,21 @@ describe('shapeMarketRegimeResponse', () => {
 
     expect(market.top_driver).toEqual({ feature: 'Skew Pressure', z: 1.4 });
     expect(market.drivers).toBeUndefined();
+  });
+});
+
+describe('displayRegimeLabels - the five states as words, the stored key kept beside them (the web app shows the same words)', () => {
+  test('maps the exact list and keeps the key', () => {
+    expect(REGIME_DISPLAY).toEqual({ CALM: 'Calm', NORMAL: 'Normal', ELEVATED: 'Elevated', STRESS: 'Stress', CRISIS: 'Crisis' });
+    expect(displayRegimeLabels<unknown>({ label: 'NORMAL', stressScore: 0.5 })).toEqual({ label: 'Normal', labelKey: 'NORMAL', stressScore: 0.5 });
+    expect(displayRegimeLabels<unknown>({ priorLabel: 'ELEVATED', priorLabelSource: 'daily label' })).toEqual({ priorLabel: 'Elevated', priorLabelKey: 'ELEVATED', priorLabelSource: 'daily label' });
+    expect(displayRegimeLabels<unknown>({ regimeLabel: 'STRESS' })).toEqual({ regimeLabel: 'Stress', regimeLabelKey: 'STRESS' });   // the model-divergence rows' field
+  });
+  test('walks arrays and nested objects, leaves other labels and non-state strings alone, never throws on null or a primitive', () => {
+    const out = displayRegimeLabels<unknown>({ market: { label: 'CRISIS' }, scans: [{ label: 'CALM', drivers: ['a'] }, { label: 'unknown' }], metricLabel: 'Net GEX', n: null }) as Record<string, unknown>;
+    expect(out).toEqual({ market: { label: 'Crisis', labelKey: 'CRISIS' }, scans: [{ label: 'Calm', labelKey: 'CALM', drivers: ['a'] }, { label: 'unknown' }], metricLabel: 'Net GEX', n: null });
+    expect(displayRegimeLabels<unknown>(null)).toBeNull(); expect(displayRegimeLabels<unknown>(3)).toBe(3); expect(displayRegimeLabels<unknown>('NORMAL')).toBe('NORMAL');
+    const input = { label: 'STRESS' }; displayRegimeLabels(input); expect(input).toEqual({ label: 'STRESS' });   // a copy, never a mutation
+    expect(displayRegimeLabels<unknown>({ label: 'Normal', labelKey: 'NORMAL' })).toEqual({ label: 'Normal', labelKey: 'NORMAL' });   // idempotent
   });
 });

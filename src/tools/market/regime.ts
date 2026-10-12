@@ -3,7 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ProxyClient } from '../../proxy/proxyClient.js';
 import { toolHandler } from '../helpers.js';
 import { marketDataOutputSchema } from '../outputSchemas.js';
-import { shapeMarketRegimeResponse, humanizeRegimeEntry } from './marketRegimeShaping.js';
+import { shapeMarketRegimeResponse, humanizeRegimeEntry, displayRegimeLabels } from './marketRegimeShaping.js';
 import {
   READ_FAILED,
   shapeSectorHistory,
@@ -25,7 +25,8 @@ import { shapeCotMarket, shapeCotSymbol } from './cotShaping.js';
 // daily symbol, intraday and the market composite. "Typical bands" described
 // a lookup the producer does not do, and rode only the market shape.
 const STRESS_SCORE_RULE = '`label` is a state with hysteresis, not a band read off the score. '
-  + 'Entry levels: NORMAL -0.5, ELEVATED 0.5, STRESS 1.5, CRISIS 2.5, and CALM below -0.5 with no prior; exit levels: NORMAL -1.0, ELEVATED 0.0, STRESS 1.0, CRISIS 2.0. '
+  + 'The five states read as words - Calm, Normal, Elevated, Stress, Crisis - in `label` (and `priorLabel`), with the stored key beside each in `labelKey` (and `priorLabelKey`): CALM, NORMAL, ELEVATED, STRESS, CRISIS, the value to compare or filter on. '
+  + 'Entry levels: Normal -0.5, Elevated 0.5, Stress 1.5, Crisis 2.5, and Calm below -0.5 with no prior; exit levels: Normal -1.0, Elevated 0.0, Stress 1.0, Crisis 2.0. '
   // The intraday prior is the previous scan only while the worker's store
   // survives: proxy/data/intraday-regime-<date>.json on the Cron Server's
   // disk (intraday-regime.ts loadSnapshots/saveSnapshot), which every
@@ -37,12 +38,12 @@ const STRESS_SCORE_RULE = '`label` is a state with hysteresis, not a band read o
   // each intraday scan as priorLabel / priorLabelSource.
   + 'Against the prior label the producer had (for the daily symbol and market scopes, the latest earlier daily label stored for the same symbol, symbol tier and model version; for an intraday scan, the previous scan of the day while the scan worker still holds it, else that same daily label; the worker\'s store of the day\'s scans is a file on its disk that a redeploy between two scans wipes, so the scan after one takes the daily label (SPY\'s 2026-09-17 midday scan, ELEVATED at 0.5987 with confidence 0.9414, was judged against the 2026-09-16 daily label ELEVATED, not the morning scan\'s NORMAL)), a score reaching a higher state\'s entry level moves the label up; otherwise the label is kept until the score falls below its exit level, and then it drops to the highest lower state whose entry level it still meets. '
   + 'Without a usable prior label, including when the prior could not be read, the label is the highest state whose entry level the score meets. '
-  + 'So a score inside one band can carry the label above it: SPY\'s 2026-09-18 midday scan, 0.4229, is ELEVATED because the day\'s open scan took the 2026-09-17 daily label, ELEVATED at 0.506, and no scan since fell below 0.0.';
+  + 'So a score inside one band can carry the label above it: SPY\'s 2026-09-18 midday scan, 0.4229, is Elevated because the day\'s open scan took the 2026-09-17 daily label, Elevated at 0.506, and no scan since fell below 0.0.';
 
 // The payload carries the rule in short: the full one ran to 1,100 characters
 // on every response and its example named SPY on every symbol.
 const STRESS_SCORE_NOTE = 'stressScore is a raw composite regime score, not a 0-100 index. '
-  + '`label` is a state with hysteresis against the prior label, not a band read off the score (entry NORMAL -0.5, ELEVATED 0.5, STRESS 1.5, CRISIS 2.5; exit -1.0, 0.0, 1.0, 2.0), so a score inside one band can carry the label above it; the tool description has the full rule.';
+  + '`label` is a state with hysteresis against the prior label, not a band read off the score (entry Normal -0.5, Elevated 0.5, Stress 1.5, Crisis 2.5; exit -1.0, 0.0, 1.0, 2.0), so a score inside one band can carry the label above it; `label` is the display word and `labelKey` the stored key; the tool description has the full rule.';
 
 // The proxy orders market_date DESC then scan_time ASC, so the newest scan is
 // the last entry of the first date; a reader saw "neither newest-first nor
@@ -495,6 +496,6 @@ export function register(server: McpServer, client: ProxyClient): void {
       }
 
       return res;
-    }),
+    }, { shape: displayRegimeLabels }),   // the five states as words beside their stored keys, on every scope (2026-10-11)
   );
 }

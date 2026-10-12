@@ -3,7 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ProxyClient } from '../../proxy/proxyClient.js';
 import { toolHandler } from '../helpers.js';
 import { syncedDataOutputSchema } from '../outputSchemas.js';
-import { isCurrentComputeRunRecord, recordMatchesComputeFilters, sanitizeComputeRunsWireOutput, summarizeComputeRunsResponse, trimFullComputeRunsResponse } from './computeRunsShaping.js';
+import { isCurrentComputeRunRecord, recordMatchesComputeFilters, sanitizeComputeRunsWireOutput, stateComputeRunTimeConventions, summarizeComputeRunsResponse, trimFullComputeRunsResponse } from './computeRunsShaping.js';
 import { sanitizeFullSyncResponse } from './syncResponseShaping.js';
 
 const ISO_CALENDAR_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -110,6 +110,7 @@ export function register(server: McpServer, client: ProxyClient): void {
       if (full && res != null) {
         sanitizeFullSyncResponse(res);
         sanitizeComputeRunsWireOutput(res);
+        stateComputeRunTimeConventions(res);
         trimFullComputeRunsResponse(res);
         return { _skipSizeGuard: true, data: res };
       }

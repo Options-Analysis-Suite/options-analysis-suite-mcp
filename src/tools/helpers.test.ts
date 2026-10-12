@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { applyResponseSizeGuard, sanitizeMcpWireOutput, toolHandler } from './helpers.js';
+import { applyResponseSizeGuard, decodeEscapes, sanitizeMcpWireOutput, settleVendorKeys, toolHandler } from './helpers.js';
 import { ApiError, AuthError, SubscriptionError } from '../types.js';
 import { LiveApiError } from '../proxy/liveApiClient.js';
 
@@ -1180,5 +1180,303 @@ describe('cleaned keys never overwrite, multi-byte escapes decode, and every rul
 
   test('sync-row detection reads the cleaned keys too', () => {
     expect(sanitizeMcpWireOutput({ id: 'row-id', [`user_${zw}id`]: 'u', value: 1 })).toEqual(sanitizeMcpWireOutput({ id: 'row-id', user_id: 'u', value: 1 }));
+  });
+});
+
+describe('vendor key settling and the escaped-URL check are linear (review: quadratic key settling)', () => {
+  // The settling before this change, kept as the reference: each key renamed
+  // to a name restarted its search at the bare name, so k keys renamed to one
+  // name cost k squared lookups.
+  function referenceSettle(entries: Array<{ outKey: string; vendor: boolean }>): void {
+    const taken = new Set(entries.filter((entry) => !entry.vendor).map((entry) => entry.outKey));
+    for (const entry of entries) {
+      if (!entry.vendor) continue;
+      let candidate = entry.outKey;
+      for (let n = 2; taken.has(candidate); n += 1) candidate = `${entry.outKey}${n}`;
+      taken.add(candidate);
+      entry.outKey = candidate;
+    }
+  }
+  const settled = (shape: ReadonlyArray<readonly [string, boolean]>, settle: typeof settleVendorKeys): string[] => {
+    const entries = shape.map(([outKey, vendor]) => ({ outKey, vendor }));
+    settle(entries);
+    return entries.map((entry) => entry.outKey);
+  };
+
+  // The equity vendor's full name with eight separators, four between each
+  // pair of words: 65,536 spellings, every one read as "vendor". Built from
+  // base64 so this file names no vendor.
+  const words = Buffer.from('RmluYW5jaWFsIE1vZGVsaW5nIFByZXA=', 'base64').toString('utf8').toLowerCase().split(' ');
+  const SEPARATORS = [' ', '_', '.', '-'];
+  const spelling = (index: number): string => {
+    const run = (from: number) => Array.from({ length: 4 }, (_, j) => SEPARATORS[(index >> (2 * (from + j))) & 3]).join('');
+    return `${words[0]}${run(0)}${words[1]}${run(4)}${words[2]}`;
+  };
+  const collidingKeys = (count: number): Record<string, number> => {
+    const input: Record<string, number> = {};
+    for (let i = 0; i < count; i += 1) input[spelling(i)] = i;
+    return input;
+  };
+
+  // Counts every Set lookup while `run` works, and throws past `budget` so
+  // the quadratic settling fails at once instead of running for minutes.
+  function withLookupBudget<T>(budget: number, run: () => T): { value: T; lookups: number } {
+    const has = Set.prototype.has;
+    let lookups = 0;
+    Set.prototype.has = function (this: Set<unknown>, value: unknown) {
+      lookups += 1;
+      if (lookups > budget) throw new Error(`more than ${budget} Set lookups`);
+      return has.call(this, value);
+    };
+    try {
+      return { value: run(), lookups };
+    } finally {
+      Set.prototype.has = has;
+    }
+  }
+
+  test('numbers each collision as before, a numbered form another key holds included', () => {
+    const v = (outKey: string): readonly [string, boolean] => [outKey, true];
+    const literal = (outKey: string): readonly [string, boolean] => [outKey, false];
+    const pins: Array<[ReadonlyArray<readonly [string, boolean]>, string[]]> = [
+      [[v('vendor'), v('vendor'), v('vendor')], ['vendor', 'vendor2', 'vendor3']],
+      [[v('vendor'), literal('vendor')], ['vendor2', 'vendor']],
+      [[v('vendor'), v('vendor'), literal('vendor2'), v('vendor')], ['vendor', 'vendor3', 'vendor2', 'vendor4']],
+      [[literal('vendor'), literal('vendor2'), literal('vendor3'), v('vendor'), v('vendor')], ['vendor', 'vendor2', 'vendor3', 'vendor4', 'vendor5']],
+      // vendor1's second form is vendor12, which the twelfth vendor holds.
+      [[...Array.from({ length: 12 }, () => v('vendor')), v('vendor1'), v('vendor1'), v('vendor'), v('vendor1')],
+        ['vendor', ...Array.from({ length: 11 }, (_, i) => `vendor${i + 2}`), 'vendor1', 'vendor13', 'vendor14', 'vendor15']],
+      [[v('a'), v('b'), v('a'), literal('b2'), v('b'), v('a')], ['a', 'b', 'a2', 'b2', 'b3', 'a3']],
+      [[v('__proto__'), v('__proto__')], ['__proto__', '__proto__2']],
+    ];
+    for (const [shape, expected] of pins) {
+      expect(settled(shape, referenceSettle)).toEqual(expected);
+      expect(settled(shape, settleVendorKeys)).toEqual(expected);
+    }
+  });
+
+  test('every sequence of up to six keys over seven names settles exactly as the reference does', () => {
+    const alphabet: ReadonlyArray<readonly [string, boolean]> = [
+      ['vendor', true], ['vendor', false], ['vendor2', true], ['vendor2', false], ['vendor1', true], ['vendor12', false], ['vendor3', true],
+    ];
+    let sequences = 0;
+    let numbered = 0;
+    const visit = (shape: Array<readonly [string, boolean]>): void => {
+      sequences += 1;
+      const expected = settled(shape, referenceSettle);
+      expect(settled(shape, settleVendorKeys)).toEqual(expected);
+      if (expected.some((outKey, i) => outKey !== shape[i][0])) numbered += 1;
+      if (shape.length === 6) return;
+      for (const symbol of alphabet) visit([...shape, symbol]);
+    };
+    visit([]);
+    expect(sequences).toBe(137_257);
+    expect(numbered).toBe(122_104);
+  });
+
+  test('8,000 and 65,536 keys read as one name settle with a few lookups per key', () => {
+    for (const count of [8_000, 65_536]) {
+      const input = collidingKeys(count);
+      expect(Object.keys(input)).toHaveLength(count);
+      const { value, lookups } = withLookupBudget(4 * count, () => sanitizeMcpWireOutput(input) as Record<string, number>);
+      expect(lookups).toBe(3 * count);
+      const keys = Object.keys(value);
+      expect(keys).toHaveLength(count);
+      expect(keys.slice(0, 3)).toEqual(['vendor', 'vendor2', 'vendor3']);
+      expect(keys[count - 1]).toBe(`vendor${count}`);
+      expect(Object.values(value)).toEqual(Array.from({ length: count }, (_, i) => i));
+    }
+  });
+
+  test('past the depth limit too', () => {
+    let deep: unknown = collidingKeys(8_000);
+    for (let i = 0; i < 21; i += 1) deep = { inner: deep };
+    const { value, lookups } = withLookupBudget(4 * 8_000, () => sanitizeMcpWireOutput(deep));
+    expect(lookups).toBe(8_042);
+    let inner = value as Record<string, unknown>;
+    while (inner.inner) inner = inner.inner as Record<string, unknown>;
+    const keys = Object.keys(inner);
+    expect(keys).toHaveLength(8_000);
+    expect(keys.slice(0, 2)).toEqual(['vendor', 'vendor2']);
+    expect(keys[7_999]).toBe('vendor8000');
+    expect(inner.vendor8000).toBe(7_999);
+  });
+
+  test('an escaped URL inside text is still removed, after a URL without one too', () => {
+    expect(sanitizeMcpWireOutput({ note: 'see http://a http://b/%73upabase.co now' })).toEqual({ note: 'see http://a a removed link now' });
+    expect(sanitizeMcpWireOutput({ note: 'http://a\thttp://b/%73upabase.co' })).toEqual({ note: 'http://a\ta removed link' });
+    expect(sanitizeMcpWireOutput({ note: 'http://http://x/%73upabase.co y' })).toEqual({ note: 'a removed link y' });
+    expect(sanitizeMcpWireOutput({ note: 'go HTTPS://X/%73UPABASE.CO' })).toEqual({ note: 'go a removed link' });
+    expect(sanitizeMcpWireOutput({ note: 'http://a/x %73upabase.co' })).toEqual({ note: 'http://a/x %73upabase.co' });
+  });
+
+  test('a run of URL starts is read once, not once per start', () => {
+    // 210,000 characters of "http://": every start rescanned the rest of the
+    // run for a percent sign, about 6 s; one pass takes milliseconds.
+    const run = 'http://'.repeat(30_000);
+    const started = performance.now();
+    const out = sanitizeMcpWireOutput({ note: `${run} http://b/%73upabase.co`, [run]: 1 }) as Record<string, unknown>;
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(out).toEqual({ note: `${run} a removed link`, [run]: 1 });
+  });
+
+  // The decoding before this change, kept as the reference: each width from
+  // four down was tried until decodeURIComponent stopped throwing.
+  function referenceDecode(url: string): string {
+    return url.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+      const escapes = run.match(/%[0-9A-Fa-f]{2}/g) ?? [];
+      let out = '';
+      let index = 0;
+      while (index < escapes.length) {
+        let decoded: string | null = null;
+        let used = 1;
+        for (let width = Math.min(4, escapes.length - index); width >= 1; width -= 1) {
+          try {
+            decoded = decodeURIComponent(escapes.slice(index, index + width).join(''));
+            used = width;
+            break;
+          } catch { /* a shorter sequence */ }
+        }
+        out += decoded ?? escapes[index];
+        index += used;
+      }
+      return out;
+    });
+  }
+  const hex = (byte: number) => `%${byte.toString(16).toUpperCase().padStart(2, '0')}`;
+
+  test('escapes decode exactly as before: every run of one and two, and runs of three and four over the boundary bytes', () => {
+    const inputs: string[] = [];
+    for (let a = 0; a < 256; a += 1) {
+      inputs.push(`https://x/${hex(a)}y`);
+      for (let b = 0; b < 256; b += 1) inputs.push(`https://x/${hex(a)}${hex(b)}`);
+    }
+    // Every lead byte class and each edge of its continuation ranges.
+    const edges = [0x41, 0x7f, 0x80, 0x8f, 0x90, 0x9f, 0xa0, 0xbf, 0xc0, 0xc1, 0xc2, 0xdf, 0xe0, 0xe1, 0xed, 0xee, 0xef, 0xf0, 0xf1, 0xf4, 0xf5, 0xff];
+    for (const a of edges) for (const b of edges) for (const c of edges) {
+      inputs.push(`${hex(a)}${hex(b)}${hex(c)}`);
+      for (const d of edges) inputs.push(`x${hex(a)}${hex(b)}${hex(c)}${hex(d)}`);
+    }
+    let decodedSomething = 0;
+    for (const input of inputs) {
+      const expected = referenceDecode(input);
+      if (expected !== input) decodedSomething += 1;
+      if (decodeEscapes(input) !== expected) expect([input, decodeEscapes(input)]).toEqual([input, expected]);
+    }
+    expect(inputs).toHaveLength(65_792 + 10_648 + 234_256);
+    expect(decodedSomething).toBe(149_176);
+  });
+
+  test('a run of escapes no character starts is read without a single throw', () => {
+    // Four throws for every %FF, at each of the dozen reads a value gets in a
+    // full answer: a 64 KB run of them cost 0.7 s.
+    const decode = globalThis.decodeURIComponent;
+    let calls = 0;
+    globalThis.decodeURIComponent = (text: string) => {
+      calls += 1;
+      return decode(text);
+    };
+    let out: unknown;
+    try {
+      out = sanitizeMcpWireOutput({ note: `see https://a/${'%FF'.repeat(1_000)} now`, url: `https://a/${'%C0%80'.repeat(500)}` });
+    } finally {
+      globalThis.decodeURIComponent = decode;
+    }
+    expect(calls).toBe(0);
+    expect(out).toEqual({ note: `see https://a/${'%FF'.repeat(1_000)} now`, url: `https://a/${'%C0%80'.repeat(500)}` });
+  });
+});
+
+describe('a short vendor name is a vendor name in every spelling (review: mixed-case vendor name)', () => {
+  // The options vendor's short name left the case-insensitive pattern
+  // so that a word merely containing it, a cat breed's plural, is
+  // left alone; the word-bounded pattern it joined listed only the lower case,
+  // all-capitals and capitalized spellings, so a spelling with capitals inside
+  // it (the scanner's three below) was published as written. The acronym's
+  // pattern had the same gap. Names from base64, as above.
+  const decode = (s: string) => Buffer.from(s, 'base64').toString('utf8');
+  const OPT = decode('T1JBVFM=');
+  const EQ = decode('Rk1Q');
+  const any = new RegExp(`${OPT}|${EQ}`, 'i');
+  // Every spelling of a word: bit i of the mask capitalizes letter i.
+  const spellings = (word: string) => Array.from({ length: 2 ** word.length }, (_, mask) =>
+    [...word.toLowerCase()].map((c, i) => ((mask >> i) & 1 ? c.toUpperCase() : c)).join(''));
+  // A spelling by shape: U capitalizes the letter at its place, l does not.
+  const shaped = (word: string, shape: string) => [...word.toLowerCase()].map((c, i) => (shape[i] === 'U' ? c.toUpperCase() : c)).join('');
+  // The replacement keeps the name's style: all capitals, capitalized, or lower case.
+  const like = (form: string) => (form === form.toUpperCase() ? 'VENDOR' : /^[A-Z]/.test(form) ? 'Vendor' : 'vendor');
+  const upperFirst = (form: string) => form.charAt(0).toUpperCase() + form.slice(1);
+  const forms = [...spellings(OPT), ...spellings(EQ)];
+
+  test("the scanner's spellings", () => {
+    const text = [shaped(OPT, 'lUlUl'), shaped(OPT, 'UUlUU'), shaped(OPT, 'UlUlU')].join(' ');
+    expect(sanitizeMcpWireOutput({ text })).toEqual({ text: 'vendor Vendor Vendor' });
+  });
+
+  test('every spelling, as a word, a camelCase or snake_case segment and in a key', () => {
+    expect(forms).toHaveLength(32 + 8);
+    expect(new Set(forms).size).toBe(40);
+    for (const form of forms) {
+      const text = `per ${form}, ${form}_iv, ${form}Iv and iv${upperFirst(form)}.`;
+      const out = sanitizeMcpWireOutput({ text, [`${form}Iv`]: 1, [`iv${upperFirst(form)}`]: 2 });
+      expect(out, form).toEqual({
+        text: `per ${like(form)}, ${like(form)}_iv, ${like(form)}Iv and iv${like(upperFirst(form))}.`,
+        [`${like(form)}Iv`]: 1,
+        [`iv${like(upperFirst(form))}`]: 2,
+      });
+    }
+    // The acronym's plural keeps its s as written.
+    for (const form of spellings(EQ)) {
+      expect(sanitizeMcpWireOutput({ text: `two ${form}s and ${form}S` }), form).toEqual({ text: `two ${like(form)}s and ${like(form)}S` });
+    }
+  });
+
+  test('a key the camelCase conversion spells in mixed case', () => {
+    const spelled = (word: string) => word.toLowerCase().split('').join('_');
+    // o_r_a_t_s and f_m_p convert to a lower case letter then capitals.
+    expect(sanitizeMcpWireOutput({ [spelled(OPT)]: 1 })).toEqual({ vendor: 1 });
+    expect(sanitizeMcpWireOutput({ [spelled(EQ)]: 1 })).toEqual({ vendor: 1 });
+    expect(sanitizeMcpWireOutput({ [`_${spelled(OPT)}_meta`]: { a: 1 } })).toEqual({ vendorMeta: { a: 1 } });
+    // Renamed keys never overwrite one another or a key already present.
+    expect(sanitizeMcpWireOutput({ [spelled(OPT)]: 1, [spelled(EQ)]: 2, vendor: 3 })).toEqual({ vendor2: 1, vendor3: 2, vendor: 3 });
+  });
+
+  test('a URL naming one in mixed case, as written, percent-encoded or in full-width letters', () => {
+    const odd = shaped(OPT, 'lUlUl');
+    const wide = (x: string) => [...x].map((c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0)).join('');
+    expect(sanitizeMcpWireOutput({
+      a: `https://example.com/${odd}/x`,
+      b: `https://example.com/%${odd.charCodeAt(0).toString(16)}${odd.slice(1)}/x`,
+      c: `see https://example.com/${shaped(EQ, 'lUl')}/x now`,
+      d: `per ${wide(shaped(OPT, 'UlUlU'))}`,
+      [wide(shaped(EQ, 'lUU'))]: 1,
+    })).toEqual({ c: 'see a removed link now', d: 'per Vendor', vendor: 1 });
+  });
+
+  test('error text, codes, details and values past the depth limit', async () => {
+    const odd = shaped(OPT, 'UUlUU');
+    const res = await toolHandler(async () => {
+      throw new LiveApiError(`${odd} down`, 503, `${shaped(EQ, 'UlU')}_UPSTREAM`, true, undefined, { [`${shaped(EQ, 'lUl')}Status`]: 503, note: odd });
+    })({});
+    expect(JSON.stringify(res)).not.toMatch(any);
+    expect((res.structuredContent as any).error).toBe('Vendor down');
+    let deep: any = { [shaped(OPT, 'lUlUl')]: shaped(EQ, 'UlU') };
+    for (let i = 0; i < 30; i += 1) deep = { inner: deep };
+    let inner: any = sanitizeMcpWireOutput(deep);
+    while (inner.inner) inner = inner.inner;
+    expect(inner).toEqual({ vendor: 'Vendor' });
+  });
+
+  test('a word that merely contains one is still left alone, in any spelling', () => {
+    // Why the name is word-bounded at all: the breed's plural.
+    // A spelling starting in lower case after any letter, or with a capital
+    // after a capital, starts inside a word; a lower case letter after the
+    // name makes it a longer word.
+    for (const form of forms) {
+      const inside = /^[a-z]/.test(form) ? `K${form}, k${form} and ${form}x` : `K${form} and ${form}x`;
+      expect(sanitizeMcpWireOutput({ text: inside }), form).toEqual({ text: inside });
+    }
+    const breeder = `https://www.K${shaped(OPT, 'lUlUl')}.com/`;
+    expect(sanitizeMcpWireOutput({ breeder })).toEqual({ breeder });
   });
 });

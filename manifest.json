@@ -84,7 +84,7 @@
     },
     {
       "name": "get_earnings",
-      "description": "Get earnings history and estimates; with includeMoves, the realized and implied moves around each of the last eight reports (both one-session moves, the implied move from the stored ATM straddle else ATM IV, the IV crush on one tenor, and realized-over-implied ratios)"
+      "description": "Get earnings history and estimates; with includeMoves, the realized and implied moves around each of the last eight reports (both one-session moves, the implied move from the stored ATM straddle else ATM IV, the IV crush on one tenor, and realized-over-implied ratios); with transcript, a generated summary of an earnings call (never the transcript itself) checked against the call - prepared remarks by speaker, each analyst question with the gist of the answers, guidance and short verbatim quotes - or the summary lines matching a query"
     },
     {
       "name": "get_news",

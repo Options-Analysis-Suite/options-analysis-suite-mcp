@@ -837,3 +837,44 @@ describe('a partial window', () => {
     expect(shaped.window.omittedRows).toBeUndefined();
   });
 });
+
+// Review: "Adjusted-only expirations are mislabeled as the base
+// symbol": a window date listed only under an adjusted series (AAPL1, a
+// different deliverable) has nothing of the symbol's own to count. The proxy
+// leaves it out; the window and the date name the roots, and the limitations say so.
+describe('adjusted series left out of the window', () => {
+  it('carries excludedRoots on the window and on each date that names them, and says so', () => {
+    const shaped: any = summarizeDealerPositioning(live({
+      excludedRoots: [{ root: 'AAPL1', contracts: 12 }],
+      byExpiration: [
+        { expiration: '2026-09-18', daysToExpiration: 8, netGamma: 1, netDelta: 1, coverage: { gamma: { total: 2, included: 2 }, delta: { total: 2, included: 2 } } },
+        { expiration: '2026-09-25', daysToExpiration: 15, netGamma: 0, netDelta: 0, coverage: { gamma: null, delta: null }, excludedRoots: [{ root: 'AAPL1', contracts: 12 }] },
+      ],
+    }));
+    expect(shaped.window.excludedRoots).toEqual([{ root: 'AAPL1', contracts: 12 }]);
+    expect(shaped.byExpiration.map((entry: any) => entry.excludedRoots)).toEqual([undefined, [{ root: 'AAPL1', contracts: 12 }]]);
+    expect(shaped.limitations).toContain('12 contracts under the AAPL1 root (an adjusted series, a different deliverable at the same strikes) are left out of the totals, the levels and their coverage, which measure the symbol\'s own contracts alone, so "complete" there does not include them; `byExpiration` names the dates.');
+  });
+
+  it('a window that left nothing out names nothing (control)', () => {
+    const shaped: any = summarizeDealerPositioning(live());
+    expect(shaped.window.excludedRoots).toBeUndefined();
+    expect(shaped.limitations.some((l: string) => /adjusted series/.test(l))).toBe(false);
+    expect(shaped.byExpiration.every((entry: any) => entry.excludedRoots === undefined)).toBe(true);
+  });
+});
+
+// Review: on a date listed under several roots the
+// straddle is one series' (the primary), and the proxy names it.
+describe('the straddle\'s series on a date under several roots', () => {
+  const entry = (move: Record<string, unknown>) => ({
+    expiration: '2026-10-16', daysToExpiration: 4, netGamma: 1, netDelta: 1,
+    coverage: { gamma: { total: 2, included: 2 }, delta: { total: 2, included: 2 } },
+    expectedMove: { strike: 6500, callMid: 30, putMid: 31, straddle: 61, pctOfSpot: 0.0094, lower: 6439, upper: 6561, atmIv: 0.14, ivOneSigma: 60, ...move },
+  });
+  it('carries expectedMove.root where the proxy names it, and none otherwise', () => {
+    const shaped: any = summarizeDealerPositioning(live({ byExpiration: [entry({ root: 'SPXW' }), { ...entry({}), expiration: '2026-10-23' }] }));
+    expect(shaped.byExpiration[0].expectedMove).toMatchObject({ straddle: 61, root: 'SPXW' });
+    expect(shaped.byExpiration[1].expectedMove).not.toHaveProperty('root');
+  });
+});

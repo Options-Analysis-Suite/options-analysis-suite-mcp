@@ -34,10 +34,7 @@ export interface LiveOption {
   iv?: number | null;
   volume?: number | null;
   openInterest?: number | null;
-  /** On a merged row: each root's own figure beside the sum. */
-  openInterestByRoot?: Record<string, number | null>;
-  volumeByRoot?: Record<string, number | null>;
-  /** The OCC root the row's prices came from, where the proxy merged several. */
+  /** The contract's own OCC root, where the broker names it. */
   root?: string | null;
   delta?: number | null;
   gamma?: number | null;
@@ -58,7 +55,7 @@ export interface LiveChainResponse {
   contractCount?: number;
   /** The proxy withheld a blanket-zero open interest (every contract read 0): the figures are null and this says why. */
   openInterestUnpublished?: true;
-  /** The OCC root the rows are under, and all of them: several when the proxy merged them to one row per strike (the root the prices carry first), one when the date is under one root. */
+  /** The OCC roots the rows are under: `roots` all of them, `root` the primary (the most open interest). Several when the date is listed under several series (SPX and SPXW), each contract then its own row under its own root. */
   root?: string | null;
   roots?: string[];
   /** Adjusted series (a digit root, a different deliverable) the proxy left out of the rows, each with its contract count. */
@@ -107,8 +104,12 @@ export function usableIv(value: unknown): number | null {
   return iv !== null && iv > 0 && iv <= 5 ? iv : null;
 }
 
-/** One contract, trimmed to the fields a model can actually use. */
-function row(option: LiveOption, primaryRoot: string | null = null) {
+/**
+ * One contract, trimmed to the fields a model can actually use. `primaryRoot`
+ * is the chain's root when it names roots; `everyRoot` is set on a date listed
+ * under several, where each row is a different series' contract and names it.
+ */
+function row(option: LiveOption, primaryRoot: string | null = null, everyRoot = false) {
   const iv = usableIv(option.iv);
   // A contract whose IV is not usable (unpublished, or a solver sentinel)
   // carries Greeks from the same failed solve: withheld, with the reason,
@@ -126,9 +127,10 @@ function row(option: LiveOption, primaryRoot: string | null = null) {
   const twoSided = bid !== null && ask !== null && bid > 0 && ask > 0;
   return {
     strike: num(option.strike),
-    // On a merged chain: named where it differs from the chain's root, and
-    // null where the broker named none, so silence always means the chain's root.
-    ...(primaryRoot === null ? {} : typeof option.root === 'string' ? (option.root !== primaryRoot ? { root: option.root } : {}) : { root: null }),
+    // Under several roots every row names its own, null where the broker named
+    // none: two rows at one strike are two series' contracts. Under one, named
+    // only where it differs, so silence always means the chain's root.
+    ...(primaryRoot === null ? {} : typeof option.root === 'string' ? (everyRoot || option.root !== primaryRoot ? { root: option.root } : {}) : { root: null }),
     bid,
     ask,
     mid: twoSided ? num(option.mid) : null,
@@ -150,10 +152,6 @@ function row(option: LiveOption, primaryRoot: string | null = null) {
     ...(withheld ? { greeksReason: 'iv-unusable' as const } : {}),
     volume: num(option.volume),
     openInterest: num(option.openInterest),
-    // On a merged row, each root's own figure beside the sum (null where that
-    // root published none), so the sum can be checked from the row.
-    ...(option.openInterestByRoot && typeof option.openInterestByRoot === 'object' ? { openInterestByRoot: option.openInterestByRoot } : {}),
-    ...(option.volumeByRoot && typeof option.volumeByRoot === 'object' ? { volumeByRoot: option.volumeByRoot } : {}),
   };
 }
 
@@ -230,18 +228,31 @@ function nearestToDelta(options: LiveOption[], target: number): LiveOption | nul
   return best;
 }
 
-function aroundSpot(options: LiveOption[], spot: number, range: number, primaryRoot: string | null = null) {
+function aroundSpot(options: LiveOption[], spot: number, range: number, primaryRoot: string | null = null, roots: string[] | null = null) {
   const withStrike = options
     .filter((o) => num(o.strike) !== null)
     .sort((a, b) => (num(a.strike)! - num(b.strike)!));
   if (withStrike.length === 0) return [];
+  const several = roots !== null && roots.length > 1;
+  // Under several roots a strike has a row per series: the window is `range`
+  // STRIKES either side, every series' row at each, the primary's first.
+  const points = several ? [...new Set(withStrike.map((o) => num(o.strike)!))] : withStrike.map((o) => num(o.strike)!);
   let pivot = 0;
   let bestDistance = Infinity;
-  withStrike.forEach((option, index) => {
-    const distance = Math.abs(num(option.strike)! - spot);
+  points.forEach((strike, index) => {
+    const distance = Math.abs(strike - spot);
     if (distance < bestDistance) { pivot = index; bestDistance = distance; }
   });
-  return withStrike.slice(Math.max(0, pivot - range), pivot + range + 1).map((option) => row(option, primaryRoot));
+  if (!several) return withStrike.slice(Math.max(0, pivot - range), pivot + range + 1).map((option) => row(option, primaryRoot));
+  const kept = new Set(points.slice(Math.max(0, pivot - range), pivot + range + 1));
+  const rank = (option: LiveOption): number => {
+    const at = typeof option.root === 'string' ? [primaryRoot, ...roots.filter((root) => root !== primaryRoot)].indexOf(option.root) : -1;
+    return at === -1 ? roots.length + 1 : at;
+  };
+  return withStrike
+    .filter((option) => kept.has(num(option.strike)!))
+    .sort((a, b) => (num(a.strike)! - num(b.strike)!) || (rank(a) - rank(b)))
+    .map((option) => row(option, primaryRoot, true));
 }
 
 export function summarizeLiveChain(response: LiveChainResponse, options: ShapeOptions = {}) {
@@ -254,6 +265,13 @@ export function summarizeLiveChain(response: LiveChainResponse, options: ShapeOp
   const putTotals = totals(puts);
   const roots = Array.isArray(response.roots) && response.roots.length > 0 ? response.roots : null;
   const primaryRoot = roots !== null && typeof response.root === 'string' ? response.root : null;
+  // A date under several roots holds several series: the at-the-money pair and
+  // the wings are one series' (the primary's), never one root's call beside
+  // another's put; every row names its root.
+  const severalRoots = roots !== null && roots.length > 1;
+  const primaryCalls = severalRoots && primaryRoot !== null ? calls.filter((option) => option.root === primaryRoot) : calls;
+  const primaryPuts = severalRoots && primaryRoot !== null ? puts.filter((option) => option.root === primaryRoot) : puts;
+  const one = (option: LiveOption) => row(option, primaryRoot, severalRoots);
   // One root that is not the symbol's own spelling (SPXW on an SPX weekly) is
   // worth a sentence: the root is the settlement. AAPL under AAPL is not.
   const ownSpelling = typeof response.symbol === 'string' ? response.symbol.toUpperCase().replace(/[^A-Z0-9]/g, '') : null;
@@ -295,7 +313,7 @@ export function summarizeLiveChain(response: LiveChainResponse, options: ShapeOp
       note: `Near-the-money strikes plus 25-delta wings. ${callTotals.contracts + putTotals.contracts} contracts in the full chain.`
         + (response.spotStale === true ? ' The spot printed before the last session\'s open (spotTime), so the at-the-money pair and the strike window are read against a stale price.' : '')
         + (response.openInterestUnpublished === true ? ' Open interest withheld: every contract read zero at the broker, an unpublished figure, not an empty book.' : '')
-        + (roots !== null && roots.length > 1 ? ` Open interest and volume are summed across the ${roots.join(' and ')} roots per strike; prices are the ${primaryRoot ?? 'primary'} root's unless a row names another, null where the broker named none.` : '')
+        + (severalRoots ? ` The date is listed under the ${roots!.join(' and ')} roots, different series (their settlement and the day their trading stops differ): each row is one contract under its own \`root\`, so a strike shows a row per root, never merged; the at-the-money pair and the 25-delta wings are the ${primaryRoot ?? 'primary'} root's (the most open interest), and the totals count every root's contracts.` : '')
         + (singleForeignRoot !== null
           ? (rootedContracts === calls.length + puts.length
             ? ` Every contract is under the ${singleForeignRoot} root, not ${ownSpelling}.`
@@ -313,16 +331,16 @@ export function summarizeLiveChain(response: LiveChainResponse, options: ShapeOp
       putCallOpenInterestRatio: ratioOf(putTotals.openInterest, callTotals.openInterest),
     },
     atm: spot === null ? null : {
-      call: nearestToSpot(calls, spot) ? row(nearestToSpot(calls, spot)!, primaryRoot) : null,
-      put: nearestToSpot(puts, spot) ? row(nearestToSpot(puts, spot)!, primaryRoot) : null,
+      call: nearestToSpot(primaryCalls, spot) ? one(nearestToSpot(primaryCalls, spot)!) : null,
+      put: nearestToSpot(primaryPuts, spot) ? one(nearestToSpot(primaryPuts, spot)!) : null,
     },
     wings: {
-      call25Delta: nearestToDelta(calls, 0.25) ? row(nearestToDelta(calls, 0.25)!, primaryRoot) : null,
-      put25Delta: nearestToDelta(puts, 0.25) ? row(nearestToDelta(puts, 0.25)!, primaryRoot) : null,
+      call25Delta: nearestToDelta(primaryCalls, 0.25) ? one(nearestToDelta(primaryCalls, 0.25)!) : null,
+      put25Delta: nearestToDelta(primaryPuts, 0.25) ? one(nearestToDelta(primaryPuts, 0.25)!) : null,
     },
     nearTheMoney: spot === null ? { calls: [], puts: [] } : {
-      calls: aroundSpot(calls, spot, effective, primaryRoot),
-      puts: aroundSpot(puts, spot, effective, primaryRoot),
+      calls: aroundSpot(calls, spot, effective, primaryRoot, roots),
+      puts: aroundSpot(puts, spot, effective, primaryRoot, roots),
     },
   });
 

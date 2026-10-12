@@ -65,6 +65,26 @@ export const exDividend = (v: unknown): { date: string; amount: number | null; d
 const count = (v: unknown): number | null =>
   typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null;
 
+/** The adjusted series a book left out (root and contract count each), or null when it named none. */
+export function readExcludedRoots(v: unknown): Array<{ root: string; contracts: number }> | null {
+  const entries = arr(v).flatMap((value) => {
+    const entry = record(value);
+    const contracts = count(entry.contracts);
+    return typeof entry.root === 'string' && contracts !== null ? [{ root: entry.root, contracts }] : [];
+  });
+  return entries.length > 0 ? entries : null;
+}
+
+/**
+ * The adjusted series left out, in words, ending in its verb: "12 contracts
+ * under the AAPL1 root (an adjusted series, a different deliverable at the
+ * same strikes) are". The live positioning and the scan say it the same way.
+ */
+export function excludedRootsPhrase(entries: ReadonlyArray<{ root: string; contracts: number }>): string {
+  const named = entries.map((entry) => `${entry.contracts} ${entry.contracts === 1 ? 'contract' : 'contracts'} under the ${entry.root} root`).join(' and ');
+  return `${named} (an adjusted series, a different deliverable at the same strikes) ${entries.length === 1 && entries[0]!.contracts === 1 ? 'is' : 'are'}`;
+}
+
 export type CoverageStatus = 'complete' | 'partial' | 'unmeasured' | 'empty' | 'unknown';
 export type FieldStatus = CoverageStatus | 'unavailable';
 export interface MetricCoverage {
@@ -425,9 +445,11 @@ export function summarizeDealerPositioning(
     // three fields are then unknown, not "no event".
     const rawEvents = entry.events !== null && typeof entry.events === 'object' ? record(entry.events) : null;
     const entryOmitted = readOmittedRows(entry.omittedRows);
+    const entryExcluded = readExcludedRoots(entry.excludedRoots);
     return {
       expiration: str(entry.expiration),
       ...(entryOmitted !== null ? { omittedRows: entryOmitted } : {}),
+      ...(entryExcluded !== null ? { excludedRoots: entryExcluded } : {}),
       daysToExpiration: Number.isSafeInteger(entry.daysToExpiration) ? entry.daysToExpiration as number : null,
       netGex: gamma.value,
       netDex: delta.value,
@@ -446,6 +468,8 @@ export function summarizeDealerPositioning(
         upper: num(move.upper),
         atmIv: num(move.atmIv),
         ivOneSigma: num(move.ivOneSigma),
+        // On a date listed under several roots (SPX and SPXW): the series the straddle is.
+        ...(str(move.root) !== null ? { root: str(move.root) } : {}),
       },
       expectedMoveUnavailable: str(entry.expectedMoveUnavailable),
       events: rawEvents === null ? null : {
@@ -491,6 +515,14 @@ export function summarizeDealerPositioning(
     limitations.push(`The broker answered ${emptyExpirations.join(', ')} with no contracts, though it lists ${emptyExpirations.length === 1 ? 'that date' : 'those dates'}; the totals leave ${emptyExpirations.length === 1 ? 'it' : 'them'} out, so the window is partial.`);
   }
   if (omittedRows !== null) limitations.push(omittedRowsSentence(omittedRows));
+  // Adjusted series (a digit root, a different deliverable) the books left
+  // out: a window date listed only under one adds nothing, and is named.
+  const excludedRoots = readExcludedRoots(body.excludedRoots);
+  if (excludedRoots !== null) {
+    // The coverage and statuses measure the symbol's own contracts: "complete"
+    // never includes the adjusted series, which no total of this book counts.
+    limitations.push(`${excludedRootsPhrase(excludedRoots)} left out of the totals, the levels and their coverage, which measure the symbol's own contracts alone, so "complete" there does not include them; \`byExpiration\` names the dates.`);
+  }
   if (unpublished.length > 0) {
     const named = unpublished.length === 1 ? unpublished[0]
       : `${unpublished.slice(0, -1).join(', ')} and ${unpublished[unpublished.length - 1]}`;
@@ -544,6 +576,7 @@ export function summarizeDealerPositioning(
       ...(body.partial === true ? { partial: true as const } : {}),
       ...(emptyExpirations.length > 0 ? { emptyExpirations } : {}),
       ...(omittedRows !== null ? { omittedRows } : {}),
+      ...(excludedRoots !== null ? { excludedRoots } : {}),
     },
 
     byExpiration,

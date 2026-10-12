@@ -64,19 +64,21 @@ function describeTrend(trendPct: number): string {
   return 'stable';
 }
 
-function normalizeRow(row: FtdRow): Record<string, unknown> {
+function normalizeRow(row: FtdRow, listUnread: boolean): Record<string, unknown> {
   const quantity = toNumber(row.quantity) ?? 0;
   const price = toNumber(row.price);
   const value = toNumber(row.value) ?? (price != null ? quantity * price : null);
+  // Membership is known only from a read list and a true/false on the row: an unread list (the answer's partial
+  // marker or the row's own 'unread') or no boolean leaves it unknown (null), never false (review).
+  const known = !listUnread && row.thresholdSource !== 'unread' && typeof row.onThresholdList === 'boolean';
 
   return {
     date: row.date ?? null,
     quantity,
     price,
     value: value != null ? round(value, 2) : null,
-    // An unread threshold list leaves the membership unknown (null), never false (review).
-    onThresholdList: row.onThresholdList === null || row.thresholdSource === 'unread' ? null : Boolean(row.onThresholdList),
-    thresholdSource: row.thresholdSource ?? 'none',
+    onThresholdList: known ? row.onThresholdList : null,
+    thresholdSource: known ? row.thresholdSource ?? 'none' : 'unread',
   };
 }
 
@@ -86,14 +88,17 @@ export function summarizeFailToDeliver(
   spikeCap = DEFAULT_SPIKE_CAP,
   trendCap = DEFAULT_TREND_CAP,
 ): Record<string, unknown> {
-  const rows = Array.isArray(payload.data)
-    ? payload.data.map(normalizeRow)
-    : [];
   // The proxy marks a threshold list it could not read (partial, unavailable: ['thresholdList']):
   // the rows' threshold status is unknown, never "no overlap" or 0 days.
-  const thresholdUnread = (payload as Record<string, unknown>).partial === true
+  const listUnread = (payload as Record<string, unknown>).partial === true
     && Array.isArray((payload as Record<string, unknown>).unavailable)
     && ((payload as Record<string, unknown>).unavailable as unknown[]).includes('thresholdList');
+  const rows = Array.isArray(payload.data)
+    ? payload.data.map((row) => normalizeRow(row, listUnread))
+    : [];
+  // One flag for the rows and the summary: a row left unknown makes the summary unknown too, so the answer never
+  // pairs a null row with 0 days or the no-overlap note.
+  const thresholdUnread = listUnread || rows.some((row) => row.onThresholdList === null);
   const thresholdPartial = {
     partial: true,
     unavailable: ['thresholdList'],

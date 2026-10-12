@@ -95,29 +95,53 @@ function getRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 /**
- * FINRA writes dates as YYYYMMDD (20260930); published as YYYY-MM-DD when that
- * is a calendar date, and anything else as it is.
+ * A date field. FINRA writes dates as YYYYMMDD (20260930), the proxy's
+ * lastUpdate is YYYY-MM-DD; either is published as YYYY-MM-DD when it is a
+ * calendar date, and anything else (20261340, '', a number) as null.
  */
-function isoFinraDate(value: unknown): unknown {
-  if (typeof value !== 'string' || !/^\d{8}$/.test(value)) return value;
-  const iso = `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6)}`;
+function isoFinraDate(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const iso = /^\d{8}$/.test(value) ? `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6)}` : value;
   const parsed = new Date(`${iso}T00:00:00Z`);
-  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === iso ? iso : value;
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === iso ? iso : null;
 }
 
 /**
- * A FINRA stats block passed through: its dates as ISO and its numeric strings
- * ("52.13") as numbers, so a field is never a string beside its numeric twin.
- * An eight-digit value is a date or nothing, never a number.
+ * The stats blocks' fields as the proxy sends them (/finra/short-volume,
+ * proxy/routes/finra-sec.ts): the dates by name, never by their eight digits,
+ * so an average of 20260105 shares stays a number. A date field the proxy adds
+ * belongs in this list, or it is read as a number.
+ */
+const FINRA_STATS_DATE_FIELDS = new Set(['maxShortDate', 'minShortDate']);
+const FINRA_STATS_NUMBER_FIELDS = new Set([
+  'avgShortVolume', 'avgTotalVolume', 'avgShortPercentage',
+  'averageShortPercentage', 'maxShortPercentage', 'minShortPercentage', 'totalShortVolume', 'totalVolume',
+]);
+
+/** A finite number, or a numeric string ("52.13", "52.13%") as one; null when it overflows, undefined when it is neither. */
+function finraStatNumber(value: unknown): number | null | undefined {
+  if (typeof value === 'number') return asFiniteNumber(value);
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!/^-?\d+(\.\d+)?%?$/.test(trimmed)) return undefined;
+  const parsed = Number(trimmed.replace('%', ''));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * A FINRA stats block passed through: its date fields as ISO and its numeric
+ * strings ("52.13") as numbers, so a field is never a string beside its
+ * numeric twin. A numeric field that holds no number is null; a field the
+ * proxy does not send keeps its text.
  */
 function normalizeFinraStats(value: unknown): unknown {
   const record = getRecord(value);
   if (!record) return value ?? null;
   return Object.fromEntries(Object.entries(record).map(([key, entry]) => {
-    if (typeof entry !== 'string') return [key, entry];
-    if (/^\d{8}$/.test(entry)) return [key, isoFinraDate(entry)];
-    const trimmed = entry.trim();
-    return [key, /^-?\d+(\.\d+)?%?$/.test(trimmed) ? Number(trimmed.replace('%', '')) : entry];
+    if (FINRA_STATS_DATE_FIELDS.has(key)) return [key, isoFinraDate(entry)];
+    const number = finraStatNumber(entry);
+    if (number !== undefined) return [key, number];
+    return [key, FINRA_STATS_NUMBER_FIELDS.has(key) ? null : entry];
   }));
 }
 

@@ -129,6 +129,15 @@ export function modelDisplayName(modelName: unknown): unknown {
     .trim();
 }
 
+// The longest label a model filter can mean is 31 characters ("Jump
+// Diffusion (Variance Gamma)"); 120, the sector filter's cap, leaves room for
+// spacing and punctuation variants.
+export const MODEL_FILTER_MAX_LENGTH = 120;
+
+function lookupModelBackendId(label: string): string | undefined {
+  return MODEL_BACKEND_IDS[label] ?? NORMALIZED_MODEL_BACKEND_IDS[normalizeModelLookupKey(label)];
+}
+
 export function modelBackendId(modelName: string): string;
 export function modelBackendId(modelName: unknown): unknown;
 export function modelBackendId(modelName: unknown): unknown {
@@ -136,10 +145,13 @@ export function modelBackendId(modelName: unknown): unknown {
   const trimmed = modelName.trim();
   if (!trimmed) return modelName;
   // "Jump Diffusion (Merton)", as an analysis record is labeled, filters as
-  // the stored JumpDiffusion.
+  // the stored JumpDiffusion. A record carries one jump-model suffix, so one
+  // is stripped and what is left must be a label itself: "Jump Diffusion
+  // (Merton) (Kou)" is unknown and passes through. Stripping every suffix
+  // (a recursion did) rescanned the rest each time, quadratic in the length.
   const jumpLabeled = /^(.*\S)\s*\((?:Merton|Kou|Bates|Variance Gamma)\)$/i.exec(trimmed);
-  if (jumpLabeled && modelBackendId(jumpLabeled[1]) === 'JumpDiffusion') return 'JumpDiffusion';
-  return MODEL_BACKEND_IDS[trimmed] ?? NORMALIZED_MODEL_BACKEND_IDS[normalizeModelLookupKey(trimmed)] ?? trimmed;
+  if (jumpLabeled && lookupModelBackendId(jumpLabeled[1]) === 'JumpDiffusion') return 'JumpDiffusion';
+  return lookupModelBackendId(trimmed) ?? trimmed;
 }
 
 export function modelDisplayNames(values: unknown): string[] {

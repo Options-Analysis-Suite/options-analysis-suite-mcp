@@ -1,5 +1,6 @@
 import { displayNameModelMap, modelDisplayName, modelDisplayNames } from '../modelLabels.js';
 import { jsonUtf8ByteLength } from '../helpers.js';
+import { COMPUTE_GREEK_TIME_SCOPE, EXPOSURE_SWEEP_CHARM_CONVENTION, statedTimeConvention } from './timeConvention.js';
 
 type RawComputeRunRecord = {
   [key: string]: unknown;
@@ -2827,6 +2828,25 @@ function sanitizeComputeRunsWireObject(
   delete obj.failureReason;
 }
 
+/**
+ * States each raw run's time convention in place (the full response): an untagged run reads legacy. The
+ * statement covers the model Greeks; the exposure sweep's strike charm (data.exposureSweep) states its own.
+ */
+export function stateComputeRunTimeConventions(response: unknown): void {
+  const rows = response && typeof response === 'object' && Array.isArray((response as { data?: unknown }).data)
+    ? (response as { data: unknown[] }).data
+    : [];
+  for (const row of rows) {
+    const data = row && typeof row === 'object' ? (row as { data?: unknown }).data : null;
+    const summary = data && typeof data === 'object' ? (data as { summary?: unknown }).summary : null;
+    if (summary && typeof summary === 'object' && !Array.isArray(summary)) {
+      (summary as Record<string, unknown>).greekTimeConvention = statedTimeConvention(summary as Record<string, unknown>);
+      (summary as Record<string, unknown>).greekTimeScope = COMPUTE_GREEK_TIME_SCOPE;
+      (summary as Record<string, unknown>).exposureSweepCharmConvention = EXPOSURE_SWEEP_CHARM_CONVENTION;
+    }
+  }
+}
+
 export function sanitizeComputeRunsWireOutput(value: unknown): void {
   if (value == null || typeof value !== 'object') return;
 
@@ -3594,6 +3614,10 @@ function compactSingleRunForBudget(value: unknown): Record<string, unknown> {
     scope: boundedField(run.scope, 64),
     quality: boundedField(run.quality, 64),
     engineVersion: boundedField(run.engineVersion ?? runSummary.engineVersion, 128),
+    // the time-convention change: the run's time Greeks' convention, the legacy wording for a run computed before
+    greekTimeConvention: statedTimeConvention(typeof run.greekTimeConvention === 'string' ? run : runSummary),
+    greekTimeBasis: boundedField(run.greekTimeBasis ?? runSummary.greekTimeBasis, 64) ?? null,
+    greekTimeScope: COMPUTE_GREEK_TIME_SCOPE,
     runSchemaVersion: finiteNumberOrNull(run.runSchemaVersion ?? nested?.runSchemaVersion),
     completionState: run.completionState === null || runSummary.completionState === null
       ? null
@@ -3872,6 +3896,10 @@ export function shapeComputeRunRecord(
     scope: typeof raw.scope === 'string' ? raw.scope : undefined,
     quality: typeof raw.quality === 'string' ? raw.quality : undefined,
     engineVersion: stringOrNull(summary.engineVersion),
+    // the time-convention change: the run's time Greeks' convention and day basis, the legacy wording for a run computed before
+    greekTimeConvention: statedTimeConvention(summary),
+    greekTimeBasis: stringOrNull(summary.greekTimeBasis) ?? null,
+    greekTimeScope: COMPUTE_GREEK_TIME_SCOPE,
     runSchemaVersion,
     completionState: stringOrNull(summary.completionState),
     valuationTime: finiteNumberOrNull(summary.valuationTime),

@@ -134,13 +134,13 @@ describe('short data publishes ISO dates and numbers', () => {
       lastUpdate: '20260930',
       history: [{ date: '20260930', shortVolume: 100, totalVolume: 250, shortPercent: '40.00' }],
       averages: { avgShortPercentage: '52.13', avgShortVolume: '1234567', label: 'trailing 20 days' },
-      yearStats: { highShortPercent: '71.2', highDate: '20260105', lowShortPercent: 30.5, lowDate: '2026-03-02' },
+      yearStats: { maxShortPercentage: '71.2', maxShortDate: '20260105', minShortPercentage: 30.5, minShortDate: '20260302' },
     }) as any;
     expect(out.lastUpdate).toBe('2026-09-30');
     expect(out.latest.date).toBe('2026-09-30');
     expect(out.recentHistory[0].date).toBe('2026-09-30');
     expect(out.trailingAverages).toEqual({ avgShortPercentage: 52.13, avgShortVolume: 1234567, label: 'trailing 20 days' });
-    expect(out.yearStats).toEqual({ highShortPercent: 71.2, highDate: '2026-01-05', lowShortPercent: 30.5, lowDate: '2026-03-02' });
+    expect(out.yearStats).toEqual({ maxShortPercentage: 71.2, maxShortDate: '2026-01-05', minShortPercentage: 30.5, minShortDate: '2026-03-02' });
   });
 
   it('short interest: settlement dates', () => {
@@ -152,8 +152,123 @@ describe('short data publishes ISO dates and numbers', () => {
     expect(out.lastUpdate).toBe('2026-09-15');
   });
 
-  it('leaves an eight-digit value that is not a calendar date, and a number, as they are', () => {
-    const out = summarizeShortVolume({ symbol: 'X', history: [], averages: { code: '20261399', n: 5 } }) as any;
-    expect(out.trailingAverages).toEqual({ code: '20261399', n: 5 });
+});
+
+describe('short-volume stats: a field is a date by its name, never by its eight digits', () => {
+  // Review: "12345678" stayed a string (no calendar date) and "20260105"
+  // went out as "2026-01-05" in every averages and yearStats field.
+  it('eight-digit numeric strings in the numeric fields are numbers', () => {
+    const out = summarizeShortVolume({
+      symbol: 'X',
+      history: [],
+      averages: { avgShortVolume: '12345678', avgTotalVolume: '20260105', avgShortPercentage: '52.13' },
+      yearStats: { totalShortVolume: '20260105', totalVolume: '12345678', averageShortPercentage: '20260105' },
+    }) as any;
+    expect(out.trailingAverages).toEqual({ avgShortVolume: 12345678, avgTotalVolume: 20260105, avgShortPercentage: 52.13 });
+    expect(out.yearStats).toEqual({ totalShortVolume: 20260105, totalVolume: 12345678, averageShortPercentage: 20260105 });
+  });
+
+  it('the date fields are ISO when they are calendar dates, else null', () => {
+    const out = summarizeShortVolume({
+      symbol: 'X',
+      history: [],
+      yearStats: { maxShortDate: '20260105', minShortDate: '20261340' },
+    }) as any;
+    expect(out.yearStats).toEqual({ maxShortDate: '2026-01-05', minShortDate: null });
+    const other = summarizeShortVolume({
+      symbol: 'X',
+      history: [],
+      yearStats: { maxShortDate: '2026-03-02', minShortDate: 20260105 },
+    }) as any;
+    expect(other.yearStats).toEqual({ maxShortDate: '2026-03-02', minShortDate: null });
+  });
+
+  it('JSON numbers and seven-digit values are unchanged', () => {
+    const out = summarizeShortVolume({
+      symbol: 'X',
+      history: [],
+      averages: { avgShortVolume: 20260105, avgTotalVolume: 12345678, avgShortPercentage: '1234567' },
+      yearStats: { totalShortVolume: 1234567, totalVolume: '1234567', maxShortPercentage: 52.13 },
+    }) as any;
+    expect(out.trailingAverages).toEqual({ avgShortVolume: 20260105, avgTotalVolume: 12345678, avgShortPercentage: 1234567 });
+    expect(out.yearStats).toEqual({ totalShortVolume: 1234567, totalVolume: 1234567, maxShortPercentage: 52.13 });
+  });
+
+  it('every numeric field the proxy sends is null when it holds no number', () => {
+    const out = summarizeShortVolume({
+      symbol: 'X',
+      history: [],
+      averages: { avgShortVolume: 'N/A', avgTotalVolume: 'N/A', avgShortPercentage: 'N/A' },
+      yearStats: {
+        averageShortPercentage: 'N/A', maxShortPercentage: 'N/A', minShortPercentage: 'N/A', totalShortVolume: 'N/A', totalVolume: 'N/A',
+      },
+    }) as any;
+    expect(out.trailingAverages).toEqual({ avgShortVolume: null, avgTotalVolume: null, avgShortPercentage: null });
+    expect(out.yearStats).toEqual({
+      averageShortPercentage: null, maxShortPercentage: null, minShortPercentage: null, totalShortVolume: null, totalVolume: null,
+    });
+  });
+
+  it('empty, non-string, non-finite and overflowing values; a field the proxy does not send keeps its text', () => {
+    const overflow = `1${'0'.repeat(400)}`;
+    const out = summarizeShortVolume({
+      symbol: 'X',
+      history: [],
+      averages: { avgShortVolume: '', avgTotalVolume: true, avgShortPercentage: null, label: 'trailing 20 days', code: '20261399', big: overflow },
+      yearStats: { totalShortVolume: overflow, totalVolume: Number.NaN, maxShortPercentage: {}, minShortPercentage: '52.13%' },
+    }) as any;
+    expect(out.trailingAverages).toEqual({
+      avgShortVolume: null, avgTotalVolume: null, avgShortPercentage: null, label: 'trailing 20 days', code: 20261399, big: null,
+    });
+    expect(out.yearStats).toEqual({ totalShortVolume: null, totalVolume: null, maxShortPercentage: null, minShortPercentage: 52.13 });
+  });
+
+  it("the proxy's own answers: a full one, and the no-rows one with its empty dates", () => {
+    const full = summarizeShortVolume({
+      symbol: 'SPY',
+      lastUpdate: '2026-01-05',
+      history: [{ date: '20260105', shortVolume: 14230658, totalVolume: 28086532, shortPercent: '50.67' }],
+      averages: { avgShortVolume: 20260105, avgTotalVolume: 41234567, avgShortPercentage: '49.13' },
+      yearStats: {
+        averageShortPercentage: '51.02', maxShortPercentage: '63.40', maxShortDate: '20260105',
+        minShortPercentage: '38.10', minShortDate: '20250611', totalShortVolume: 3226010578, totalVolume: 6573012004,
+      },
+    }) as any;
+    expect(full.trailingAverages).toEqual({ avgShortVolume: 20260105, avgTotalVolume: 41234567, avgShortPercentage: 49.13 });
+    expect(full.yearStats).toEqual({
+      averageShortPercentage: 51.02, maxShortPercentage: 63.4, maxShortDate: '2026-01-05',
+      minShortPercentage: 38.1, minShortDate: '2025-06-11', totalShortVolume: 3226010578, totalVolume: 6573012004,
+    });
+    const empty = summarizeShortVolume({
+      symbol: 'ZZZQ',
+      lastUpdate: null,
+      latest: { date: null, shortVolume: 0, totalVolume: 0, shortPercent: '0.00', shortPercentage: '0.00', shortExemptVolume: 0, markets: [] },
+      history: [],
+      averages: { avgShortVolume: 0, avgTotalVolume: 0, avgShortPercentage: '0.00' },
+      yearStats: { averageShortPercentage: '0.00', maxShortPercentage: '0.00', maxShortDate: '', minShortPercentage: '0.00', minShortDate: '', totalShortVolume: 0, totalVolume: 0 },
+    }) as any;
+    expect(empty.lastUpdate).toBeNull();
+    expect(empty.yearStats.maxShortDate).toBeNull();
+    expect(empty.yearStats.minShortDate).toBeNull();
+  });
+
+  it('the row dates and lastUpdate are dates or null, never a string that is not one', () => {
+    const volume = summarizeShortVolume({
+      symbol: 'X',
+      lastUpdate: 'yesterday',
+      history: [{ date: '20261340', shortVolume: 1, totalVolume: 2 }, { date: '2026-02-30', shortVolume: 1, totalVolume: 2 }],
+    }) as any;
+    expect(volume.lastUpdate).toBeNull();
+    expect(volume.recentHistory.map((row: any) => row.date)).toEqual([null, null]);
+    const interest = summarizeShortInterest({
+      symbol: 'X',
+      lastUpdate: '2026-09-15',
+      history: [{ settlementDate: '20261340', shortInterest: 100 }],
+      stats: { maxDate: '20261399', minDate: '20260915' },
+    }) as any;
+    expect(interest.lastUpdate).toBe('2026-09-15');
+    expect(interest.recentHistory[0].settlementDate).toBeNull();
+    expect(interest.summary.maxDate).toBeNull();
+    expect(interest.summary.minDate).toBe('2026-09-15');
   });
 });

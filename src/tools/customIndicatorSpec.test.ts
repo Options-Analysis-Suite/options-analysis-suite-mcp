@@ -44,7 +44,7 @@ describe('get_custom_indicator_spec', () => {
     expect(values).not.toContain('all');
   });
 
-  test("the enum is EXACTLY 'index' plus the index's ids (a direct handler call bypasses the SDK's input validation, so an id missing from the enum would still answer here - a review survivor)", async () => {
+  test("the enum is EXACTLY 'index' plus the index's ids (a direct handler call bypasses the SDK's input validation, so an id missing from the enum would still answer here - the review's round-1 survivor)", async () => {
     const { tool, call } = capture();
     const values: string[] = tool.config.inputSchema.section.unwrap().options ?? tool.config.inputSchema.section.options;
     const { body } = await call({});
@@ -67,7 +67,7 @@ describe('get_custom_indicator_spec', () => {
     }
   });
 
-  test("every quoted section reference in the usage text - either quote style, any part, with or without a subsection slug - is an id of the index (the reading list builds its sentence; a stray reference elsewhere in the text fails here too - review)", async () => {
+  test("every quoted section reference in the usage text - either quote style, any part, with or without a subsection slug - is an id of the index (the reading list builds its sentence; a stray reference elsewhere in the text fails here too - the review's rounds 2 and 3)", async () => {
     const { call } = capture();
     const { body } = await call({});
     const ids = new Set(body.sections.map((s: any) => s.id));
