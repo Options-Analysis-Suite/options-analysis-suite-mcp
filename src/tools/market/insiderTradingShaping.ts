@@ -64,13 +64,17 @@ type GroupedInsiderTrade = {
   rawCount: number;
   reportingName: string;
   sharesOwned: number | null;
-  sharesTransacted: number;
+  sharesTransacted: number | null;
   signalPriority: number;
   securityName: string | null;
   totalValue: number | null;
   transactionDate: string | null;
   typeOfOwner: string | null;
   url: string | null;
+  /** Lines with no share count: left out of sharesTransacted (null when every line is one) and of totalValue. */
+  linesWithoutShares: number;
+  /** Lines with shares above 0 and no price: left out of totalValue. */
+  linesWithoutPrice: number;
 };
 
 const MAX_DEFAULT_EVENTS = 10;
@@ -227,6 +231,8 @@ export function groupInsiderTrades(rawTrades: unknown): GroupedInsiderTrade[] {
     filingDate: string | null;
     formType: string | null;
     latestSharesOwned: number | null;
+    linesWithoutPrice: number;
+    linesWithoutShares: number;
     pricedShares: number;
     rawCount: number;
     reportingName: string;
@@ -256,9 +262,12 @@ export function groupInsiderTrades(rawTrades: unknown): GroupedInsiderTrade[] {
       trade.url ?? '',
     ].join('|');
 
-    const sharesTransacted = toFiniteNumber(trade.securitiesTransacted) ?? 0;
+    // A line without a share count is unknown, never 0 shares: it is left out of the event's shares and value and
+    // counted beside them.
+    const sharesTransacted = toFiniteNumber(trade.securitiesTransacted);
     const price = toFiniteNumber(trade.price);
-    const totalValueContribution = price != null && sharesTransacted > 0 ? price * sharesTransacted : 0;
+    const priced = price != null && sharesTransacted != null && sharesTransacted > 0;
+    const totalValueContribution = priced ? price * sharesTransacted : 0;
     const sharesOwned = toFiniteNumber(trade.securitiesOwned);
     const directOrIndirect = typeof trade.directOrIndirect === 'string' ? trade.directOrIndirect : null;
     const acquisitionOrDisposition = typeof trade.acquisitionOrDisposition === 'string'
@@ -272,6 +281,8 @@ export function groupInsiderTrades(rawTrades: unknown): GroupedInsiderTrade[] {
       filingDate,
       formType: typeof trade.formType === 'string' ? trade.formType : null,
       latestSharesOwned: sharesOwned,
+      linesWithoutPrice: 0,
+      linesWithoutShares: 0,
       pricedShares: 0,
       rawCount: 0,
       reportingName,
@@ -284,9 +295,11 @@ export function groupInsiderTrades(rawTrades: unknown): GroupedInsiderTrade[] {
     };
 
     existing.rawCount += 1;
-    existing.sharesTransacted += sharesTransacted;
+    if (sharesTransacted == null) existing.linesWithoutShares += 1;
+    else existing.sharesTransacted += sharesTransacted;
+    if (price == null && sharesTransacted != null && sharesTransacted > 0) existing.linesWithoutPrice += 1;
     existing.totalValue += totalValueContribution;
-    if (price != null && sharesTransacted > 0) {
+    if (priced) {
       existing.pricedShares += sharesTransacted;
     }
     if (securityName) existing.securityNames.add(securityName);
@@ -313,13 +326,15 @@ export function groupInsiderTrades(rawTrades: unknown): GroupedInsiderTrade[] {
     rawCount: group.rawCount,
     reportingName: group.reportingName,
     sharesOwned: group.latestSharesOwned,
-    sharesTransacted: group.sharesTransacted,
+    sharesTransacted: group.linesWithoutShares === group.rawCount ? null : group.sharesTransacted,
     signalPriority: signalPriority(group.category),
     securityName: pickRepresentativeSecurity(group.securityNames),
     totalValue: group.totalValue > 0 ? group.totalValue : null,
     transactionDate: group.transactionDate,
     typeOfOwner: group.typeOfOwner,
     url: group.url,
+    linesWithoutShares: group.linesWithoutShares,
+    linesWithoutPrice: group.linesWithoutPrice,
   }));
 
   grouped.sort((left, right) => {
@@ -355,6 +370,41 @@ function summarizeActivityCounts(groupedTrades: GroupedInsiderTrade[]): Record<s
 }
 
 const cents = (value: number): number => Math.round(value * 100) / 100;
+
+/**
+ * The value of some events: the sum of the ones that carry a value, how many
+ * carry none, and how many carry one that leaves some of their lines out (a
+ * line without a share count, or with shares and no price), so the sum says
+ * so after the event's own row is cut or never listed. An event without a
+ * value is unknown, never $0: with events and none valued the value is null;
+ * with no events it is 0.
+ */
+function eventsValue(trades: GroupedInsiderTrade[]): { value: number | null; withoutValue: number; partiallyValued: number } {
+  let value = 0;
+  let withoutValue = 0;
+  let partiallyValued = 0;
+  for (const trade of trades) {
+    if (trade.totalValue === null) withoutValue += 1;
+    else {
+      value += trade.totalValue;
+      if (trade.linesWithoutShares + trade.linesWithoutPrice > 0) partiallyValued += 1;
+    }
+  }
+  return { value: trades.length > 0 && withoutValue === trades.length ? null : value, withoutValue, partiallyValued };
+}
+
+/** Beside a purchase and a sale value: the counts of events without one and valued only in part, each when above 0. */
+function valueGaps(purchases: { withoutValue: number; partiallyValued: number }, sales: { withoutValue: number; partiallyValued: number }): Record<string, number> {
+  return {
+    ...(purchases.withoutValue > 0 ? { purchasesWithoutValue: purchases.withoutValue } : {}),
+    ...(sales.withoutValue > 0 ? { salesWithoutValue: sales.withoutValue } : {}),
+    ...(purchases.partiallyValued > 0 ? { purchasesPartiallyValued: purchases.partiallyValued } : {}),
+    ...(sales.partiallyValued > 0 ? { salesPartiallyValued: sales.partiallyValued } : {}),
+  };
+}
+
+/** A value to the cent, or null. */
+const centsOrNull = (value: number | null): number | null => (value === null ? null : cents(value));
 
 /** A symbol the insider route has no record for (a 404): a status, not "no data". */
 export function noInsiderRecord(symbol: string, companyProfile?: unknown): Record<string, unknown> {
@@ -416,7 +466,8 @@ function summarizeOtherIssuers(lines: unknown[]): Array<Record<string, unknown>>
   return Array.from(byCik, ([cik, cikLines]) => {
     const grouped = groupInsiderTrades(cikLines);
     const of = (category: TradeCategory) => grouped.filter(trade => trade.category === category);
-    const value = (category: TradeCategory) => cents(of(category).reduce((sum, trade) => sum + (trade.totalValue ?? 0), 0));
+    const purchases = eventsValue(of('purchase'));
+    const sales = eventsValue(of('sale'));
     return {
       companyCik: cik,
       lines: cikLines.length,
@@ -424,8 +475,9 @@ function summarizeOtherIssuers(lines: unknown[]): Array<Record<string, unknown>>
       securityNames: Array.from(new Set(grouped.map(trade => trade.securityName).filter((name): name is string => !!name))).slice(0, 3),
       purchases: of('purchase').length,
       sales: of('sale').length,
-      purchaseValue: value('purchase'),
-      saleValue: value('sale'),
+      purchaseValue: centsOrNull(purchases.value),
+      saleValue: centsOrNull(sales.value),
+      ...valueGaps(purchases, sales),
     };
   }).sort((a, b) => (b.period.through ?? '').localeCompare(a.period.through ?? '') || b.lines - a.lines);
 }
@@ -497,12 +549,8 @@ export function shapeInsiderTradingResponse(payload: unknown, companyProfile?: u
     ? signalTrades.slice(0, MAX_DEFAULT_EVENTS)
     : nonInitialTrades.slice(0, MAX_DEFAULT_EVENTS);
 
-  const purchaseValue = signalTrades
-    .filter((trade) => trade.category === 'purchase')
-    .reduce((sum, trade) => sum + (trade.totalValue ?? 0), 0);
-  const saleValue = signalTrades
-    .filter((trade) => trade.category === 'sale')
-    .reduce((sum, trade) => sum + (trade.totalValue ?? 0), 0);
+  const purchaseValue = eventsValue(signalTrades.filter((trade) => trade.category === 'purchase'));
+  const saleValue = eventsValue(signalTrades.filter((trade) => trade.category === 'sale'));
 
   response.insider_trades = defaultTrades.map((trade) => ({
     reportingName: trade.reportingName,
@@ -515,6 +563,8 @@ export function shapeInsiderTradingResponse(payload: unknown, companyProfile?: u
     sharesTransacted: trade.sharesTransacted,
     price: trade.price === null ? null : Number(trade.price.toFixed(4)),
     totalValue: trade.totalValue === null ? null : cents(trade.totalValue),
+    ...(trade.linesWithoutShares > 0 ? { linesWithoutShares: trade.linesWithoutShares } : {}),
+    ...(trade.linesWithoutPrice > 0 ? { linesWithoutPrice: trade.linesWithoutPrice } : {}),
     directOrIndirect: trade.directOrIndirect,
     acquisitionOrDisposition: trade.acquisitionOrDisposition,
     sharesOwned: trade.sharesOwned,
@@ -525,9 +575,10 @@ export function shapeInsiderTradingResponse(payload: unknown, companyProfile?: u
   response.summary = {
     purchases: signalTrades.filter((trade) => trade.category === 'purchase').length,
     sales: signalTrades.filter((trade) => trade.category === 'sale').length,
-    purchaseValue: cents(purchaseValue),
-    saleValue: cents(saleValue),
-    netValue: cents(purchaseValue - saleValue),
+    purchaseValue: centsOrNull(purchaseValue.value),
+    saleValue: centsOrNull(saleValue.value),
+    netValue: purchaseValue.value !== null && saleValue.value !== null ? cents(purchaseValue.value - saleValue.value) : null,
+    ...valueGaps(purchaseValue, saleValue),
     groupedEvents: groupedTrades.length,
     rawRows: Array.isArray((payload as InsiderResponse).insider_trades)
       ? ((payload as InsiderResponse).insider_trades as unknown[]).length
@@ -641,15 +692,16 @@ const finiteOrNull = (value: unknown): number | null => (typeof value === 'numbe
 const roundTo = (value: number | null, decimals: number): number | null => (value === null ? null : Number(value.toFixed(decimals)));
 const stringOrNull = (value: unknown): string | null => (typeof value === 'string' && value.trim() ? value : null);
 
-function shapeMarketTotal(total: MarketInsiderTotal | undefined): { lines: number; value: number | null } {
-  return { lines: finiteOrNull(total?.trades) ?? 0, value: roundTo(finiteOrNull(total?.value), 0) };
+// A count the proxy did not send is unknown (null), never 0 lines.
+function shapeMarketTotal(total: MarketInsiderTotal | undefined): { lines: number | null; value: number | null } {
+  return { lines: finiteOrNull(total?.trades), value: roundTo(finiteOrNull(total?.value), 0) };
 }
 
-function shapeMarketTop(rows: unknown): Array<{ symbol: string | null; lines: number; value: number | null }> {
+function shapeMarketTop(rows: unknown): Array<{ symbol: string | null; lines: number | null; value: number | null }> {
   if (!Array.isArray(rows)) return [];
   return rows
     .filter((r): r is MarketInsiderTop => r != null && typeof r === 'object')
-    .map(r => ({ symbol: stringOrNull(r.symbol), lines: finiteOrNull(r.trades) ?? 0, value: roundTo(finiteOrNull(r.value), 0) }));
+    .map(r => ({ symbol: stringOrNull(r.symbol), lines: finiteOrNull(r.trades), value: roundTo(finiteOrNull(r.value), 0) }));
 }
 
 function shapeMarketLine(line: MarketInsiderLine): Record<string, unknown> {
@@ -698,7 +750,7 @@ export function shapeMarketInsiderTrades(payload: MarketInsiderResponse | null, 
   const purchases = shapeMarketTotal(payload.summary?.purchases);
   const sales = shapeMarketTotal(payload.summary?.sales);
   // A kind with no lines sums to zero; one whose lines all lack a value has no total to net.
-  const netOf = (t: { lines: number; value: number | null }) => (t.value ?? (t.lines === 0 ? 0 : null));
+  const netOf = (t: { lines: number | null; value: number | null }) => (t.value ?? (t.lines === 0 ? 0 : null));
   const buy = netOf(purchases);
   const sell = netOf(sales);
   const lines = Array.isArray(payload.trades) ? payload.trades.filter((l): l is MarketInsiderLine => l != null && typeof l === 'object') : [];

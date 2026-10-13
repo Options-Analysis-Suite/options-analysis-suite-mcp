@@ -68,13 +68,17 @@ function compactWeeklyPoint(point: WeeklyPoint): Record<string, unknown> {
   return compact;
 }
 
-/** The proxy's own summary fields, a numeric string ("-0.17") as a number. */
+/**
+ * The proxy's own summary fields, a numeric string ("-0.17") as a number; one
+ * that overflows to Infinity (309 digits) is no number, so null.
+ */
 function numericSummary(summary: unknown): Record<string, unknown> {
   if (!summary || typeof summary !== 'object' || Array.isArray(summary)) return {};
-  return Object.fromEntries(Object.entries(summary as Record<string, unknown>).map(([key, value]) => [
-    key,
-    typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(value.trim()) ? Number(value.trim()) : value,
-  ]));
+  return Object.fromEntries(Object.entries(summary as Record<string, unknown>).map(([key, value]) => {
+    if (typeof value !== 'string' || !/^-?\d+(\.\d+)?$/.test(value.trim())) return [key, value];
+    const parsed = Number(value.trim());
+    return [key, Number.isFinite(parsed) ? parsed : null];
+  }));
 }
 
 function deriveSummary(points: WeeklyPoint[], existingSummary: unknown): Record<string, unknown> | undefined {
@@ -124,10 +128,11 @@ export function summarizeDarkPoolVenue(
   if (payload == null || typeof payload !== 'object') return payload;
   const venue = payload as VenuePayload;
   const sorted = sortNewestFirst(venue.weeklyData);
-  // No rows (the proxy's answer for a symbol with none): nothing to shape,
-  // but its summary still publishes numbers.
+  // No rows (the proxy's answer for a symbol with none): an honest empty. The
+  // proxy's summary of no weeks (averages and a trend of 0) measures nothing,
+  // so it is not published as numbers: summary null.
   if (sorted.length === 0) {
-    return venue.summary && typeof venue.summary === 'object' ? { ...venue, summary: numericSummary(venue.summary) } : payload;
+    return { ...venue, summary: null };
   }
 
   const recent = sorted.slice(0, recentCap);

@@ -373,3 +373,106 @@ describe('summarizeOptionsChain', () => {
     expect(summarized.activeNearMoney.puts).toEqual([]);
   });
 });
+
+// Open interest or volume a contract does not carry is unknown, never 0 - left out of every total and counted
+// beside it - and a spot the chain does not carry is null, never 0 (the ATM strike nearest a price of 0 was the
+// chain's lowest).
+describe('summarizeOptionsChain: no fabricated zeros', () => {
+  const EXP = '2026-04-17';
+  const contract = (strike: number, optionType: 'call' | 'put', delta: number, openInterest: number | null, volume: number | null, spotPrice: number | null = 100) => ({
+    ...makeContract({ strike, expiration: EXP, optionType, dte: 21, mid: 1, impliedVolatility: 0.2, delta, openInterest: 0, volume: 0 }),
+    openInterest,
+    volume,
+    spotPrice,
+  });
+  const chain = (contracts: unknown[], spotPrice: number | null = 100) => summarizeOptionsChain({ ticker: 'SPY', date: '2026-03-26', spotPrice, pricingTier: 'historical', contracts }) as Record<string, any>;
+
+  it('a contract without open interest or volume is left out of the totals and counted beside them', () => {
+    const out = chain([
+      contract(100, 'call', 0.5, 100, 10),
+      contract(105, 'call', 0.25, null, null),
+      contract(100, 'put', -0.5, 50, 5),
+    ]);
+    expect(out.summary).toMatchObject({
+      totalCallOpenInterest: 100, totalPutOpenInterest: 50, putCallOpenInterestRatio: 0.5,
+      totalCallVolume: 10, totalPutVolume: 5, putCallVolumeRatio: 0.5,
+      contractsMissingOpenInterest: { calls: 1, puts: 0 },
+      contractsMissingVolume: { calls: 1, puts: 0 },
+    });
+    expect(out.expirations[0]).toMatchObject({
+      callOpenInterest: 100, putOpenInterest: 50, callVolume: 10, putVolume: 5,
+      contractsMissingOpenInterest: { calls: 1, puts: 0 },
+      contractsMissingVolume: { calls: 1, puts: 0 },
+    });
+  });
+
+  it('a side none of whose contracts carries one has a null total, and its ratio is null', () => {
+    const out = chain([
+      contract(100, 'call', 0.5, null, 10),
+      contract(105, 'call', 0.25, null, 20),
+      contract(100, 'put', -0.5, 50, null),
+    ]);
+    expect(out.summary).toMatchObject({
+      totalCallOpenInterest: null, totalPutOpenInterest: 50, putCallOpenInterestRatio: null,
+      totalCallVolume: 30, totalPutVolume: null, putCallVolumeRatio: null,
+      contractsMissingOpenInterest: { calls: 2, puts: 0 },
+      contractsMissingVolume: { calls: 0, puts: 1 },
+    });
+    expect(out.expirations[0]).toMatchObject({ callOpenInterest: null, putOpenInterest: 50, callVolume: 30, putVolume: null });
+  });
+
+  it('a call total of 0 gives no ratio; a put alone without counts is counted on the put side', () => {
+    const out = chain([contract(100, 'call', 0.5, 0, 0), contract(100, 'put', -0.5, 20, 3), contract(98, 'put', -0.3, null, null)]);
+    expect(out.summary).toMatchObject({
+      totalCallOpenInterest: 0, totalPutOpenInterest: 20, putCallOpenInterestRatio: null,
+      totalCallVolume: 0, totalPutVolume: 3, putCallVolumeRatio: null,
+      contractsMissingOpenInterest: { calls: 0, puts: 1 },
+      contractsMissingVolume: { calls: 0, puts: 1 },
+    });
+  });
+
+  it('control: every contract carrying both gives the totals with no missing counts; a side with no contracts totals 0', () => {
+    const out = chain([contract(100, 'call', 0.5, 100, 10), contract(105, 'call', 0.25, 40, 0)]);
+    expect(out.summary).toMatchObject({ totalCallOpenInterest: 140, totalPutOpenInterest: 0, totalCallVolume: 10, totalPutVolume: 0 });
+    expect(out.summary).not.toHaveProperty('contractsMissingOpenInterest');
+    expect(out.summary).not.toHaveProperty('contractsMissingVolume');
+    expect(out.expirations[0]).not.toHaveProperty('contractsMissingOpenInterest');
+    expect(out.expirations[0]).not.toHaveProperty('contractsMissingVolume');
+  });
+
+  it('a contract without open interest ranks as none, below one that carries some', () => {
+    const out = chain([contract(100, 'call', 0.5, null, null), contract(101, 'call', 0.45, 10, 1)]);
+    expect(out.liquidNearMoney.calls.map((c: any) => c.strike)).toEqual([101, 100]);
+    expect(out.activeNearMoney.calls.map((c: any) => c.strike)).toEqual([101, 100]);
+  });
+
+  it('a chain with no contracts has null totals, never a book of 0', () => {
+    const out = chain([], null);
+    expect(out.summary).toEqual({ expirationCount: 0, totalCallOpenInterest: null, totalPutOpenInterest: null, totalCallVolume: null, totalPutVolume: null });
+  });
+
+  for (const [label, spot] of [['null', null], ['0', 0]] as const) {
+    it(`a spot of ${label} on the chain and its contracts: no ATM strike and no near-money contracts, the wings by delta`, () => {
+      const out = chain([
+        contract(90, 'call', 0.8, 10, 1, spot),
+        contract(100, 'call', 0.5, 10, 1, spot),
+        contract(110, 'call', 0.24, 10, 1, spot),
+        contract(90, 'put', -0.26, 10, 1, spot),
+        contract(100, 'put', -0.5, 10, 1, spot),
+      ], spot);
+      expect(out.expirations[0]).toMatchObject({
+        atmStrike: null, atmCallMid: null, atmPutMid: null, atmStraddleMid: null, atmCallIv: null, atmPutIv: null, atmAverageIv: null,
+        call25DeltaStrike: 110, put25DeltaStrike: 90,
+      });
+      expect(out.nearAtmPairs[0]).toMatchObject({ atmStrike: null, call: null, put: null });
+      expect(out.liquidNearMoney).toEqual({ calls: [], puts: [] });
+      expect(out.activeNearMoney).toEqual({ calls: [], puts: [] });
+    });
+  }
+
+  it("control: a chain without its own spot reads its contracts' spot", () => {
+    const out = chain([contract(90, 'call', 0.8, 10, 1), contract(100, 'call', 0.5, 10, 1), contract(100, 'put', -0.5, 10, 1)], null);
+    expect(out.expirations[0].atmStrike).toBe(100);
+    expect(out.liquidNearMoney.calls.map((c: any) => c.strike)).toEqual([100]);
+  });
+});

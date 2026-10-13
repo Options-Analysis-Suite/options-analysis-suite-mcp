@@ -212,7 +212,11 @@ export function fitTranscriptBlock(block: Record<string, unknown>, fits: (block:
   return notices.find(fits);
 }
 
-/** A refusal of the summary routes, reported in the answer beside the earnings history (never in place of it). */
+/**
+ * A refusal of the summary routes, reported in the answer beside the earnings history (never in place of it). A plan
+ * without the summaries (PRO_TIER_REQUIRED) keeps the upgrade link as `actionUrl`, the key every other Pro refusal
+ * carries; the wire sanitizer drops a vendor's page, as the error path does.
+ */
 export function transcriptRefusal(error: LiveApiError): Record<string, unknown> {
   const calls = error.details?.callsOnFile;
   return {
@@ -220,6 +224,7 @@ export function transcriptRefusal(error: LiveApiError): Record<string, unknown> 
     code: error.code ?? null,
     message: error.message,
     retryable: error.retryable ?? null,
+    ...(error.actionUrl ? { actionUrl: error.actionUrl } : {}),
     ...(Array.isArray(calls) ? { callsOnFile: callsOnFile(calls) } : {}),
   };
 }

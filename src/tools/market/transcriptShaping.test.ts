@@ -205,4 +205,16 @@ describe('transcriptRefusal', () => {
       dataAvailable: false, code: 'UPSTREAM_UNAVAILABLE', message: 'down', retryable: true,
     });
   });
+
+  it('keeps the upgrade link of a plan without access, as every other Pro refusal does', () => {
+    const pricing = 'https://www.optionsanalysissuite.com/pricing';
+    expect(transcriptRefusal(new LiveApiError('This feature requires a Pro subscription', 403, 'PRO_TIER_REQUIRED', false, pricing, undefined))).toStrictEqual({
+      dataAvailable: false, code: 'PRO_TIER_REQUIRED', message: 'This feature requires a Pro subscription', retryable: false, actionUrl: pricing,
+    });
+    // No link, no key; and a vendor's own page never reaches the wire (the wire sanitizer drops it, as the error path does).
+    expect('actionUrl' in transcriptRefusal(new LiveApiError('m', 404, 'NOT_FOUND', false, undefined, undefined))).toBe(false);
+    const vendorPage = transcriptRefusal(new LiveApiError('m', 403, 'PRO_TIER_REQUIRED', false, `https://example.com/${VENDOR}/pricing`, undefined));
+    expect(vendorPage.actionUrl).toBe(`https://example.com/${VENDOR}/pricing`);
+    expect(sanitizeMcpWireOutput(vendorPage)).toStrictEqual({ dataAvailable: false, code: 'PRO_TIER_REQUIRED', message: 'm', retryable: false });
+  });
 });

@@ -736,6 +736,18 @@ function normalizedArticleUrl(url: unknown): string | null {
   }
 }
 
+/**
+ * Midnight UTC of a calendar date, or null when there is no such date: Date.UTC
+ * rolls an impossible one over (2026-02-31 became March 3, month 00 the
+ * previous December, and it reads years 0-99 as 1900-1999), so the date it
+ * lands on must be the one asked for.
+ */
+function calendarDateMs(year: number, monthIndex: number, day: number): number | null {
+  const parsed = Date.UTC(year, monthIndex, day);
+  const landed = new Date(parsed);
+  return landed.getUTCFullYear() === year && landed.getUTCMonth() === monthIndex && landed.getUTCDate() === day ? parsed : null;
+}
+
 function parseBusinessWireTimestampMs(url: unknown): number | null {
   if (typeof url !== 'string' || !url.trim()) return null;
   const match = url.match(/businesswire\.com\/news\/home\/(\d{8})/i);
@@ -744,8 +756,7 @@ function parseBusinessWireTimestampMs(url: unknown): number | null {
   const year = Number.parseInt(value.slice(0, 4), 10);
   const month = Number.parseInt(value.slice(4, 6), 10);
   const day = Number.parseInt(value.slice(6, 8), 10);
-  const parsed = Date.UTC(year, month - 1, day);
-  return Number.isFinite(parsed) ? parsed : null;
+  return calendarDateMs(year, month - 1, day);
 }
 
 function parseDatelineTimestampMs(value: unknown): number | null {
@@ -757,8 +768,7 @@ function parseDatelineTimestampMs(value: unknown): number | null {
   if (monthIndex == null) return null;
   const day = Number.parseInt(match[2], 10);
   const year = Number.parseInt(match[3], 10);
-  const parsed = Date.UTC(year, monthIndex, day);
-  return Number.isFinite(parsed) ? parsed : null;
+  return calendarDateMs(year, monthIndex, day);
 }
 
 function inferArticleTimestampMs(article: NewsArticle): number | null {
@@ -769,9 +779,19 @@ function inferArticleTimestampMs(article: NewsArticle): number | null {
     ?? parseDatelineTimestampMs(article.title);
 }
 
+/**
+ * Whether a published date names a day that exists. Date.parse rolls an
+ * impossible YYYY-MM-DD over as Date.UTC does ("2026-02-31 10:00:00" read as
+ * March 3), so a string that starts with one must start with a real one.
+ */
+function isPossibleDateString(value: string): boolean {
+  const match = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return !match || calendarDateMs(Number(match[1]), Number(match[2]) - 1, Number(match[3])) !== null;
+}
+
 function parseArticleTimestampMs(article: NewsArticle): number | null {
   const rawValue = article.published_date ?? article.date ?? article.publishedDate;
-  if (typeof rawValue === 'string' && rawValue.trim()) {
+  if (typeof rawValue === 'string' && rawValue.trim() && isPossibleDateString(rawValue)) {
     const parsed = Date.parse(rawValue);
     if (Number.isFinite(parsed)) return parsed;
   }
@@ -780,7 +800,8 @@ function parseArticleTimestampMs(article: NewsArticle): number | null {
 
 function resolvedArticleDate(article: NewsArticle): string | undefined {
   const explicit = article.published_date || article.date || article.publishedDate;
-  if (typeof explicit === 'string' && explicit.trim()) return explicit;
+  // An impossible published date is no date: the inferred one, if any, stands in.
+  if (typeof explicit === 'string' && explicit.trim() && isPossibleDateString(explicit)) return explicit;
   const inferredMs = inferArticleTimestampMs(article);
   return inferredMs != null ? new Date(inferredMs).toISOString() : undefined;
 }

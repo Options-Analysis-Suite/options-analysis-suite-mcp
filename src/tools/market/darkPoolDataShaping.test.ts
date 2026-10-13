@@ -81,12 +81,28 @@ describe('summarizeDarkPoolResponse', () => {
   });
 });
 
-describe('an empty dark pool history still publishes numbers (review)', () => {
-  test('the proxy\'s no-rows answer: its summary strings become numbers too', () => {
-    const out = summarizeDarkPoolVenue({ symbol: 'X', weeklyData: [], summary: { volumeTrend: '0.00', note: 'none' } }) as any;
-    expect(out.summary).toEqual({ volumeTrend: 0, note: 'none' });
-    expect(out.weeklyData).toEqual([]);
+// An empty history once published its summary's numeric strings as strings (review), then as numbers;
+// The proxy's summary of no weeks (averages and a trend of 0) measures nothing, so it is not published at all.
+describe('an empty dark pool history is an honest empty', () => {
+  test('the proxy\'s no-rows answer: no summary of zeros, no string either', () => {
+    const out = summarizeDarkPoolVenue({ symbol: 'X', weeklyData: [], summary: { avgWeeklyShares: 0, avgWeeklyTrades: 0, avgSharesPerTrade: 0, volumeTrend: '0.00' } }) as any;
+    expect(out).toEqual({ symbol: 'X', weeklyData: [], summary: null });
     const both = summarizeDarkPoolResponse({ otcTrading: { symbol: 'X', weeklyData: [], summary: { volumeTrend: '-0.17' } } }) as any;
-    expect(both.otcTrading.summary.volumeTrend).toBe(-0.17);
+    expect(both.otcTrading.summary).toBeNull();
+    expect(summarizeDarkPoolVenue({ symbol: 'X', weeklyData: [] })).toEqual({ symbol: 'X', weeklyData: [], summary: null });
+  });
+});
+
+describe('a summary field past a finite number', () => {
+  test('a numeric string that overflows to Infinity is null; a finite one is its number', () => {
+    const huge = '9'.repeat(400);
+    const out = summarizeDarkPoolVenue({
+      symbol: 'X',
+      weeklyData: [{ weekEnding: '2026-01-02', totalShares: 100, totalTrades: 10, averageSharesPerTrade: 10 }],
+      summary: { volumeTrend: huge, other: '-0.17', label: 'n/a' },
+    }) as any;
+    expect(out.summary.volumeTrend).toBeNull();
+    expect(out.summary.other).toBe(-0.17);
+    expect(out.summary.label).toBe('n/a');
   });
 });

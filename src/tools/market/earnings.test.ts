@@ -3,8 +3,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { ProxyClient } from '../../proxy/proxyClient.js';
-import { LiveApiError, type LiveApiClient } from '../../proxy/liveApiClient.js';
+import { LiveApiClient, LiveApiError } from '../../proxy/liveApiClient.js';
 import { ApiError } from '../../types.js';
+import { toolHandler } from '../helpers.js';
 import { register } from './earnings.js';
 import { SEARCH_NOTE, SUMMARY_NOTE, WITHHELD_NOTE } from './transcriptShaping.js';
 
@@ -161,6 +162,36 @@ describe('registered get_earnings tool', () => {
       expect(wire.summary.latestReported.date).toBe('2026-07-30');
       expect(wire.transcript).toEqual({ dataAvailable: false, code: 'SUMMARY_UNAVAILABLE', message: 'No summary is available for AAPL fiscal 2026 Q2', retryable: false, callsOnFile: CALLS });
     } finally {
+      await close();
+    }
+  });
+
+  it('a plan without the summaries is refused under transcript with the upgrade link every Pro refusal carries, and the history still returns', async () => {
+    // The proxy's requireProTier answer verbatim (proxy/lib/middleware.ts), read by the real live client.
+    const realFetch = globalThis.fetch;
+    const tierRefusal = { error: 'This feature requires a Pro subscription', code: 'PRO_TIER_REQUIRED', retryable: false, upgradeUrl: 'https://www.optionsanalysissuite.com/pricing' };
+    globalThis.fetch = (async () => new Response(JSON.stringify(tierRefusal), { status: 403, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+    const live = new LiveApiClient('https://proxy.example.com', { getAccessToken: async () => 'DUMMY_TOKEN' });
+    const { client, liveGets, close } = await harness((path) => live.get(path));
+    try {
+      // What a Pro tool refused by the same answer reports.
+      const gated = await toolHandler(async () => live.get('/regime/fits/AAPL/history'))({}) as any;
+      expect(gated.structuredContent.actionUrl).toBe('https://www.optionsanalysissuite.com/pricing');
+      for (const transcript of [{}, { fiscalYear: 2026, quarter: 2 }, { query: 'tariffs' }]) {
+        const result = await client.callTool({ name: 'get_earnings', arguments: { symbol: 'AAPL', transcript } });
+        expect(result.isError).not.toBe(true);
+        const wire = result.structuredContent as any;
+        expect(wire.summary.latestReported.date).toBe('2026-07-30');
+        expect(wire.transcript).toEqual({
+          dataAvailable: false, code: 'PRO_TIER_REQUIRED', message: 'This feature requires a Pro subscription', retryable: false,
+          actionUrl: gated.structuredContent.actionUrl,
+        });
+        // A client that reads the text alone is given the same link.
+        expect(JSON.parse((result.content as { type: string; text: string }[])[0].text)).toEqual(wire);
+      }
+      expect(liveGets).toEqual(['/earnings/AAPL/transcripts/summary', '/earnings/AAPL/transcripts/summary?fiscalYear=2026&quarter=2', '/earnings/AAPL/transcripts/search?q=tariffs']);
+    } finally {
+      globalThis.fetch = realFetch;
       await close();
     }
   });

@@ -291,3 +291,26 @@ describe('regime fits name the parameters a fit left on an optimizer bound', () 
     expect(model('bates').paramsAtBounds).toBeNull();
   });
 });
+
+// A fit that did not report the quality check is unknown, not passing - counted apart from the failing days,
+// so fitDays minus daysFailingQualityCheck never reads as days that passed.
+describe('quality checks a fit did not report', () => {
+  it('are counted apart from the failing days, and get past the wire sanitizer', () => {
+    const shaped = summarizeRegimeFits({
+      symbol: 'SPY',
+      data: [
+        fit({ market_date: '2026-09-09', fit_error: { iv_rmse: 0.9, is_fallback: true } }),
+        fit({ market_date: '2026-09-08', fit_error: { iv_rmse: 0.01, is_fallback: false } }),
+        fit({ market_date: '2026-09-07', fit_error: { iv_rmse: 0.02 } }),
+        fit({ market_date: '2026-09-06', fit_error: null }),
+      ],
+    });
+    expect(shaped.models[0]).toMatchObject({ fitDays: 4, daysFailingQualityCheck: 1, daysQualityCheckUnreported: 2 });
+    expectSanitizerLeavesIntact(shaped);
+  });
+
+  it('control: every fit reporting the check leaves none unreported', () => {
+    const shaped = summarizeRegimeFits({ symbol: 'SPY', data: [fit({ fit_error: { iv_rmse: 0.01, is_fallback: false } })] });
+    expect(shaped.models[0]).toMatchObject({ fitDays: 1, daysFailingQualityCheck: 0, daysQualityCheckUnreported: 0 });
+  });
+});

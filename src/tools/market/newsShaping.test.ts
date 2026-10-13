@@ -1965,3 +1965,71 @@ describe('shapeNewsResponse', () => {
     );
   });
 });
+
+// An impossible date is no date. Date.UTC and Date.parse roll one over (2026-02-31 became March 3), so the
+// date a BusinessWire URL, a dateline or a published date names must exist; when it does not, the next source
+// stands in, and with none the article carries no date.
+describe('shapeNewsResponse: impossible dates', () => {
+  const META_PROFILE = {
+    company_name: 'Meta Platforms, Inc.',
+    description: 'Meta builds social media and advertising platforms and invests in AI infrastructure.',
+    sector: 'Communication Services',
+    industry: 'Internet Content & Information',
+  };
+  const article = (over: Record<string, unknown>) => ({
+    title: 'Meta Announces Quarterly Cash Dividend',
+    source: 'Press Release',
+    url: 'https://example.com/meta-dividend',
+    is_press_release: true,
+    summary: 'Meta Platforms, Inc. declared a quarterly cash dividend.',
+    ...over,
+  });
+  const dateOf = (over: Record<string, unknown>) => {
+    const result = shapeNewsResponse('META', { results: [article(over)] }, META_PROFILE) as { results: Array<Record<string, unknown>> };
+    expect(result.results).toHaveLength(1);
+    return result.results[0]?.date;
+  };
+
+  test('a BusinessWire URL naming no real day gives no date, never the day it rolls over to', () => {
+    expect(dateOf({ url: 'https://www.businesswire.com/news/home/20260231227994/en/Meta-dividend/' })).toBeUndefined();
+    expect(dateOf({ url: 'https://www.businesswire.com/news/home/20260015227994/en/Meta-dividend/' })).toBeUndefined();
+    // Date.UTC reads year 50 as 1950.
+    expect(dateOf({ url: 'https://www.businesswire.com/news/home/00500115227994/en/Meta-dividend/' })).toBeUndefined();
+  });
+
+  test('a dateline naming no real day gives no date', () => {
+    expect(dateOf({ summary: 'MENLO PARK, Calif., Feb. 31, 2026 /PRNewswire/ -- Meta Platforms, Inc. declared a quarterly cash dividend.' })).toBeUndefined();
+  });
+
+  test('an impossible BusinessWire date falls through to the dateline, which is real', () => {
+    expect(dateOf({
+      url: 'https://www.businesswire.com/news/home/20260231227994/en/Meta-dividend/',
+      summary: 'MENLO PARK, Calif., Feb. 12, 2026 /PRNewswire/ -- Meta Platforms, Inc. declared a quarterly cash dividend.',
+    })).toBe('2026-02-12T00:00:00.000Z');
+  });
+
+  test('an impossible published date is no date; the inferred one stands in', () => {
+    expect(dateOf({ published_date: '2026-02-31 10:00:00' })).toBeUndefined();
+    expect(dateOf({ published_date: '2026-02-31T10:00:00Z', url: 'https://www.businesswire.com/news/home/20260212227994/en/Meta-dividend/' }))
+      .toBe('2026-02-12T00:00:00.000Z');
+  });
+
+  test('an impossible published date dates nothing in the ranking either: it never makes a real one stale', () => {
+    // 2026-04-31 read as May 1 made the April 20 release 11 days old, past the 10-day stale cut, and dropped it.
+    const result = shapeNewsResponse('META', {
+      results: [
+        article({ published_date: '2026-04-20T10:00:00Z' }),
+        article({ title: 'Meta expands AI data center buildout', is_press_release: false, url: 'https://example.com/meta-ai', summary: 'Meta Platforms is expanding its AI data center buildout.', published_date: '2026-04-31T10:00:00Z' }),
+      ],
+    }, META_PROFILE) as { results: Array<Record<string, unknown>>; _results_meta?: Record<string, unknown> };
+    expect(result.results.map((item) => item.title).sort()).toEqual(['Meta Announces Quarterly Cash Dividend', 'Meta expands AI data center buildout']);
+    expect(result.results.find((item) => item.title === 'Meta expands AI data center buildout')?.date).toBeUndefined();
+  });
+
+  test('control: real dates are kept as given or inferred', () => {
+    expect(dateOf({ published_date: '2026-02-28 10:00:00' })).toBe('2026-02-28 10:00:00');
+    expect(dateOf({ published_date: 'Thu, 12 Feb 2026 10:00:00 GMT' })).toBe('Thu, 12 Feb 2026 10:00:00 GMT');
+    expect(dateOf({ url: 'https://www.businesswire.com/news/home/20240229227994/en/Meta-dividend/' })).toBe('2024-02-29T00:00:00.000Z');
+    expect(dateOf({ summary: 'MENLO PARK, Calif., Dec. 31, 2025 /PRNewswire/ -- Meta Platforms, Inc. declared a quarterly cash dividend.' })).toBe('2025-12-31T00:00:00.000Z');
+  });
+});

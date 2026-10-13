@@ -574,3 +574,137 @@ describe('quarterly statistics (phase D2)', () => {
     expect(INSIDER_TRADING_DESCRIPTION).toContain('Form 3 holdings are left out, and an amendment is not reconciled with the filing it amends.');
   });
 });
+
+// A share count, price or value the filing lines do not carry is unknown, never 0 - left out of each sum and
+// counted beside it, and a sum none of whose parts is known is null.
+describe('insider sums never fold an unknown in as 0', () => {
+  const line = (over: Record<string, unknown>) => ({
+    reportingName: 'Doe Jane', formType: '4', transactionType: 'P-Purchase', securityName: 'Common Stock',
+    filingDate: '2026-09-02', transactionDate: '2026-09-01', url: 'https://www.sec.gov/x', securitiesTransacted: 10, price: 5, ...over,
+  });
+
+  test('a line without a share count is left out of its event\'s shares and value and counted', () => {
+    const [event] = groupInsiderTrades([line({}), line({ securitiesTransacted: undefined })]);
+    expect(event).toMatchObject({ rawCount: 2, sharesTransacted: 10, totalValue: 50, price: 5, linesWithoutShares: 1, linesWithoutPrice: 0 });
+  });
+
+  test('an event none of whose lines carries a share count has sharesTransacted null, never 0', () => {
+    const [event] = groupInsiderTrades([line({ securitiesTransacted: null }), line({ securitiesTransacted: 'n/a' })]);
+    expect(event).toMatchObject({ rawCount: 2, sharesTransacted: null, totalValue: null, price: null, linesWithoutShares: 2, linesWithoutPrice: 0 });
+    // A line with neither is counted once, as a line without shares.
+    const [bare] = groupInsiderTrades([line({ securitiesTransacted: null, price: null })]);
+    expect(bare).toMatchObject({ sharesTransacted: null, linesWithoutShares: 1, linesWithoutPrice: 0 });
+    const r = shapeInsiderTradingResponse({ symbol: 'X', insider_trades: [line({ securitiesTransacted: null })] }) as any;
+    expect(r.insider_trades[0]).toMatchObject({ sharesTransacted: null, totalValue: null, linesWithoutShares: 1 });
+  });
+
+  test('a line with shares and no price is left out of the event\'s value and counted', () => {
+    const [event] = groupInsiderTrades([line({}), line({ securitiesTransacted: 20, price: null })]);
+    expect(event).toMatchObject({ sharesTransacted: 30, totalValue: 50, price: 5, linesWithoutShares: 0, linesWithoutPrice: 1 });
+    const r = shapeInsiderTradingResponse({ symbol: 'X', insider_trades: [line({}), line({ securitiesTransacted: 20, price: null })] }) as any;
+    expect(r.insider_trades[0]).toMatchObject({ sharesTransacted: 30, totalValue: 50, linesWithoutPrice: 1 });
+    expect('linesWithoutShares' in r.insider_trades[0]).toBe(false);
+  });
+
+  test('control: fully carried lines publish no counts', () => {
+    const r = shapeInsiderTradingResponse({ symbol: 'X', insider_trades: [line({}), line({ securitiesTransacted: 0, price: null })] }) as any;
+    expect(r.insider_trades[0]).toMatchObject({ sharesTransacted: 10, totalValue: 50 });
+    expect('linesWithoutShares' in r.insider_trades[0]).toBe(false);
+    expect('linesWithoutPrice' in r.insider_trades[0]).toBe(false);
+    expect(r.summary).toMatchObject({ purchases: 1, sales: 0, purchaseValue: 50, saleValue: 0, netValue: 50 });
+    expect('purchasesWithoutValue' in r.summary).toBe(false);
+    expect('salesWithoutValue' in r.summary).toBe(false);
+    // A line of 0 shares is valued (at 0), so its event is not valued in part.
+    expect('purchasesPartiallyValued' in r.summary).toBe(false);
+  });
+
+  test('the summary sums the events that carry a value, counts the rest, and has no value or net when none does', () => {
+    const r = shapeInsiderTradingResponse({
+      symbol: 'X',
+      insider_trades: [
+        line({}),
+        line({ reportingName: 'Roe Rick', price: null }),
+        line({ reportingName: 'Poe Pat', transactionType: 'S-Sale', price: null }),
+      ],
+    }) as any;
+    expect(r.summary).toMatchObject({ purchases: 2, sales: 1, purchaseValue: 50, saleValue: null, netValue: null, purchasesWithoutValue: 1, salesWithoutValue: 1 });
+    const unvaluedPurchase = shapeInsiderTradingResponse({
+      symbol: 'X',
+      insider_trades: [line({ price: null }), line({ reportingName: 'Poe Pat', transactionType: 'S-Sale', price: 7 })],
+    }) as any;
+    expect(unvaluedPurchase.summary).toMatchObject({ purchases: 1, sales: 1, purchaseValue: null, saleValue: 70, netValue: null, purchasesWithoutValue: 1 });
+  });
+
+  test('another CIK\'s purchases and sales: the same rule', () => {
+    const other = (over: Record<string, unknown>) => line({ companyCik: '0000000100', ...over });
+    const r = shapeInsiderTradingResponse({ symbol: 'X', insider_trades: [line({ companyCik: '200' }), other({ price: null }), other({ reportingName: 'Roe Rick', transactionType: 'S-Sale', price: 7 })] }, { cik: '200' }) as any;
+    expect(r.otherIssuers[0]).toMatchObject({ companyCik: '100', purchases: 1, sales: 1, purchaseValue: null, saleValue: 70, purchasesWithoutValue: 1 });
+    expect('salesWithoutValue' in r.otherIssuers[0]).toBe(false);
+  });
+
+  // An event with some lines valued and some not carries a value that leaves those lines out. The
+  // sums it enters count it beside them, so the warning outlives its own row (cut from the ten listed, or under
+  // another CIK, where no row is listed).
+  test('the summary counts the events valued only in part, after the ten listed leave them out', () => {
+    const complete = Array.from({ length: 10 }, (_, i) => line({ reportingName: `Complete ${i}`, transactionDate: '2026-09-02' }));
+    const r = sanitizeMcpWireOutput(shapeInsiderTradingResponse({
+      symbol: 'X',
+      insider_trades: [...complete, line({ reportingName: 'Partly Priced' }), line({ reportingName: 'Partly Priced', securitiesTransacted: 1000, price: null })],
+    })) as any;
+    expect(r.insiderTrades.map((event: any) => event.reportingName)).not.toContain('Partly Priced');
+    expect(r.summary).toMatchObject({ purchases: 11, sales: 0, purchaseValue: 550, saleValue: 0, netValue: 550, purchasesPartiallyValued: 1 });
+    expect('purchasesWithoutValue' in r.summary).toBe(false);
+    expect('salesPartiallyValued' in r.summary).toBe(false);
+  });
+
+  test('a line without a share count leaves its event valued in part as a line without a price does, on either side', () => {
+    const r = shapeInsiderTradingResponse({
+      symbol: 'X',
+      insider_trades: [
+        line({}),
+        line({ securitiesTransacted: null }),
+        line({ reportingName: 'Roe Rick' }),
+        line({ reportingName: 'Roe Rick', price: null }),
+        line({ reportingName: 'Poe Pat', transactionType: 'S-Sale', price: 7 }),
+        line({ reportingName: 'Poe Pat', transactionType: 'S-Sale', price: null }),
+      ],
+    }) as any;
+    expect(r.summary).toMatchObject({ purchases: 2, sales: 1, purchaseValue: 100, saleValue: 70, netValue: 30, purchasesPartiallyValued: 2, salesPartiallyValued: 1 });
+    expect('purchasesWithoutValue' in r.summary).toBe(false);
+    expect('salesWithoutValue' in r.summary).toBe(false);
+  });
+
+  test('an event none of whose lines is valued is counted without value, never as valued in part', () => {
+    const r = shapeInsiderTradingResponse({ symbol: 'X', insider_trades: [line({ price: null }), line({ securitiesTransacted: null })] }) as any;
+    expect(r.summary).toMatchObject({ purchases: 1, purchaseValue: null, netValue: null, purchasesWithoutValue: 1 });
+    expect('purchasesPartiallyValued' in r.summary).toBe(false);
+  });
+
+  test('another CIK\'s events valued in part are counted in its entry', () => {
+    const other = (over: Record<string, unknown>) => line({ companyCik: '0000000100', ...over });
+    const r = sanitizeMcpWireOutput(shapeInsiderTradingResponse({
+      symbol: 'X',
+      insider_trades: [
+        other({}),
+        other({ securitiesTransacted: 1000, price: null }),
+        other({ reportingName: 'Poe Pat', transactionType: 'S-Sale', price: 7 }),
+        other({ reportingName: 'Poe Pat', transactionType: 'S-Sale', securitiesTransacted: null }),
+      ],
+    }, { cik: '200' })) as any;
+    expect(r.otherIssuers).toEqual([{
+      companyCik: '100', lines: 4, period: { from: '2026-09-01', through: '2026-09-01' }, securityNames: ['Common Stock'],
+      purchases: 1, sales: 1, purchaseValue: 50, saleValue: 70, purchasesPartiallyValued: 1, salesPartiallyValued: 1,
+    }]);
+  });
+
+  test('the description names the counts of events valued in part', async () => {
+    const { INSIDER_TRADING_DESCRIPTION } = await import('./insiderTrading.js');
+    expect(INSIDER_TRADING_DESCRIPTION).toContain('`purchasesPartiallyValued` and `salesPartiallyValued` count the events valued only in part');
+  });
+
+  test('market: a count the proxy did not send is null, and a side with neither count nor value has no net', () => {
+    const out = shapeMarketInsiderTrades({ ...MARKET, summary: { purchases: { value: 100 }, topPurchases: [{ symbol: 'KOD', value: 10 }], topSales: [] } }, 'purchases') as any;
+    expect(out.totals).toEqual({ purchases: { lines: null, value: 100 }, sales: { lines: null, value: null }, netValue: null });
+    expect(out.topPurchases).toEqual([{ symbol: 'KOD', lines: null, value: 10 }]);
+  });
+});

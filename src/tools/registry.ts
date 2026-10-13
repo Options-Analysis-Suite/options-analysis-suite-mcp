@@ -140,7 +140,8 @@ export function registerAllTools(
   // is what makes that answer specific.
   //
   // get_options_snapshot and get_regime_fits spend no broker call, so both
-  // keep openWorldHint false. The snapshot reads are anonymous on the proxy.
+  // keep openWorldHint false. Neither snapshot read checks the plan on the
+  // proxy (the single-symbol one is public, the batch one needs a signed-in user).
   liveOptionsChain(server, liveClient);
   optionsSnapshot(server, liveClient);
   regimeFits(server, liveClient);

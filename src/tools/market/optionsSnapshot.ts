@@ -9,8 +9,10 @@ const MAX_BATCH_SYMBOLS = 50;
 
 /**
  * The EOD options snapshot, and the multi-symbol comparison, from the proxy's
- * /scanner/snapshot/:symbol and /scanner/metrics/batch. Both are anonymous
- * there, so this tool carries no tier requirement.
+ * /scanner/snapshot/:symbol and /scanner/metrics/batch. The snapshot route is
+ * public; the batch route needs a signed-in user (this client always sends the
+ * user's bearer) and allows 60 requests a minute per account. Neither checks
+ * the plan, so this tool carries no tier requirement.
  *
  * NOT get_snapshot. That reads snapshots the WEB APP synced from a browser
  * session - the user's own GEX, portfolio and risk views. This reads the

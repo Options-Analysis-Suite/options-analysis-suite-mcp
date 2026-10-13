@@ -239,17 +239,25 @@ describe('short-volume stats: a field is a date by its name, never by its eight 
       averageShortPercentage: 51.02, maxShortPercentage: 63.4, maxShortDate: '2026-01-05',
       minShortPercentage: 38.1, minShortDate: '2025-06-11', totalShortVolume: 3226010578, totalVolume: 6573012004,
     });
-    const empty = summarizeShortVolume({
+    // The no-rows answer is an honest empty (it was a latest day of 0 shares at 0.00% with averages and year
+    // statistics of zeros): no latest day, no averages, no year statistics, and no figure made from them.
+    const empty = summarizeShortVolume({ symbol: 'ZZZQ', lastUpdate: null, latest: null, history: [], averages: null, yearStats: null }) as any;
+    expect(empty).toEqual({
       symbol: 'ZZZQ',
       lastUpdate: null,
-      latest: { date: null, shortVolume: 0, totalVolume: 0, shortPercent: '0.00', shortPercentage: '0.00', shortExemptVolume: 0, markets: [] },
-      history: [],
-      averages: { avgShortVolume: 0, avgTotalVolume: 0, avgShortPercentage: '0.00' },
-      yearStats: { averageShortPercentage: '0.00', maxShortPercentage: '0.00', maxShortDate: '', minShortPercentage: '0.00', minShortDate: '', totalShortVolume: 0, totalVolume: 0 },
-    }) as any;
-    expect(empty.lastUpdate).toBeNull();
-    expect(empty.yearStats.maxShortDate).toBeNull();
-    expect(empty.yearStats.minShortDate).toBeNull();
+      latest: null,
+      summary: {
+        trailingAverageShortPercent: null,
+        latestVsTrailingAveragePctPoints: null,
+        recentTrend: null,
+        highestRecentShortPercent: null,
+        lowestRecentShortPercent: null,
+      },
+      recentHistory: [],
+      trailingAverages: null,
+      yearStats: null,
+      _recent_history_meta: undefined,
+    });
   });
 
   it('the row dates and lastUpdate are dates or null, never a string that is not one', () => {

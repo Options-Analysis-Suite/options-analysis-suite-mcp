@@ -102,6 +102,7 @@ type BuiltModel = {
   fit: FitError;
   fitDays: number;
   daysFailingQualityCheck: number;
+  daysQualityCheckUnreported: number;
   history: Array<{ date: string | null; ivRmse: number | null; failedQualityCheck: boolean | null }>;
 };
 
@@ -227,6 +228,9 @@ export function summarizeRegimeFits(
         fit: latest?.fit ?? readFitError(null),
         fitDays: entries.length,
         daysFailingQualityCheck: entries.filter((e) => e.fit.failedQualityCheck === true).length,
+        // A fit that did not report the check is unknown, not passing: counted
+        // apart, so fitDays minus the failing days never reads as days passed.
+        daysQualityCheckUnreported: entries.filter((e) => e.fit.failedQualityCheck === null).length,
         history: entries.slice(0, historyLimit)
           .map((e) => ({ date: e.date, ivRmse: e.fit.ivRmse, failedQualityCheck: e.fit.failedQualityCheck })),
       };
