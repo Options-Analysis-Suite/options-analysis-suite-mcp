@@ -28,7 +28,8 @@ export function register(server: McpServer, client: LiveApiClient): void {
       title: 'Black-Scholes Pricing (Pro)',
       description:
         'Price a European option with Black-Scholes from explicit inputs and return the price, all seventeen Greeks, the expected move and the risk-neutral probability of finishing in the money. '
-        + 'Greeks are published in the same convention as the commercial API (`greekConvention: "dapi"`): vega, rho, epsilon and phi per 1 percentage point; theta, charm, color and dcharmDvol per day; veta per percentage point per day; vanna, vomma, zomma and ultima per unit of volatility; delta, gamma, speed and lambda unscaled. '
+        + 'Greeks are published in the same convention as the commercial API (`greekConvention: "dapi"`): vega, rho, epsilon and phi per 1 percentage point; theta, charm and color per day; veta per percentage point per day; dcharmDvol per day per unit of volatility; vanna, vomma, zomma and ultima per unit of volatility; delta, gamma, speed and lambda unscaled. '
+        + 'The five time Greeks are what one day of time passing does (`greekTimeConvention: "time-passing"`): theta the change in price (negative for a long option losing value), charm in delta, color in gamma and veta in vega; dcharmDvol is the change in that daily charm per unit of volatility, which is the day\'s change in vanna. '
         + 'The expected move is an at-the-money straddle scaled by 0.85, independent of the strike priced. The probability is N(d2) under the pricing measure, not a real-world probability. '
         + 'Supply exactly one of `t` (years) or `daysToExpiry`. Supply `r` and `q`, or a `symbol` so they are read from stored market data for the option\'s own tenor; they are never defaulted, and a symbol whose rate or yield cannot be resolved is refused with the reason. '
         + 'Volatility is a decimal (0.25 for 25%). Requires a Pro subscription or above. '

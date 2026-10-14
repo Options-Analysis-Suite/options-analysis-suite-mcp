@@ -1833,9 +1833,21 @@ describe('MCP tool output schemas', () => {
     expect(text).toContain('dcharmDvol by 100');
     // The time-convention change: the web app's time Greeks are on the time-passing sign on a
     // tagged record, the remaining-maturity sign (charm, color, dcharmDvol) on
-    // a legacy one, and dapi's charm, color, dcharmDvol and veta are
-    // remaining-maturity
-    expect(text).toContain('charm, color, dcharmDvol and veta differ in sign from a web record tagged "time-passing" (only veta from a legacy one)');
+    // a legacy one. dapi's five are time-passing since 2026-10-13, named by
+    // greekTimeConvention, and an untagged dapi response is the old sign
+    expect(text).toContain('dapi and a web record tagged "time-passing" carry all five time Greeks on the same time-passing sign, while a legacy web record\'s charm, color and dcharmDvol differ in sign from dapi\'s');
+    expect(text).toContain('every response names it as greekTimeConvention: "time-passing"; a dapi response without that tag predates 2026-10-13 and carries charm, color, dcharmDvol and veta on the opposite, remaining-maturity sign');
+    expect(text).toContain('dcharmDvol per day per unit of volatility');
+    expect(text).not.toContain('not negated');
+    // The dealer exposure sweeps keep their own (unchanged) sign, said in words
+    expect(text).toContain('Dealer exposure charm is NOT on the time-passing sign');
+    expect(text).toContain('dealer dollar charm per calendar day on the remaining-maturity sign for the dealer - one day of time passing moves the dealers\' dollar delta by minus it');
+    // dcharmDvol is the day's change in vanna (the daily charm per unit of volatility), not the day's change in charm
+    const bs = on.tools.find((t) => t.name === 'compute_black_scholes')!;
+    expect((bs as any).config.description).toContain('which is the day\'s change in vanna');
+    expect((bs as any).config.description).not.toContain('dcharmDvol in charm');
+    const live = on.tools.find((t) => t.name === 'get_live_dealer_positioning')!;
+    expect((live as any).config.description).toContain('remaining-maturity sign for the dealer');
     expect(displayBullet).toContain('greekTimeConvention "time-passing"');
     expect(displayBullet).toContain('legacy: model-dependent time sign');
     expect(rollupsLine).toContain('avgThetaConvention');
