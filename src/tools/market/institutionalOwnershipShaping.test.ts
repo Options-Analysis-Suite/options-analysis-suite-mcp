@@ -116,7 +116,7 @@ describe('get_institutional_ownership: a market cap another security of the comp
 });
 
 
-describe('etfHolders (phase C)', () => {
+describe('etfHolders', () => {
   const HOLDERS = { symbol: 'NVDA', fundsOnFile: 2, limit: 10, note: 'n', asReported: 'Shares, value and weight are as reported in each file.',
     holders: [{ fund: 'IVV', fundName: 'iShares Core S&P 500 ETF', weightPct: 8, shares: 300, marketValue: 54000, holdingsUpdated: '2026-10-09', holdingsReadAt: '2026-10-10T07:00:00Z', basisInherited: true, basisCountReadOn: '2026-09-01', inheritedNote: 'x', splitWarnings: [{ date: '2026-10-12', ratio: '2-for-1', note: 'y' }] },
       { fund: 'SPY', fundName: 'State Street SPDR S&P 500 ETF', weightPct: 7.9, shares: null, marketValue: 27000, holdingsUpdated: '2026-10-09', holdingsReadAt: '2026-10-10T07:00:00Z', basisInherited: false, basisCountReadOn: null, inheritedNote: null, splitWarnings: [] }] };

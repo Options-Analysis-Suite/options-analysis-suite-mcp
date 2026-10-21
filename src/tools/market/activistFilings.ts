@@ -15,11 +15,11 @@ export function register(server: McpServer, client: ProxyClient): void {
         symbol: z.string().describe('Ticker symbol'),
         full: z.boolean().optional().describe('Return the raw filing list instead of the compact current-holder summary.'),
       },
-      // OpenAI app review treats openWorldHint as public-state mutation. This
-      // tool may read public SEC EDGAR ownership filings through the proxy, but
-      // it cannot submit filings or change public or third-party systems.
+      // openWorldHint is true for public internet access, including read-only calls (OpenAI Apps SDK).
+      // The proxy reads SEC EDGAR ownership filings live. It cannot submit filings or change any public
+      // or third-party system.
       outputSchema: marketDataOutputSchema,
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     },
     toolHandler(async ({ symbol, full }) => {
       const response = await client.get(`/activist-filings/${encodeURIComponent(symbol.toUpperCase())}`) as any;

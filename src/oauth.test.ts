@@ -524,30 +524,120 @@ describe('connector OAuth telemetry (PII-free)', () => {
       else process.env.OAS_TOKEN_SECRET = originalSecret;
     }
   });
+});
 
-  test('the sign-in page hint appears only when provider sign-in is enabled', () => {
-    const authorizeBody = () => handleAuthorizeGet(new URLSearchParams({
-      client_id: 'test',
-      redirect_uri: 'https://chatgpt.com/connector/oauth/cb_abc123',
-      state: 'xyz',
-      code_challenge: 'a'.repeat(43),
-      code_challenge_method: 'S256',
-    })).body;
+// The sign-in page on the website's card: the brand lockup, the website's heading and
+// copy, the four provider marks in the website's order, the recovery link, and a policy that admits the logo from
+// this origin and nothing else external.
+describe('the sign-in page on the website card', () => {
+  const LOCKUP = '<div class="lockup"><img src="/logo.webp" alt="" width="40" height="28"><span>Options Analysis Suite</span></div>';
+  const REDIRECT = 'https://chatgpt.com/connector/oauth/cb_abc123';
 
-    const originalSecret = process.env.OAS_MCP_HANDOFF_SECRET;
+  function signInPage() {
+    return handleAuthorizeGet(new URLSearchParams({
+      client_id: 'test', redirect_uri: REDIRECT, state: 'xyz', code_challenge: 'a'.repeat(43), code_challenge_method: 'S256',
+    }));
+  }
+
+  async function withProviders<T>(enabled: boolean, fn: () => T | Promise<T>): Promise<T> {
+    const original = process.env.OAS_MCP_HANDOFF_SECRET;
+    if (enabled) process.env.OAS_MCP_HANDOFF_SECRET = 'x'.repeat(40); // >= 32 chars enables providers
+    else delete process.env.OAS_MCP_HANDOFF_SECRET;
     try {
-      process.env.OAS_MCP_HANDOFF_SECRET = 'x'.repeat(40); // >= 32 chars enables providers
-      const withProviders = authorizeBody();
-      expect(withProviders).toContain('Continue with Google');
-      expect(withProviders).toContain('works only if you created a password');
-
-      delete process.env.OAS_MCP_HANDOFF_SECRET;
-      const withoutProviders = authorizeBody();
-      expect(withoutProviders).not.toContain('Continue with Google');
-      expect(withoutProviders).not.toContain('works only if you created a password');
+      return await fn();
     } finally {
-      if (originalSecret === undefined) delete process.env.OAS_MCP_HANDOFF_SECRET;
-      else process.env.OAS_MCP_HANDOFF_SECRET = originalSecret;
+      if (original === undefined) delete process.env.OAS_MCP_HANDOFF_SECRET;
+      else process.env.OAS_MCP_HANDOFF_SECRET = original;
     }
+  }
+
+  test('the card opens with the lockup, then the heading and the subtitle, under the website title', async () => {
+    const body = await withProviders(true, () => signInPage().body);
+    expect(body.split(LOCKUP).length - 1).toBe(1);
+    expect(body).toContain('<h1>Connect your account</h1>');
+    expect(body).toContain('<p class="subtitle">Log in to give your AI assistant access to your Options Analysis Suite account.</p>');
+    expect(body).toContain('<title>Log in - Options Analysis Suite</title>');
+    expect(body.indexOf(LOCKUP)).toBeLessThan(body.indexOf('<h1>'));
+    expect(body).not.toContain('class="brand"');
+    expect(body).not.toContain('class="hint"');
+    expect(body).not.toContain('works only if you created a password');
+  });
+
+  test('with provider sign-in enabled, the four buttons carry the website marks in the website order, then the divider', async () => {
+    const body = await withProviders(true, () => signInPage().body);
+    const buttons = [...body.matchAll(/<a class="provider-btn" href="([^"]+)">([\s\S]*?)<\/a>/g)];
+    expect(buttons.map((m) => m[2].replace(/<svg[\s\S]*?<\/svg>/, '').trim()))
+      .toEqual(['Continue with Google', 'Continue with Microsoft', 'Continue with Apple', 'Continue with GitHub']);
+    expect(buttons.map((m) => new URL(m[1].replace(/&amp;/g, '&'), 'https://mcp.test').searchParams.get('provider')))
+      .toEqual(['google', 'azure', 'apple', 'github']);
+    const marks = buttons.map((m) => m[2].match(/<svg[^>]*>[\s\S]*?<\/svg>/)?.[0] ?? '');
+    expect(marks.every((svg) => svg.includes('aria-hidden="true"'))).toBe(true);
+    expect(marks[0]).toContain('viewBox="0 0 18 18"');
+    for (const fill of ['#4285F4', '#34A853', '#FBBC05', '#EA4335']) expect(marks[0]).toContain(`fill="${fill}"`);
+    expect(marks[1]).toContain('viewBox="0 0 21 21"');
+    for (const fill of ['#f25022', '#7fba00', '#00a4ef', '#ffb900']) expect(marks[1]).toContain(`fill="${fill}"`);
+    expect(marks[2]).toContain('viewBox="0 0 384 512"');
+    expect(marks[2]).toContain('fill="currentColor"');
+    expect(marks[3]).toContain('viewBox="0 0 496 512"');
+    expect(marks[3]).toContain('fill="currentColor"');
+    expect(body).toContain('<div class="divider"><span>or</span></div>');
+    expect(body.indexOf('class="provider-btn"')).toBeLessThan(body.indexOf('<div class="divider">'));
+    expect(body.indexOf('<div class="divider">')).toBeLessThan(body.indexOf('<form'));
+    expect(body).toContain('<p class="aside">Signed up with a provider? Use its button above unless you added a password to your account.</p>');
+    expect(body).not.toContain('have no password');
+    expect(body.indexOf('</form>')).toBeLessThan(body.indexOf('Signed up with a provider?'));
+  });
+
+  test('without provider sign-in, the card holds the lockup, the form and the recovery link alone', async () => {
+    const body = await withProviders(false, () => signInPage().body);
+    expect(body).toContain(LOCKUP);
+    expect(body).not.toContain('class="provider-btn"');
+    expect(body).not.toContain('class="divider"');
+    expect(body).not.toContain('Signed up with a provider?');
+    expect(body).toContain('href="https://optionsanalysissuite.com/forgot-password">Forgot your password?</a>');
+  });
+
+  test('the form says Log in and connect and offers password recovery under it', async () => {
+    const body = await withProviders(true, () => signInPage().body);
+    expect(body).toContain('>Log in and connect</button>');
+    expect(body).not.toMatch(/Sign In/);
+    expect(body).toContain('autocomplete="email"');
+    expect(body).toContain('autocomplete="current-password"');
+    expect(body).toContain('placeholder="Enter your password"');
+    expect(body).toContain('<p class="aside"><a href="https://optionsanalysissuite.com/forgot-password">Forgot your password?</a></p>');
+    expect(body.indexOf('</form>')).toBeLessThan(body.indexOf('Forgot your password?'));
+  });
+
+  test('the two-factor page opens with the lockup and says Verify and connect', async () => {
+    globalThis.fetch = (async (_url: string | URL | Request) => new Response(JSON.stringify({ requiresMfa: true, code: 'mfa_required', stepUpToken: 'step-token-9' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json', 'Set-Cookie': 'gotrueRefreshToken=refresh-9; Path=/api/v1/oauth; HttpOnly; SameSite=Lax' },
+    })) as typeof fetch;
+    const { body } = await handleAuthorizePost(authorizePostBody().toString());
+    expect(body).toContain('<h1>Two-factor verification</h1>');
+    expect(body.split(LOCKUP).length - 1).toBe(1);
+    expect(body.indexOf(LOCKUP)).toBeLessThan(body.indexOf('<h1>'));
+    expect(body).toContain('<title>Two-factor verification - Options Analysis Suite</title>');
+    expect(body).toContain('>Verify and connect</button>');
+    expect(body).not.toContain('class="brand"');
+    expect(body).not.toContain('Authorize');
+  });
+
+  test('the pages admit images from this origin and nothing else external', () => {
+    const csp = signInPage().headers['Content-Security-Policy'];
+    expect(csp.startsWith("default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; form-action ")).toBe(true);
+  });
+
+  test('a failed password sign-in re-renders the card with the error above the buttons and the email kept', async () => {
+    globalThis.fetch = (async (_url: string | URL | Request) => new Response(JSON.stringify({ error: 'Invalid email or password' }), {
+      status: 401, headers: { 'Content-Type': 'application/json' },
+    })) as typeof fetch;
+    const body = await withProviders(true, async () => (await handleAuthorizePost(authorizePostBody({ password: 'wrong' }).toString())).body);
+    expect(body).toContain(LOCKUP);
+    expect(body).toContain('class="error"');
+    expect(body.indexOf('<p class="subtitle">')).toBeLessThan(body.indexOf('class="error"'));
+    expect(body.indexOf('class="error"')).toBeLessThan(body.indexOf('class="provider-btn"'));
+    expect(body).toContain('value="dev@example.com"');
+    expect(body).toContain('>Log in and connect</button>');
   });
 });

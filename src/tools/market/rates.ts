@@ -29,11 +29,12 @@ export function register(server: McpServer, client: ProxyClient): void {
         full: z.boolean().optional().describe('Only for view=curve: return the raw curve payload with historical observations.'),
         tenorYears: z.number().min(0.000001).max(100).optional().describe('Only for view=benchmark: a maturity in years (0.08 is a month); answers the Treasury rate matched to it, the rate the platform prices an option of that maturity at.'),
       },
-      // OpenAI app review treats openWorldHint as public-state mutation. This
-      // tool may read public rate feeds through the proxy, but it cannot
-      // publish, submit, trade, or change public or third-party systems.
+      // openWorldHint is true for public internet access, including read-only calls (OpenAI Apps SDK).
+      // The 10-year benchmark without tenorYears can fall back to live public rate feeds when the synced
+      // store is missing or stale (proxy RiskFreeRateCache). Matched-tenor and yield-curve reads use stored data only.
+      // It cannot publish, submit, trade, or change any public or third-party system.
       outputSchema: marketDataOutputSchema,
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     },
     toolHandler(async ({ view, weeks, full, tenorYears }) => {
       if (view === 'benchmark') {

@@ -1,5 +1,5 @@
 /**
- * get_regime scope cot (phase H): the proxy's /cot/:symbol (a contract's
+ * get_regime scope cot: the proxy's /cot/:symbol (a contract's
  * family market) and /market/cot (every mapped market), shaped for a model.
  * The proxy has already applied the units rule, the 3-year window and the
  * order; this keeps its numbers as they are and trims the history.

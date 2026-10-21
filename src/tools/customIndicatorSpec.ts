@@ -46,7 +46,7 @@ export function splitSubsections(part: SpecPart, text: string): SpecSection[] {
   const starts: number[] = [];
   lines.forEach((l, i) => { if (l.startsWith('## ')) starts.push(i); });
   const out: SpecSection[] = [];
-  const taken = new Set<string>();   // every EMITTED id (a numbered one too, so `same`, `same`, `same-2` never collide - the review's round 1)
+  const taken = new Set<string>();   // every EMITTED id (a numbered one too, so `same`, `same`, `same-2` never collide)
   const push = (base: string, title: string, chunk: string[]) => {
     let id = base;
     for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;

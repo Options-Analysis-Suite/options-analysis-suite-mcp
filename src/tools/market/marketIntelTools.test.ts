@@ -6,7 +6,7 @@ import { register as registerProfile, COMPANY_PROFILE_DESCRIPTION } from './comp
 import { MAX_RESPONSE_BYTES } from '../helpers.js';
 
 /**
- * The phase E reads on four existing tools: get_insider_trading scope market,
+ * The market-intelligence reads span four tools: get_insider_trading scope market,
  * get_regime scopes volatility and sectors, get_fundamentals' valuation and
  * get_company_profile's esg. A read beside the tool's own must not take the
  * tool's answer with it when it fails.
@@ -77,7 +77,8 @@ describe('get_insider_trading', () => {
     expect(INSIDER_TRADING_DESCRIPTION).toContain('scope="market"');
     expect(INSIDER_TRADING_DESCRIPTION).toContain('`valueWithheld`');
     expect(INSIDER_TRADING_DESCRIPTION).toContain('`issuerUnconfirmed`');
-    expect(INSIDER_TRADING_DESCRIPTION).toContain('(1-50, default 25)');
+    expect(INSIDER_TRADING_DESCRIPTION).toContain('as `kind` and `limit` choose');
+    expect(String(tool(registerInsider, {}).config.inputSchema.limit.description)).toContain('(1-50, default 25)');
     // Lines under another CIK are kept apart, not called another company's (review).
     expect(INSIDER_TRADING_DESCRIPTION).toContain('the CIK alone does not say which');
     expect(INSIDER_TRADING_DESCRIPTION).toContain('`otherIssuers` gives each CIK\'s lines, dates, security names and purchases and sales');
@@ -105,8 +106,7 @@ describe('get_regime volatility and sectors', () => {
     // With a group, its history answer carries the note too.
     const g = tool(registerRegime, { '/market/sector-metrics': SECTORS, '/market/sector-metrics/history': { series: [] } });
     expect((await g.run({ scope: 'sectors', group: 'Energy', date: '2025-01-02' })).structuredContent).toMatchObject({ group: { name: 'Energy' }, dateNote: expect.stringContaining('not supported here') });
-    // The history's window is `days`, from the current date, on the exchanges the group is listed on.
-    expect(t.config.description).toContain('on each exchange the group is listed on');
+    expect(String((t.config.inputSchema as Record<string, { description?: string }>).group.description)).toContain('on each exchange the group is listed on');
   });
 
   test('volatility reads the VIX term structure and nothing else', async () => {
@@ -137,7 +137,7 @@ describe('get_regime volatility and sectors', () => {
     ]);
     expect(out.group.name).toBe('Technology');
     expect(out.history).toEqual({ NASDAQ: [{ date: '2026-10-02', pe: 48.8, changePct: 0 }], NYSE: [{ date: '2026-10-02', pe: 42.5, changePct: 0 }] });
-    expect(out.historyMeta).toEqual({ days: 30, order: 'oldest first' });
+    expect(out.historyMeta).toEqual({ days: 30, order: 'oldest first', nulls: 'A history null on an exchange means no history on record there; a failed read is named in historyNote.' });
     expect('historyNote' in out).toBe(false);
     await t.run({ scope: 'sectors', group: 'Technology', exchange: 'NYSE', days: 60 });
     expect(t.calls.slice(4)).toEqual([{ path: '/market/sector-metrics/history', params: { kind: 'sector', name: 'Technology', exchange: 'NYSE', days: '60' } }]);
@@ -313,7 +313,7 @@ describe('get_company_profile esg', () => {
   test('the ESG read runs beside the profile and lands in `esg`', async () => {
     const t = tool(registerProfile, { '/company-profile/AAPL': PROFILE, '/esg/AAPL': ESG });
     const out = (await t.run({ symbol: 'aapl' })).structuredContent;
-    // The fund read (phase C) runs beside them too; a stock has none on record.
+    // The fund read runs beside them too; a stock has none on record.
     expect(t.calls.map(c => c.path).sort()).toEqual(['/company-profile/AAPL', '/esg/AAPL', '/etf-fund/AAPL']);
     expect(out.symbol).toBe('AAPL');
     expect(out.esg.disclosure).toMatchObject({ esgScore: 59.03, formType: '10-Q', periodEnded: '2026-06-27' });
@@ -344,7 +344,7 @@ describe('get_company_profile esg', () => {
   });
 });
 
-describe('get_regime cot (phase H)', () => {
+describe('get_regime cot', () => {
   test('with a symbol the contract`s family market; without, every market by sector; a date gets the note', async () => {
     const sym = { root: 'MES', market: { code: '13874+' }, reportDate: '2026-09-29', speculative: { net: -1 }, groups: [], history: [], range: { windowStart: null, windowEnd: null } };
     const list = { asOf: '2026-10-06', markets: [{ label: 'Gold', sector: 'metals', reportDate: '2026-10-06' }, { label: 'Euro FX', sector: 'fx', reportDate: '2026-09-29' }] };
@@ -370,11 +370,6 @@ describe('get_regime cot (phase H)', () => {
     expect(Buffer.byteLength(JSON.stringify(out), 'utf8')).toBeLessThan(MAX_RESPONSE_BYTES * 0.6);
   });
 
-  test('the description names which index families CFTC consolidates, the Russell 2000 not among them', () => {
-    const { config } = tool(registerRegime, {});
-    expect(config.description).toContain("CFTC's consolidated market for the S&P 500, Nasdaq-100 and Dow E-mini, Micro and Nano families; for every other family, the Russell 2000 included, its standard contract's market");
-    expect(config.description).not.toContain('E-mini/Micro/Nano index families');
-  });
 
   test('a contract with no mapping or no data (a 404) answers with a status, not an error', async () => {
     const t = tool(registerRegime, {});

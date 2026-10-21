@@ -24,26 +24,44 @@ import { shapeCotMarket, shapeCotSymbol } from './cotShaping.js';
 // regime-scorer.ts, STATE_THRESHOLDS in regime-config.ts) runs on every scope:
 // daily symbol, intraday and the market composite. "Typical bands" described
 // a lookup the producer does not do, and rode only the market shape.
-const STRESS_SCORE_RULE = '`label` is a state with hysteresis, not a band read off the score. '
-  + 'The five states read as words - Calm, Normal, Elevated, Stress, Crisis - in `label` (and `priorLabel`), with the stored key beside each in `labelKey` (and `priorLabelKey`): CALM, NORMAL, ELEVATED, STRESS, CRISIS, the value to compare or filter on. '
-  + 'Entry levels: Normal -0.5, Elevated 0.5, Stress 1.5, Crisis 2.5, and Calm below -0.5 with no prior; exit levels: Normal -1.0, Elevated 0.0, Stress 1.0, Crisis 2.0. '
-  // The intraday prior is the previous scan only while the worker's store
-  // survives: proxy/data/intraday-regime-<date>.json on the Cron Server's
-  // disk (intraday-regime.ts loadSnapshots/saveSnapshot), which every
-  // redeploy wipes. On 2026-09-17 that service redeployed at 16:08Z and
-  // 17:18Z; the midday and afternoon scans reproduce only against the
-  // 09-16 daily label, the morning and pre-close scans against the scan
-  // before them. Rows written since the producer records it carry the prior
-  // and its source (vector._meta.prevLabel / prevLabelSource), surfaced on
-  // each intraday scan as priorLabel / priorLabelSource.
-  + 'Against the prior label the producer had (for the daily symbol and market scopes, the latest earlier daily label stored for the same symbol, symbol tier and model version; for an intraday scan, the previous scan of the day while the scan worker still holds it, else that same daily label; the worker\'s store of the day\'s scans is a file on its disk that a redeploy between two scans wipes, so the scan after one takes the daily label (SPY\'s 2026-09-17 midday scan, ELEVATED at 0.5987 with confidence 0.9414, was judged against the 2026-09-16 daily label ELEVATED, not the morning scan\'s NORMAL)), a score reaching a higher state\'s entry level moves the label up; otherwise the label is kept until the score falls below its exit level, and then it drops to the highest lower state whose entry level it still meets. '
-  + 'Without a usable prior label, including when the prior could not be read, the label is the highest state whose entry level the score meets. '
-  + 'So a score inside one band can carry the label above it: SPY\'s 2026-09-18 midday scan, 0.4229, is Elevated because the day\'s open scan took the 2026-09-17 daily label, Elevated at 0.506, and no scan since fell below 0.0.';
-
-// The payload carries the rule in short: the full one ran to 1,100 characters
-// on every response and its example named SPY on every symbol.
-const STRESS_SCORE_NOTE = 'stressScore is a raw composite regime score, not a 0-100 index. '
-  + '`label` is a state with hysteresis against the prior label, not a band read off the score (entry Normal -0.5, Elevated 0.5, Stress 1.5, Crisis 2.5; exit -1.0, 0.0, 1.0, 2.0), so a score inside one band can carry the label above it; `label` is the display word and `labelKey` the stored key; the tool description has the full rule.';
+// The intraday prior is the previous scan only while the worker's store
+// survives: proxy/data/intraday-regime-<date>.json on the Cron Server's
+// disk (intraday-regime.ts loadSnapshots/saveSnapshot), which every
+// redeploy wipes. On 2026-09-17 that service redeployed at 16:08Z and
+// 17:18Z; the midday and afternoon scans reproduce only against the
+// 09-16 daily label, the morning and pre-close scans against the scan
+// before them. Rows written since the producer records it carry the prior
+// and its source (vector._meta.prevLabel / prevLabelSource), surfaced on
+// each intraday scan as priorLabel / priorLabelSource.
+// The payload carries the full rule after the tool description is shortened,
+// so the note can no longer point at it. A dated SPY example could be applied to other symbols
+// and chain a day's label through the wrong prior; the prior clause is the scope's own.
+const PRIOR_DAILY = 'the latest earlier daily label stored for the same symbol, symbolTier and model version';
+function stressScoreNote(kind: 'daily' | 'intraday'): string {
+  // The prior reminder must fit with the existing rule. Appending it took a 49-scan answer over the wire
+  // ceiling into the generic five-scan fallback. Keep the next-daily clarification byte-neutral too;
+  // nearby finite exposure values crossed that ceiling even while the original 49-scan fixture still fitted.
+  if (kind === 'intraday') return 'stressScore is a raw composite regime score, not a 0-100 index. '
+    + '`label`/`priorLabel`: Calm, Normal, Elevated, Stress or Crisis; `labelKey`/`priorLabelKey`: stored '
+    + 'comparison/filter keys. Labels use hysteresis, not fixed score bands. '
+    + 'Entry: Normal -0.5, Elevated 0.5, Stress 1.5, Crisis 2.5; Calm below -0.5 without a prior. '
+    + 'Exit: Normal -1.0, Elevated 0.0, Stress 1.0, Crisis 2.0. '
+    + `The intraday prior is the day's last scan still in the worker's store; else ${PRIOR_DAILY} `
+    + '(e.g. the day\'s first scan or after a redeploy wipes the store). '
+    + 'If the score meets a higher state\'s entry, move to the highest such state; else keep the prior until below its '
+    + 'exit, then take the highest lower state whose entry is met. '
+    + 'The exit level protects only the prior actually used: a later scan judged against the daily prior can get a lower '
+    + 'label than a previous scan while its score is still above that previous label\'s exit. The next daily label '
+    + 'applies this rule against the latest earlier daily, not this scan. '
+    + 'Without a usable prior, including a failed read, take the highest state whose entry is met. '
+    + 'So a score inside one band can carry the label above it.';
+  return 'stressScore is a raw composite regime score, not a 0-100 index. '
+    + '`label` is a state with hysteresis, not a band read off the score: the five states read as words - Calm, Normal, Elevated, Stress, Crisis - in `label` (and `priorLabel`), with the stored key beside each in `labelKey` (and `priorLabelKey`), the value to compare or filter on. '
+    + 'Entry levels: Normal -0.5, Elevated 0.5, Stress 1.5, Crisis 2.5, and Calm below -0.5 with no prior; exit levels: Normal -1.0, Elevated 0.0, Stress 1.0, Crisis 2.0. '
+    + `Against the prior label the producer had (${PRIOR_DAILY}), a score reaching a higher state's entry level moves the label to the highest state whose entry level it meets; otherwise the label is kept until the score falls below its exit level, and then it drops to the highest lower state whose entry level it still meets. `
+    + 'Without a usable prior label, including when the prior could not be read, the label is the highest state whose entry level the score meets. '
+    + 'So a score inside one band can carry the label above it.';
+}
 
 // The proxy orders market_date DESC then scan_time ASC, so the newest scan is
 // the last entry of the first date; a reader saw "neither newest-first nor
@@ -52,20 +70,17 @@ const STRESS_SCORE_NOTE = 'stressScore is a raw composite regime score, not a 0-
 // pre-close (review).
 const INTRADAY_SCAN_ORDER = 'newest date first; within a date, by scan time ascending (a rerun scan sits after the ones before it, whatever its interval), so the newest scan is the last entry of the first date';
 
-const REGIME_DESCRIPTION = `Get regime data at one of six scopes. Pick the scope that matches the question; irrelevant sub-params are ignored.
-
-• scope="market" — MARKET COMPOSITE stress regime (aggregate across SPY/QQQ/IWM/DIA, not per-symbol). Returns composite stress score, confidence, key drivers, feature z-scores. The label's entry and exit levels are below. Accepts \`date\` (YYYY-MM-DD, default latest) and \`include_symbols\` (default false; true also returns up to the top 8 symbols per classification tier sorted by absolute stress score, with raw vector internals stripped).
-• scope="symbol" — per-symbol daily regime + authoritative Greek exposures (net gamma/delta/vega/vanna/charm/vomma, call wall, put wall, gamma flip, gamma magnet (\`exposures.gammaMagnet\`, the strike with the largest absolute net gamma, named as on get_dealer_positioning and get_live_dealer_positioning), top 10 gamma strikes). REQUIRED: \`symbol\`. Accepts \`days\` (default 1 = latest, max 30) and \`full\` (default false; true keeps less-summarized history with vector internals stripped). This is the correct scope for "what are SPY's Greek exposures?" — do NOT use get_options_analytics_history for current exposures.
-• scope="intraday" — intraday regime scan history for a symbol: 5 scans/day (open, morning, midday, afternoon, pre-close), each with stress scoring, regime classification, and compact Greek exposure snapshots. REQUIRED: \`symbol\`. With \`migration\` (default false) each scan also carries \`migration\`: how its gamma flip, call wall, put wall, gamma magnet and net gamma moved since the previous scan with exposures on that date (direction, change, percent of spot, per hour), the first scan of a date measured from the previous date's last; \`migrationNote\` has the rule, and a level null on either side is a null entry. Accepts \`days\` (calendar days back from the current UTC date, cutoff day included, so N spans N+1 dates: 2 on 2026-09-18 returned 09-16, 09-17 and 09-18; default 5, max 90), \`date\` (overrides days), and \`interval\` (filter to a single scan). Scans come newest date first and, within a date, by scan time ascending (not by interval: a rerun scan sits after the ones before it), so the newest scan is the last entry of the first date; \`scansMeta.order\` says so. \`scanTime\` is the run's start; each symbol's row lands when its own calibration finishes, minutes later for a slow name, so a scan can be absent for a while after its stamp. A scan stored since the producer began recording it carries \`priorLabel\`, the label its hysteresis was judged against (null when it had none), and \`priorLabelSource\`, "earlier scan" or "daily label" (null with no prior); older scans carry neither.
-• scope="volatility" — the VIX term structure at the close: the latest end-of-day close of VIX1D, VIX9D, VIX, VIX3M and VIX6M (the S&P 500's expected volatility over 1 day to 6 months) with each one's change on its previous close, \`shape\` (contango, backwardation or mixed across the 9-day to 6-month indexes that closed on \`asOf\`; VIX1D is left out), \`ratios\` (VIX/VIX3M and VIX9D/VIX on \`asOf\`) and VVIX. An index whose newest close is older than \`asOf\` is \`stale\` and left out of the shape and ratios; \`volatilityNote\` has the rules. It always answers the latest day on file; \`date\` is not supported here, and a call that passes one gets \`dateNote\` saying so (so do scope="sectors" and scope="cot").
-• scope="sectors" — every sector's (\`kind\` "sector", default) or industry's (\`kind\` "industry") P/E and average daily price change on each of the NYSE, NASDAQ and AMEX for one day, \`date\` (the newest day held for every exchange with recent data, else the newest day held for the most of them, so it can trail one exchange's newest; \`sectorsNote\` says so), grouped by name with one entry per exchange (\`groups[].byExchange\`); \`exchange\` keeps one exchange. With \`group\` (a sector or industry name, any case) it returns that group alone plus \`history\`, its daily series on each exchange the group is listed on, from \`days\` calendar days before the current UTC date (default 30, max 90), oldest first (null on an exchange with none on record, and \`historyNote\` naming an exchange whose read failed); a name not on record returns the day's groups with \`groupNote\`. \`sectorsNote\` says what each number is.
-• scope="cot" — CFTC Commitments of Traders positioning (futures only, weekly): with \`symbol\` (a futures ticker or root) that contract's family market (CFTC's consolidated market for the S&P 500, Nasdaq-100 and Dow E-mini, Micro and Nano families; for every other family, the Russell 2000 included, its standard contract's market; \`familyNote\` names it) with every trader group, the speculative line (leveraged funds or managed money), share of open interest, the 3-year range and up to 13 recent reports (\`historyMeta\` gives the actual counts); without \`symbol\`, every market's speculative line, each with its own \`reportDate\`, ordered by how far its 3-year reading sits from 50 (most extreme first), optional \`sector\`. Totals stay in the market's own units; \`cotNote\` has the rules.
-
-On the market, symbol and intraday scopes, \`stressScore\` is a raw composite regime score, not a 0-100 index, and ${STRESS_SCORE_RULE} \`stressScoreNote\` on every response carries the short form of this rule. Feature z-scores are winsorized to -5..5, so no |z| exceeds 5 and a value at that edge may have been clipped. On the market scope, the composite's own \`market.drivers\` carry a \`contribution\` of weight times |z|, unsigned and sorted by size, so that column does not sum to \`stressScore\` (apply the sign of \`z\` to each); every other driver list, the per-symbol breakdown under \`include_symbols\` included, and the symbol and intraday scopes, carries weight times z, signed.
-
-The daily scan's call wall, put wall, gamma flip, gamma magnet and regime use the 0-60 day window, like get_dealer_positioning's, but the scan takes its own rate and dividend inputs (a tenor-weighted FRED rate and an estimated yield, against the snapshot's median rate and yield from the options data), so its gamma flip differs from get_dealer_positioning's for the same session (SPY 2026-09-17: 765.14 here, 764.97 there), and its \`topStrikes\` are over the whole book, so per-strike values differ too. On every scope that carries exposures the call wall is the strike with the largest positive call gamma and the put wall the strike with the most negative put gamma (ties go to the lower strike; a side with no such strike leaves that wall null), and nothing orders them, so the put wall can sit above the call wall (KBE on 2026-09-17: call wall 66, put wall 68, spot 66.77). A null \`exposures.gammaFlip\` on any entry means the producer's coarse-grid sweep within 20% of spot found no zero crossing, or its profile was zero at every sampled price, or no open interest sat within its window, or the stored spot was not a positive number; it is not a level of zero. \`confidence\` (0 to 1) says how secure the label is, not how severe the regime: how deep the score sits inside its band, whose lower edge is the label's exit level when the label was kept and its entry level otherwise (just entered from either direction, or no usable prior), and whose upper edge is the next state's entry level, or the previous label's exit level when it was just entered from above (CALM and CRISIS measure from their one edge over 1.5), as d, the distance to the nearer edge over half the band, through (1 - e^(-2.5 d)) / (1 - e^(-2.5)) (SPY's 2026-09-17 morning scan, 0.0138 NORMAL after the open's STRESS: band -0.5 to 1.0, 0.8929, times 0.85 for the change, 0.759); times the share of calibration models that succeeded raised to the power 1.5; times 0.85 when the label differs from its prior or had none; for the market composite's own \`confidence\` the share is symbols scored over symbols in the composite, and the rows of the \`include_symbols\` breakdown keep model coverage. \`modelCoverage\` {succeeded, attempted} on every symbol and intraday entry is that share's numerator and denominator (KBE 2026-09-17: 2 of 8, so 0.25 to the 1.5 caps its confidence at 0.125); the composite stores no such counts. The prior label a row was judged against is not stored for daily rows or for intraday scans stored before the producer began recording it, so those entries do not say whether their label was kept or which prior they took (newer intraday scans carry \`priorLabel\` and \`priorLabelSource\`), and on the symbol and intraday scopes confidence is computed from the unrounded score, so a recomputation from the four-decimal \`stressScore\` can differ in the last digit (the 2026-09-18 open scan, 1.3496, recomputes to 0.4295 against the stored 0.4296); the market composite rounds its score before computing confidence, so no such gap arises there. \`exposuresNote\` on the symbol, intraday and include_symbols shapes says which fields are over the 0-60 day window and which over the whole exposure input (the breakdown's rows carry no topStrikes, and their note names none). The symbol history past one day runs oldest first; \`historyMeta.order\` says so.
-
-\`exposures.regime\` on any entry is the sign of the 0-60 day net gamma interpolated at spot between the two strikes that bracket it (the nearest strike's gamma when spot is outside the strike range), not the sign of \`exposures.netGamma\` and not which side of the gamma flip spot sits on; it can disagree with both (SPY's 2026-09-17 afternoon scan: netGamma -7.9 billion, regime positive), and only with fewer than two gamma-bearing strikes in that window is it the sign of \`exposures.netGamma\` itself. That field is the net gamma of the whole exposure input with no 60-day cutoff: every stored row for the daily scan; for the intraday scan, only the rows its normalizer retains from the broker chain, which drops the same-day expiration, every leg with a zero bid, no Greeks or no mid implied volatility, and every strike without a usable delta, and an expiration whose chain fetch failed is absent altogether.`;
+const REGIME_DESCRIPTION = 'Get regime data at one of six scopes. '
+  + 'Pick the scope that fits the question: market, symbol, intraday, volatility, sectors or cot. '
+  + 'scope="market": the MARKET COMPOSITE stress regime, an aggregate of SPY, QQQ, IWM and DIA (not per-symbol): stress score, a Calm-to-Crisis label, confidence, drivers and feature z-scores, the latest by default or one `date`; without `date`, the composite\'s own newest intraday scan is preferred when its market date is the same as or later than the daily row\'s (`scanSource` says which), and a symbol\'s scans of the current session are scope="intraday". '
+  + 'scope="symbol": one symbol\'s daily regime plus its Greek exposures (net gamma, delta, vega, vanna, charm and vomma; call wall, put wall, gamma flip, gamma magnet, top gamma strikes); requires `symbol`; `days` returns the newest stored sessions, 1 to 30, default 1 = the latest. '
+  + 'For a symbol\'s CURRENT exposures use this scope, not get_options_analytics_history (a daily history over all expirations). '
+  + 'The dedicated positioning tools are get_dealer_positioning (end of day, 0-60 day window) and get_live_dealer_positioning (live); this scan\'s levels are its own computation and can differ from theirs. '
+  + 'scope="intraday": a symbol\'s intraday regime scans, 5 a day (open, morning, midday, afternoon, pre-close), each with stress score, label and compact exposures; requires `symbol`; `days` is a calendar window back from the current UTC date (default 5, max 90) or `date` one session; `interval` filters by scan interval across the window; `migration` adds each level\'s move since the previous scan. '
+  + 'scope="volatility": the VIX term structure at the latest close (VIX1D, VIX9D, VIX, VIX3M, VIX6M and VVIX), its shape (contango, backwardation or mixed) and ratios. '
+  + 'scope="sectors": each sector\'s or industry\'s (`kind`) P/E and average daily price change on the NYSE, NASDAQ and AMEX for one day; `group` adds that group\'s daily history over `days`. '
+  + 'scope="cot": CFTC Commitments of Traders positioning (futures only, weekly): with `symbol` (a futures ticker or root) its family market\'s trader groups, speculative line, 3-year range and recent reports; without `symbol`, every market\'s speculative line, most extreme first, with optional `sector`. '
+  + 'volatility, sectors and cot answer the newest data on file; `date` is not supported there.';
 
 function compactTopStrikes(topStrikes: unknown, limit = 10): unknown {
   if (!Array.isArray(topStrikes)) return topStrikes;
@@ -102,6 +117,51 @@ const EXPOSURES_NOTE = EXPOSURES_WINDOW_CLAUSE + 'netGamma, the other net totals
 // The include_symbols rows hoist the totals and the levels only, so their
 // note names no topStrikes.
 const SYMBOLS_EXPOSURES_NOTE = EXPOSURES_WINDOW_CLAUSE + 'netGamma and the other net totals are over the whole exposure input';
+
+// the exposures note EXTENDED on every shape that carries exposures, its old clauses first.
+function exposuresNote(kind: 'symbol' | 'intraday' | 'breakdown' | 'composite'): string {
+  const daily = kind !== 'intraday';
+  return (kind === 'symbol' || kind === 'intraday' ? EXPOSURES_NOTE : SYMBOLS_EXPOSURES_NOTE) + '. '
+    + 'gammaMagnet is the strike with the largest absolute net gamma; '
+    + (kind === 'symbol' ? 'topStrikes are the strikes with the largest absolute net gamma over the whole book, the first 10, strike and netGamma only. '
+      : kind === 'intraday' ? 'topStrikes are the strikes with the largest absolute net gamma over the whole book, the first 5 on an intraday scan, strike and netGamma only. '
+        : kind === 'breakdown' ? 'the breakdown\'s rows carry no topStrikes. ' : 'the composite\'s exposures carry no topStrikes. ')
+    + 'callWall is the strike with the largest positive call gamma and putWall the strike with the most negative put gamma; ties go to the lower strike, a side with no such strike leaves that one null, and nothing orders them, so putWall can sit above callWall. '
+    + 'A null gammaFlip means the producer\'s coarse-grid sweep within 20% of spot found no zero crossing, or its profile was zero at every sampled price, or no open interest sat within its window, or the stored spot was not a positive number: it is not a level of zero. '
+    + 'regime is the sign of the 0-60 day net gamma interpolated at spot between the two strikes that bracket it (the nearest strike\'s gamma outside the strike range), not the sign of netGamma and not which side of gammaFlip spot sits on; it can disagree with both. '
+    + (daily
+      ? 'The totals are the whole exposure input with no 60-day cutoff: every stored row for the daily scan. The daily scan takes its own rate and dividend inputs (a tenor-weighted FRED rate and an estimated yield, against the snapshot\'s median rate and yield that get_dealer_positioning uses), so its gammaFlip and per-strike values differ from get_dealer_positioning\'s for the same session.'
+      : 'The totals are the whole exposure input with no 60-day cutoff: for an intraday scan only the rows its normalizer keeps from the broker chain (no same-day expiration, no leg with a zero bid, no Greeks or no mid implied volatility, no strike without a usable delta), and an expiration whose chain fetch failed is absent altogether. An intraday scan is its own broker-chain computation, so its levels can differ from the daily scan\'s and from get_dealer_positioning\'s.');
+}
+
+const SCAN_TIME_NOTE = 'scanTime is the run\'s start; each symbol\'s row lands when its own calibration finishes, minutes later for a slow name, so a scan can be absent for a while after its stamp - a missing newest scan is not "no scan ran".';
+
+// The rules with no field of their own, under stable keys.
+function regimeGuide(kind: 'market' | 'symbol' | 'intraday', opts: { includeSymbols?: boolean; symbolsSent?: boolean; symbolsUnreadable?: boolean }): Record<string, string> {
+  const g: Record<string, string> = {};
+  g.priorLabel = kind === 'intraday'
+    ? 'A scan stored since the producer records it carries priorLabel (null: it had no prior) and priorLabelSource ("earlier scan" or "daily label"); an older scan carries neither, which means not recorded, not "no prior".'
+    : 'Daily rows (symbol, market and the per-symbol breakdown) store no prior label, so an entry does not say whether its label was kept or which prior it took.';
+  g.zScores = 'Feature z-scores are winsorized to -5..5: no |z| exceeds 5, and a value at the edge may have been clipped.';
+  g.driverContribution = kind === 'market'
+    ? 'On market.drivers a driver\'s contribution is weight times |z|, unsigned and sorted by size, so the column does not sum to stressScore (apply the sign of z to each).'
+      + (opts.includeSymbols ? ' Every other driver list, the per-symbol breakdown\'s rows included, carries weight times z, signed.' : '')
+    : 'A driver\'s contribution is weight times z, signed.';
+  g.confidence = 'confidence (0 to 1) says how secure the label is, not how severe the regime: how deep the score sits inside its band (the lower edge the label\'s exit level when it was kept, else its entry level; the upper edge the next state\'s entry level, or the previous label\'s exit level when just entered from above; Calm and Crisis measure from their one edge over 1.5), as d, the distance to the nearer edge over half the band, through (1 - e^(-2.5 d)) / (1 - e^(-2.5)); times the share of calibration models that succeeded, raised to the power 1.5; times 0.85 when the label differs from its prior or had none.'
+    + (kind === 'market'
+      ? ' For the composite the share is symbols scored over symbols in the composite, and it stores no counts; the composite rounds its score before computing confidence.'
+        + (opts.includeSymbols ? ' For each breakdown row, modelCoverage {succeeded, attempted} gives the numerator and denominator of the share of calibration models that succeeded; it is absent when either count is missing (not stored, never full coverage). Those rows use the unrounded score for confidence, so a recomputation from the four-decimal stressScore can differ in the last digit.' : '')
+      : ' modelCoverage {succeeded, attempted} on an entry is that share\'s numerator and denominator, absent when a count is missing (not stored, never full coverage); confidence is computed from the unrounded score, so a recomputation from the four-decimal stressScore can differ in the last digit.');
+  if (kind === 'market' && opts.includeSymbols) {
+    g.symbolSelection = opts.symbolsSent
+      ? 'Every tier of the per-symbol breakdown is sorted by absolute stress score and capped at 8; symbolCoverage names the tiers that were cut.'
+      // A Pro answer whose per-symbol read failed carries no symbols either (proxy/routes/regime.ts: partial, unavailable).
+      : opts.symbolsUnreadable
+        ? 'The per-symbol breakdown could not be read on this call (partialNote): it is missing, not empty, and not a tier limit.'
+        : 'include_symbols asked for a per-symbol breakdown, but the answer carries none: it is returned to Pro and above only.';
+  }
+  return g;
+}
 
 // Which prior an intraday scan's hysteresis kept. Only rows written since the
 // producer records it have the keys; an older row gets neither field rather
@@ -221,18 +281,31 @@ export function register(server: McpServer, client: ProxyClient): void {
       title: 'Market Regime',
       description: REGIME_DESCRIPTION,
       inputSchema: {
-        scope: z.enum(['market', 'symbol', 'intraday', 'volatility', 'sectors', 'cot']).describe('Which regime view to fetch.'),
+        scope: z.enum(['market', 'symbol', 'intraday', 'volatility', 'sectors', 'cot']).describe('Which regime view to fetch: market, symbol, intraday, volatility, sectors or cot. '
+          + 'A parameter that belongs to another scope is ignored; each one names its scope.'),
         symbol: z.string().optional().describe('Required for scope=symbol or scope=intraday. For scope=cot: a futures ticker or root (e.g. /ESZ6, ES, MES); omit for every market.'),
-        date: z.string().optional().describe('Specific date (YYYY-MM-DD). For scope=market: default is latest. For scope=intraday: overrides `days`.'),
-        days: z.number().int().min(1).max(90).optional().describe('For scope=sectors with `group`: calendar days of the group\'s daily history, back from the current UTC date (default 30, max 90). For scope=symbol: history days (default 1, max 30). For scope=intraday: calendar days back from the current UTC date, the cutoff day included, so 1 returns the previous UTC day and the current one; at midnight UTC (7 PM EST, 8 PM EDT) the cutoff advances one calendar date, and weekends and holidays are not skipped, so a window can cover days with no session and return no rows (default 5, max 90); use `date` for one session.'),
+        date: z.string().optional().describe('Specific date (YYYY-MM-DD). '
+          + 'For scope=market: default is latest; with a date, that day\'s daily row only. '
+          + 'For scope=intraday: overrides `days`. '
+          + 'Not used by scope=symbol. '
+          + 'Not supported on volatility, sectors and cot, which answer the newest data on file and say so in `dateNote`.'),
+        days: z.number().int().min(1).max(90).optional().describe('For scope=sectors with `group`: calendar days of the group\'s daily history, back from the current UTC date (default 30, max 90). '
+          + 'For scope=symbol: the newest N stored sessions, not calendar days (default 1 = the latest, max 30). '
+          + 'For scope=intraday: calendar days back from the current UTC date, the cutoff day included, so 1 returns the previous UTC day and the current one; at midnight UTC (7 PM EST, 8 PM EDT) the cutoff advances one calendar date, and weekends and holidays are not skipped, so a window can cover days with no session and return no rows (default 5, max 90); use `date` for one session.'),
         interval: z.string().optional().describe('For scope=intraday only: filter to open | morning | midday | afternoon | pre-close.'),
-        include_symbols: z.boolean().optional().describe('For scope=market only: include per-symbol breakdowns capped at the top 8 strongest per classification tier. Default false.'),
-        full: z.boolean().optional().describe('For scope=symbol only: keep less-summarized multi-day history with vector internals stripped. Default false.'),
+        include_symbols: z.boolean().optional().describe('For scope=market only: also return per-symbol daily rows, each tier sorted by absolute stress score and capped at the top 8, for a question needing individual symbols\' regimes; '
+          + 'the composite\'s own label, score, confidence and drivers come without it. '
+          + 'Default false.'),
+        full: z.boolean().optional().describe('For scope=symbol only. '
+          + 'Default false. '
+          + 'With `days` 1, true keeps the `history` wrapper around the one entry instead of flattening it to the top level; with `days` above 1 it returns the same entries as the default (the same exposures, model coverage and top strikes), so it changes nothing there.'),
         kind: z.enum(['sector', 'industry']).optional().describe('For scope=sectors only: sector (default) or industry groups.'),
         exchange: z.enum(['NYSE', 'NASDAQ', 'AMEX']).optional().describe('For scope=sectors only: keep one exchange.'),
-        group: z.string().min(1).max(120).optional().describe('For scope=sectors only: one sector or industry by name (e.g. Technology, Semiconductors), returned with its daily history over `days`.'),
+        group: z.string().min(1).max(120).optional().describe('For scope=sectors only: one sector or industry by name, any case (e.g. '
+          + 'Technology, Semiconductors), returned with its daily history over `days` on each exchange the group is listed on.'),
         sector: z.enum(['equity-index', 'rates', 'fx', 'crypto', 'volatility', 'energy', 'metals', 'grains', 'livestock']).optional().describe('For scope=cot without a symbol only: keep one sector.'),
-        migration: z.boolean().optional().describe('For scope=intraday only: add each scan\'s `migration`, its levels\' change since the previous scan with exposures (direction, change, percent of spot, per hour). Default false.'),
+        migration: z.boolean().optional().describe('For scope=intraday only: add each scan\'s `migration`, the change in its gamma flip, call wall, put wall, gamma magnet and net gamma since the previous scan with exposures (direction, change, percent of spot, per hour). '
+          + 'Default false.'),
       },
       outputSchema: marketDataOutputSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
@@ -265,7 +338,8 @@ export function register(server: McpServer, client: ProxyClient): void {
         return {
           ...shaped,
           history,
-          historyMeta: { days: historyDays, order: 'oldest first' },
+          // What a null history means, whenever a group matched.
+          historyMeta: { days: historyDays, order: 'oldest first', nulls: 'A history null on an exchange means no history on record there; a failed read is named in historyNote.' },
           ...(failed.length > 0 ? { historyNote: `The history on ${failed.join(' and ')} was unavailable on this call.` } : {}),
           ...sectorsDateNote,
         };
@@ -371,9 +445,11 @@ export function register(server: McpServer, client: ProxyClient): void {
         // 100+ KB blob ChatGPT cannot consume.
         // The note sits beside `market`, where the other scopes carry it.
         const partial = regimePartialFields(res);
-        if (include_symbols) return res && typeof res === 'object' ? { ...res, _stress_score_note: STRESS_SCORE_NOTE, _exposures_note: SYMBOLS_EXPOSURES_NOTE, ...partial } : res;
+        if (include_symbols) return res && typeof res === 'object' ? { ...res, _stress_score_note: stressScoreNote('daily'), _exposures_note: exposuresNote('breakdown'), ...partial, guide: regimeGuide('market', { includeSymbols: true, symbolsSent: !!(res.symbols && typeof res.symbols === 'object'), symbolsUnreadable: Array.isArray(res.unavailable) && res.unavailable.includes('symbols') }) } : res;
         if (res && typeof res === 'object' && 'market' in res) {
-          return { ...(shapeMarketRegimeResponse({ market: res.market, _stress_score_note: STRESS_SCORE_NOTE }) as Record<string, unknown>), ...partial };
+          // The composite's exposures, when hoisted, get their note too.
+          const hoisted = res.market && typeof res.market === 'object' && (res.market as any).exposures !== undefined;
+          return { ...(shapeMarketRegimeResponse({ market: res.market, _stress_score_note: stressScoreNote('daily') }) as Record<string, unknown>), ...(hoisted ? { _exposures_note: exposuresNote('composite') } : {}), ...partial, guide: regimeGuide('market', {}) };
         }
         return res;
       }
@@ -409,8 +485,18 @@ export function register(server: McpServer, client: ProxyClient): void {
           }
         }
         if (res && typeof res === 'object') {
-          res._stress_score_note = STRESS_SCORE_NOTE;
-          res._exposures_note = EXPOSURES_NOTE;
+          res._stress_score_note = stressScoreNote('intraday');
+          res._exposures_note = exposuresNote('intraday');
+          // Every intraday answer explains its scan clock; an empty window also explains the absence of scans.
+          const empty = !Array.isArray(res.scans) || res.scans.length === 0;
+          res._scans_meta = {
+            ...(res._scans_meta ?? {}),
+            scanTime: SCAN_TIME_NOTE,
+            ...(empty ? { emptyWindow: date
+              ? `No scan matching this request is stored for date ${date}${interval ? ` and interval ${interval}` : ''} (a date overrides days): it may be no session, or its matching rows have not landed yet; a newest scan can be missing for a while after its stamp.`
+              : `The window counts calendar dates back from the current UTC date (cutoff included), weekends and holidays not skipped, so it can cover no session and return no scans (asked: days ${intradayDays}${interval ? `, interval ${interval}` : ''}); a newest scan can also be missing for a while after its stamp.` } : {}),
+          };
+          res.guide = regimeGuide('intraday', {});
         }
         return res;
       }
@@ -450,9 +536,10 @@ export function register(server: McpServer, client: ProxyClient): void {
       }
       // The one-day path below rebuilds its object, so it attaches its own
       // note and carries no history to order.
-      res._stress_score_note = STRESS_SCORE_NOTE;
-      res._exposures_note = EXPOSURES_NOTE;
+      res._stress_score_note = stressScoreNote('daily');
+      res._exposures_note = exposuresNote('symbol');
       res._history_meta = { ...(res._history_meta ?? {}), order: 'oldest first' };
+      res.guide = regimeGuide('symbol', {});
 
       // Humanize each history entry's drivers + vector feature-key records so backend
       // identifiers don't surface to end users when the LLM relays the response.
@@ -490,8 +577,9 @@ export function register(server: McpServer, client: ProxyClient): void {
           symbol: res.symbol,
           symbolTier: res.symbolTier,
           ...latest,
-          _stress_score_note: STRESS_SCORE_NOTE,
-          _exposures_note: EXPOSURES_NOTE,
+          _stress_score_note: stressScoreNote('daily'),
+          _exposures_note: exposuresNote('symbol'),
+          guide: regimeGuide('symbol', {}),
         };
       }
 

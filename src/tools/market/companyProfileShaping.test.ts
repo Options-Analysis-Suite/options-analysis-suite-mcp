@@ -23,7 +23,7 @@ describe('shapeCompanyProfileResponse', () => {
       last_div: 0.25,
       price_range: '164.08-260.1',
       ipo_date: '1980-12-12',
-      ceo: 'Tim Cook',
+      ceo: 'Chief Executive',
       full_time_employees: 161000,
       website: 'https://www.apple.com',
       cik: '0000320193',

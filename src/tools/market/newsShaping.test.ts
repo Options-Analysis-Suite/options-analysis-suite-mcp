@@ -597,7 +597,7 @@ describe('shapeNewsResponse', () => {
           summary: 'Tesla shares fell even as Wedbush reiterated an outperform rating and price target.',
         },
         {
-          title: 'Tesla stock struggles as delivery fears and Musk bets test investor faith',
+          title: 'Tesla stock struggles as delivery fears and executive bets test investor faith',
           published_date: '2026-03-27T13:59:57Z',
           source: 'invezz.com',
           url: 'https://example.com/tesla-stock-struggles',
@@ -758,7 +758,7 @@ describe('shapeNewsResponse', () => {
           summary: 'CNBC final trades mentioned Apple among several names.',
         },
         {
-          title: "Warren Buffett's Berkshire Faces The Dreaded Death Cross—Is Too Much Apple The Problem?",
+          title: "A Major Investor's Berkshire Faces The Dreaded Death Cross—Is Too Much Apple The Problem?",
           published_date: '2026-03-26T11:26:09Z',
           source: 'benzinga.com',
           url: 'https://example.com/death-cross',
@@ -938,7 +938,7 @@ describe('shapeNewsResponse', () => {
           summary: 'Tesla and SpaceX were reportedly planning a semiconductor plant.',
         },
         {
-          title: 'Elon Musk Drops Fresh Clues On Possible 3-Row Vehicle From Tesla',
+          title: 'Chief Executive Drops Fresh Clues On Possible 3-Row Vehicle From Tesla',
           published_date: '2026-03-27T00:35:22Z',
           source: 'feeds.benzinga.com',
           url: 'https://example.com/three-row',
@@ -959,11 +959,11 @@ describe('shapeNewsResponse', () => {
           summary: 'A BYD-focused piece framed Tesla as the comparison point.',
         },
         {
-          title: 'Meta Targets $9 Trillion Value With AI-Driven Exec Pay Plan That Outstrips Musk and Tesla',
+          title: 'Meta Targets $9 Trillion Value With AI-Driven Exec Pay Plan That Outstrips a Rival Executive and Tesla',
           published_date: '2026-03-25T04:58:00Z',
           source: 'barrons.com',
-          url: 'https://example.com/meta-musk',
-          summary: 'A Meta story referenced Tesla and Musk only as a comparison point.',
+          url: 'https://example.com/meta-executive',
+          summary: 'A Meta story referenced Tesla and its chief executive only as a comparison point.',
         },
       ],
     };
@@ -1118,7 +1118,7 @@ describe('shapeNewsResponse', () => {
           summary: 'Tesla and SpaceX were reportedly planning a semiconductor plant.',
         },
         {
-          title: 'Elon Musk Drops Fresh Clues On Possible 3-Row Vehicle From Tesla',
+          title: 'Chief Executive Drops Fresh Clues On Possible 3-Row Vehicle From Tesla',
           published_date: '2026-03-27T00:35:22Z',
           source: 'feeds.benzinga.com',
           url: 'https://example.com/three-row',
@@ -1490,7 +1490,7 @@ describe('shapeNewsResponse', () => {
           summary: 'A stock listicle compared underfollowed names against the S&P 500.',
         },
         {
-          title: "S&P 500 Falls As Trump's Ceasefire Hopes Dim: Fear & Greed Index Remains In 'Extreme Fear' Zone",
+          title: "S&P 500 Falls As the President's Ceasefire Hopes Dim: Fear & Greed Index Remains In 'Extreme Fear' Zone",
           published_date: '2026-03-25T03:16:53Z',
           source: 'benzinga.com',
           url: 'https://example.com/spy-fear-greed',
@@ -1511,7 +1511,7 @@ describe('shapeNewsResponse', () => {
     expect(result.results.map((item) => item.title)).not.toEqual(expect.arrayContaining([
       'S&P 500: US Indices Rally Today as Iran Ceasefire Optimism Sweeps the Market',
       'These 10 top-rated stocks are crushing the S&P 500 — yet the media and Wall Street ignore them',
-      "S&P 500 Falls As Trump's Ceasefire Hopes Dim: Fear & Greed Index Remains In 'Extreme Fear' Zone",
+      "S&P 500 Falls As the President's Ceasefire Hopes Dim: Fear & Greed Index Remains In 'Extreme Fear' Zone",
     ]));
     expect(result._results_meta?.lowSignalOmitted).toBeDefined();
   });
@@ -1527,7 +1527,7 @@ describe('shapeNewsResponse', () => {
           summary: 'Barclays raised its S&P 500 target despite macro risks and private-credit stress.',
         },
         {
-          title: "S&P 500 Is Nearing a Correction. Why Trump's Latest Iran Pause Isn't Helping.",
+          title: "S&P 500 Is Nearing a Correction. Why the President's Latest Iran Pause Isn't Helping.",
           published_date: '2026-03-27T06:47:00Z',
           source: 'barrons.com',
           url: 'https://example.com/spy-correction',
@@ -1557,7 +1557,7 @@ describe('shapeNewsResponse', () => {
 
     expect(result.results.map((item) => item.title)).toEqual(expect.arrayContaining([
       'Barclays raises 2026 year-end S&P 500 target to 7,650 despite Middle East, inflation risks',
-      "S&P 500 Is Nearing a Correction. Why Trump's Latest Iran Pause Isn't Helping.",
+      "S&P 500 Is Nearing a Correction. Why the President's Latest Iran Pause Isn't Helping.",
     ]));
     expect(result.results.map((item) => item.title)).not.toEqual(expect.arrayContaining([
       'IVV vs. SPY: These Top S&P 500 ETFs Are Not the Same',
@@ -1713,7 +1713,7 @@ describe('shapeNewsResponse', () => {
         },
         {
           symbol: 'SPY',
-          title: "S&P 500 Is Nearing a Correction. Why Trump's Latest Iran Pause Isn't Helping.",
+          title: "S&P 500 Is Nearing a Correction. Why the President's Latest Iran Pause Isn't Helping.",
           published_date: '2026-03-27T06:47:00Z',
           source: 'barrons.com',
           url: 'https://example.com/spy-weak-barrons',
@@ -1736,7 +1736,7 @@ describe('shapeNewsResponse', () => {
 
     expect(result.results.map((item) => item.title)).toEqual([
       'Barclays raises 2026 year-end S&P 500 target to 7,650 despite Middle East, inflation risks',
-      "S&P 500 Is Nearing a Correction. Why Trump's Latest Iran Pause Isn't Helping.",
+      "S&P 500 Is Nearing a Correction. Why the President's Latest Iran Pause Isn't Helping.",
     ]);
   });
 
@@ -1753,7 +1753,7 @@ describe('shapeNewsResponse', () => {
         },
         {
           symbol: 'SPY',
-          title: "S&P 500 Is Nearing a Correction. Why Trump's Latest Iran Pause Isn't Helping.",
+          title: "S&P 500 Is Nearing a Correction. Why the President's Latest Iran Pause Isn't Helping.",
           published_date: '2026-03-27T06:47:00Z',
           source: 'barrons.com',
           url: 'https://example.com/spy-present-profile-barrons',
@@ -1779,7 +1779,7 @@ describe('shapeNewsResponse', () => {
 
     expect(result.results.map((item) => item.title)).toEqual([
       'Barclays raises 2026 year-end S&P 500 target to 7,650 despite Middle East, inflation risks',
-      "S&P 500 Is Nearing a Correction. Why Trump's Latest Iran Pause Isn't Helping.",
+      "S&P 500 Is Nearing a Correction. Why the President's Latest Iran Pause Isn't Helping.",
     ]);
   });
 
@@ -1796,7 +1796,7 @@ describe('shapeNewsResponse', () => {
         },
         {
           symbol: 'XLI',
-          title: "Trump's America First Agenda Is Pushing Industrial ETFs like XLI To The Moon",
+          title: "The President's America First Agenda Is Pushing Industrial ETFs like XLI To The Moon",
           published_date: '2026-02-17T15:00:02Z',
           source: '247wallst.com',
           url: 'https://example.com/xli-industrial-etf',
@@ -1827,7 +1827,7 @@ describe('shapeNewsResponse', () => {
 
     expect(result.results.map((item) => item.title)).toEqual(expect.arrayContaining([
       'Industrial Select Sector SPDR Fund Sees Unusually High Options Volume (NYSEARCA:XLI)',
-      "Trump's America First Agenda Is Pushing Industrial ETFs like XLI To The Moon",
+      "The President's America First Agenda Is Pushing Industrial ETFs like XLI To The Moon",
     ]));
   });
 
@@ -1844,7 +1844,7 @@ describe('shapeNewsResponse', () => {
         },
         {
           symbol: 'XLI',
-          title: "Trump's America First Agenda Is Pushing Industrial ETFs like XLI To The Moon",
+          title: "The President's America First Agenda Is Pushing Industrial ETFs like XLI To The Moon",
           published_date: '2026-02-17T15:00:02Z',
           source: '247wallst.com',
           url: 'https://example.com/xli-present-profile-industrial-etf',

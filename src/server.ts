@@ -10,6 +10,7 @@ import type { AccessTokenProvider } from './proxy/proxyClient.js';
 import { getMcpIconUrl } from './branding.js';
 import { registerAllTools } from './tools/registry.js';
 import { LiveApiClient } from './proxy/liveApiClient.js';
+import { SERVER_INSTRUCTIONS } from './serverInstructions.js';
 
 export function getMcpServerInfo(): Implementation {
   return {
@@ -42,7 +43,7 @@ export function createMcpServer(
   proxyClient: ProxyClient,
   tokenManager: AccessTokenProvider,
 ): McpServer {
-  const server = new McpServer(getMcpServerInfo());
+  const server = new McpServer(getMcpServerInfo(), { instructions: SERVER_INSTRUCTIONS });
 
   registerAllTools(server, proxyClient, tokenManager, new LiveApiClient(proxyClient.proxyUrl, tokenManager));
 

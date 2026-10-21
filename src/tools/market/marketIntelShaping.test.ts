@@ -111,6 +111,7 @@ describe('sector metrics', () => {
     expect(shaped).toMatchObject({ view: 'sectors', kind: 'sector', date: '2026-10-02' });
     expect((shaped.groups as unknown[]).length).toBe(3);
     expect(shaped.sectorsNote).toContain('NYSE, NASDAQ and AMEX only');
+    expect(shaped.sectorsNote).toMatch(/can trail one exchange's newest day/);
     expect('exchange' in shaped).toBe(false);
     expect(shapeSectorMetrics(SECTORS, { kind: 'sector', exchange: 'NASDAQ' }).shaped.exchange).toBe('NASDAQ');
   });

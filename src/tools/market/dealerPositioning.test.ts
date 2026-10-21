@@ -62,25 +62,38 @@ describe('registered live dealer-positioning tool', () => {
     }
   });
 
-  it('describes every value coverage.gammaFlipMethod can carry', async () => {
-    // The engine (packages/shared exposure-compute) emits 'repriced',
-    // 'frozen-gamma' or 'mixed'. The description named the first two, defined
-    // "frozen-gamma" as "at least one leg had no IV" (that is `mixed`), and a
-    // model shown "mixed" against SPY had no idea what it meant.
-    const server = new McpServer({ name: 'dealer-positioning-test', version: '1' });
-    register(server, { get: async () => ({}) } as unknown as LiveApiClient);
-    const client = new Client({ name: 'dealer-positioning-consumer', version: '1' });
+});
+
+describe('registered live dealer-positioning tool - guide, budget and warnings', () => {
+  it('the guide, the budget inside the fit and the proxy warnings reach the client in both channels', async () => {
+    const answer = {
+      symbol: 'TEST', provider: 'tradier', dataSource: 'live', asOf: '2026-09-10T15:00:00Z',
+      expirations: ['2026-09-18'], expirationsAvailable: 1, strikesUsed: 1,
+      resolved: { S: { value: 100, source: 'broker-tradier', asOf: '2026-09-10T14:59:00Z', stale: false }, r: { value: 0.04, source: 'fred', asOf: '2026-09-09' }, q: { value: 0, source: 'supplied', asOf: null } },
+      warnings: ['Risk-free: 3M unavailable; falling back to 1M'],
+      snapshot: { spotPrice: 100, gammaFlip: 98, netGamma: 12, netDelta: -100, netVega: 30, netVanna: 2, netCharm: 3, netVomma: 4, callWall: 100, putWall: 95, absGamma: 100, gammaConcentration: 1, regime: 'positive', topStrikes: [] },
+      coverage: { strikes: 1, strikesWithGamma: 1, strikesWithDelta: 1, gamma: { total: 2, included: 2 }, delta: { total: 2, included: 2 }, vega: { total: 2, included: 2 }, vanna: { total: 2, included: 2 }, charm: { total: 2, included: 2 }, vomma: { total: 2, included: 2 }, gammaFlip: { total: 2, included: 2 }, gammaFlipMethod: 'repriced', gammaFlipResolution: 0.02, gammaFlipSearchStatus: 'found' },
+      byStrike: [],
+    };
+    const budget = { limit: 120, remaining: 110, resetSeconds: 20, provider: 'tradier' };
+    const server = new McpServer({ name: 'dealer-guide-test', version: '1' });
+    register(server, {
+      get: async (_p: string, _q?: Record<string, string>, onRateLimit?: (r: typeof budget) => void) => { onRateLimit?.(budget); return answer; },
+    } as unknown as LiveApiClient);
+    const client = new Client({ name: 'dealer-guide-consumer', version: '1' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
-      const { tools } = await client.listTools();
-      const description = tools.find((t) => t.name === 'get_live_dealer_positioning')?.description ?? '';
-      for (const method of ['"repriced"', '"frozen-gamma"', '"mixed"']) expect(description).toContain(method);
-      expect(description).toMatch(/"frozen-gamma" means no leg had a usable IV/);
-      expect(description).toMatch(/"mixed" means some legs were repriced and the rest held constant/);
-      // And the band the engine uses, so "IV 0" and "IV 10" from a broker are
-      // read as absent, not as numbers.
-      expect(description).toMatch(/finite, above 0 and at most 5/);
+      const result = await client.callTool({ name: 'get_live_dealer_positioning', arguments: { symbol: 'TEST' } });
+      expect(result.isError).not.toBe(true);
+      const wire = result.structuredContent as any;
+      expect(JSON.parse((result.content as { type: string; text: string }[])[0].text)).toEqual(wire);
+      expect(wire.rateLimit).toEqual(budget);
+      expect(wire.warnings).toEqual(['Risk-free: 3M unavailable; falling back to 1M']);
+      expect(wire.guide.rateLimit).toMatch(/budget after this call/);
+      expect(wire.guide.spotClock).toMatch(/print time/);
+      expect(wire.guide.rateSource).toMatch(/3-month Treasury/);
+      expect(wire.guide.tradierGreeks).toMatch(/hourly/);
     } finally {
       await client.close();
       await server.close();

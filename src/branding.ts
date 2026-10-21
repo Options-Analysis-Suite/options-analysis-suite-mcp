@@ -8,6 +8,13 @@ export const MCP_ICON_PATH = '/mcp-icon.png';
 export const MCP_ICON_VERSION = '20260502';
 export const MCP_ICON_CONTENT_TYPE = 'image/png';
 
+/**
+ * The website's logo (apps/web/public/logo.webp, a byte copy beside the icon) for the sign-in pages' brand lockup
+ *. Served from this origin so the pages' policy admits images from 'self' and nothing else.
+ */
+export const LOGO_PATH = '/logo.webp';
+export const LOGO_CONTENT_TYPE = 'image/webp';
+
 export function getMcpBaseUrl(baseUrl = process.env.OAS_MCP_BASE_URL || DEFAULT_MCP_BASE_URL): string {
   return baseUrl.replace(/\/+$/, '');
 }
@@ -46,16 +53,25 @@ export function getBrandingHomeHtml(): string {
 }
 
 export function getMcpIconBytes(): Buffer {
-  for (const path of iconPathCandidates()) {
-    if (existsSync(path)) return readFileSync(path);
-  }
-  throw new Error('MCP icon asset not found');
+  return readAsset('mcp-icon.png', 'MCP icon asset not found');
 }
 
-function iconPathCandidates(): string[] {
+export function getLogoBytes(): Buffer {
+  return readAsset('logo.webp', 'logo asset not found');
+}
+
+/** The asset beside the package (dev: the package root; the Railway image: beside remote.js). */
+function readAsset(name: string, missing: string): Buffer {
+  for (const path of assetPathCandidates(name)) {
+    if (existsSync(path)) return readFileSync(path);
+  }
+  throw new Error(missing);
+}
+
+function assetPathCandidates(name: string): string[] {
   return [
-    join(process.cwd(), 'mcp-icon.png'),
-    fileURLToPath(new URL('../mcp-icon.png', import.meta.url)),
-    fileURLToPath(new URL('./mcp-icon.png', import.meta.url)),
+    join(process.cwd(), name),
+    fileURLToPath(new URL(`../${name}`, import.meta.url)),
+    fileURLToPath(new URL(`./${name}`, import.meta.url)),
   ];
 }

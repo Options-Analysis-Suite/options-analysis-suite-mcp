@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
+import * as branding from './branding.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import type { handleHttpRequest as HandleHttpRequest } from './remote.js';
@@ -282,5 +283,67 @@ describe('provider-flow cookie forwarding', () => {
 
     const second = await request(START, firstCookie);
     expect(second.headers['Set-Cookie']).toContain(firstState);
+  });
+});
+
+/**
+ * The sign-in pages' logo route: GET and HEAD /logo.webp answer the website's logo from this
+ * origin, cacheable for a day; a logo that cannot be read answers 404 and leaves the server serving.
+ */
+describe('the logo route', () => {
+  let handleHttpRequest: typeof HandleHttpRequest;
+
+  beforeAll(async () => {
+    ({ handleHttpRequest } = await import('./remote.js'));
+  });
+
+  async function fetchLogo(method: 'GET' | 'HEAD'): Promise<{ status: number; headers: Record<string, string | number>; bytes: number }> {
+    const req = { url: '/logo.webp', method, headers: {} } as unknown as IncomingMessage;
+    let status = 0;
+    let headers: Record<string, string | number> = {};
+    let bytes = 0;
+    const res = {
+      headersSent: false,
+      setHeader() {},
+      writeHead(code: number, given?: Record<string, string | number>) {
+        status = code;
+        headers = { ...headers, ...(given ?? {}) };
+        return res;
+      },
+      end(chunk?: Buffer | string) { bytes = chunk === undefined ? 0 : Buffer.byteLength(chunk); },
+    } as unknown as ServerResponse;
+    await handleHttpRequest(req, res);
+    return { status, headers, bytes };
+  }
+
+  test('GET /logo.webp answers the website logo, cacheable for a day', async () => {
+    const r = await fetchLogo('GET');
+    expect(r.status).toBe(200);
+    expect(r.headers['Content-Type']).toBe('image/webp');
+    expect(r.headers['Cache-Control']).toBe('public, max-age=86400');
+    expect(r.headers['Content-Length']).toBe(5162);
+    expect(r.bytes).toBe(5162);
+  });
+
+  test('HEAD /logo.webp answers the headers and no body', async () => {
+    const r = await fetchLogo('HEAD');
+    expect(r.status).toBe(200);
+    expect(r.headers['Content-Type']).toBe('image/webp');
+    expect(r.headers['Content-Length']).toBe(5162);
+    expect(r.bytes).toBe(0);
+  });
+
+  test('a logo that cannot be read answers 404 and the next request is unaffected', async () => {
+    const spy = spyOn(branding, 'getLogoBytes').mockImplementation(() => { throw new Error('logo asset not found'); });
+    try {
+      const missing = await fetchLogo('GET');
+      expect(missing.status).toBe(404);
+      expect(missing.bytes).toBeGreaterThan(0);
+    } finally {
+      spy.mockRestore();
+    }
+    const again = await fetchLogo('GET');
+    expect(again.status).toBe(200);
+    expect(again.bytes).toBe(5162);
   });
 });

@@ -63,17 +63,17 @@ describe('TokenManager — initialize() subscription enforcement', () => {
     fakes.login.mockImplementation(async () => freshTokens());
     fakes.getProfile.mockImplementation(async () => inactiveProfile());
 
-    const tm = new TokenManager('https://auth', 'a@b.c', 'pw');
+    const tm = new TokenManager('https://auth', 'user@example.com', 'pw');
     await expect(tm.initialize()).rejects.toBeInstanceOf(SubscriptionError);
   });
 });
 
-describe('TokenManager — doRefresh() preserves SubscriptionError (PR #5 P1)', () => {
+describe('TokenManager — doRefresh() preserves SubscriptionError', () => {
   test('inactive subscription on refresh path surfaces SubscriptionError, not AuthError', async () => {
     // Initialize with an active subscription so we can reach getAccessToken.
     fakes.login.mockImplementation(async () => freshTokens());
     fakes.getProfile.mockImplementation(async () => activeProfile());
-    const tm = new TokenManager('https://auth', 'a@b.c', 'pw');
+    const tm = new TokenManager('https://auth', 'user@example.com', 'pw');
     await tm.initialize();
     tm.destroy(); // cancel the proactive timer
 
@@ -90,7 +90,7 @@ describe('TokenManager — doRefresh() preserves SubscriptionError (PR #5 P1)', 
   test('refresh fails + re-login succeeds + subscription inactive surfaces SubscriptionError', async () => {
     fakes.login.mockImplementation(async () => freshTokens());
     fakes.getProfile.mockImplementation(async () => activeProfile());
-    const tm = new TokenManager('https://auth', 'a@b.c', 'pw');
+    const tm = new TokenManager('https://auth', 'user@example.com', 'pw');
     await tm.initialize();
     tm.destroy();
     (tm as any).tokens = expiredTokens();
@@ -106,7 +106,7 @@ describe('TokenManager — doRefresh() preserves SubscriptionError (PR #5 P1)', 
   test('refresh fails + re-login fails surfaces AuthError', async () => {
     fakes.login.mockImplementation(async () => freshTokens());
     fakes.getProfile.mockImplementation(async () => activeProfile());
-    const tm = new TokenManager('https://auth', 'a@b.c', 'pw');
+    const tm = new TokenManager('https://auth', 'user@example.com', 'pw');
     await tm.initialize();
     tm.destroy();
     (tm as any).tokens = expiredTokens();
@@ -128,7 +128,7 @@ describe('TokenManager — staging prevents inactive-token leak through swallowe
   test('refresh-path SubscriptionError leaves prior tokens/profile unchanged', async () => {
     fakes.login.mockImplementation(async () => freshTokens());
     fakes.getProfile.mockImplementation(async () => activeProfile());
-    const tm = new TokenManager('https://auth', 'a@b.c', 'pw');
+    const tm = new TokenManager('https://auth', 'user@example.com', 'pw');
     await tm.initialize();
     tm.destroy();
 
@@ -151,7 +151,7 @@ describe('TokenManager — staging prevents inactive-token leak through swallowe
   test('re-login-fallback SubscriptionError leaves prior tokens/profile unchanged', async () => {
     fakes.login.mockImplementation(async () => freshTokens());
     fakes.getProfile.mockImplementation(async () => activeProfile());
-    const tm = new TokenManager('https://auth', 'a@b.c', 'pw');
+    const tm = new TokenManager('https://auth', 'user@example.com', 'pw');
     await tm.initialize();
     tm.destroy();
     (tm as any).tokens = expiredTokens();
@@ -172,7 +172,7 @@ describe('TokenManager — staging prevents inactive-token leak through swallowe
   test('scheduled-timer swallow path: post-failure getAccessToken rejects with SubscriptionError', async () => {
     fakes.login.mockImplementation(async () => freshTokens());
     fakes.getProfile.mockImplementation(async () => activeProfile());
-    const tm = new TokenManager('https://auth', 'a@b.c', 'pw');
+    const tm = new TokenManager('https://auth', 'user@example.com', 'pw');
     await tm.initialize();
     tm.destroy();
 

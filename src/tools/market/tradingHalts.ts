@@ -15,11 +15,11 @@ export function register(server: McpServer, client: ProxyClient): void {
         symbol: z.string().optional().describe('Ticker symbol (optional — omit for all current halts)'),
         full: z.boolean().optional().describe('Return the raw halt feed instead of the compact active/recent summary. Default false.'),
       },
-      // OpenAI app review treats openWorldHint as public-state mutation. This
-      // tool may read public NASDAQ/NYSE halt feeds through the proxy, but it
-      // cannot publish notices or change public or third-party systems.
+      // openWorldHint is true for public internet access, including read-only calls (OpenAI Apps SDK).
+      // The proxy reads the public NASDAQ and NYSE halt feeds live. It cannot publish notices or change
+      // any public or third-party system.
       outputSchema: marketDataOutputSchema,
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     },
     toolHandler(async ({ symbol, full }) => {
       if (symbol) {

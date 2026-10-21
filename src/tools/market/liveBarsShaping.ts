@@ -25,6 +25,8 @@ interface RawIndicator {
   params?: unknown;
   latest?: unknown;
   series?: Record<string, Array<{ time: unknown; value: number }>>;
+  /** "no-volume": the proxy withheld an indicator that reads volume the broker did not publish. */
+  reason?: unknown;
 }
 
 export interface LiveBarsShapeOptions {
@@ -69,7 +71,8 @@ function shapeIndicators(payload: unknown, keep: number) {
       if (reported) {
         for (const [key, value] of Object.entries(reported)) latest[key] = num(value);
       }
-      return { name: entry.name ?? null, params: entry.params ?? {}, latest, points, pointsKept: kept, pointsTotal: total };
+      const reason = str(entry.reason);
+      return { name: entry.name ?? null, params: entry.params ?? {}, latest, points, pointsKept: kept, pointsTotal: total, ...(reason ? { reason } : {}) };
     });
 }
 

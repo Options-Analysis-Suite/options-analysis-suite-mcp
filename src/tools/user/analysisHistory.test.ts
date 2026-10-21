@@ -4,6 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { ProxyClient } from '../../proxy/proxyClient.js';
 import { register } from './analysisHistory.js';
+import { COLLAPSE_MESSAGE } from '../helpers.js';
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<{ isError?: boolean; content: Array<{ type: 'text'; text: string }> }>;
 
@@ -184,7 +185,9 @@ describe('get_analysis_history - a synced record whose keys all read as one name
 
     expect(result.isError).toBeUndefined();
     expect(JSON.parse(result.content[0].text)).toEqual({
+      dataAvailable: false,
       error: 'Response too large for MCP response budget.',
+      message: COLLAPSE_MESSAGE,
       responseBudget: { tooLarge: true, sizeKb: 139 },
     });
     expect(lookups).toBeLessThanOrEqual(budget);

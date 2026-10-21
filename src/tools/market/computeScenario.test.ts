@@ -82,6 +82,26 @@ describe('registered compute_scenario tool', () => {
     }
   });
 
+  it('a fully supplied scenario with no symbol reaches the model as data: the route answers symbol null', async () => {
+    // Every input supplied, no symbol: the route prices it and answers `symbol: null` (its absence convention,
+    // proxy compute-scenario.test.ts). The shared output envelope declared symbol a string, so the SDK refused the
+    // tool's own answer ("Output validation error ... expected string, received null at symbol") and the model got
+    // an error for a request that had been priced (found by the token-efficiency eval's recording, 2026-10-14).
+    const { client, close } = await harness(async () => ({ ...payload, symbol: null }));
+    try {
+      const result = await client.callTool({
+        name: 'compute_scenario',
+        arguments: { legs: [{ type: 'call', side: 'long', strike: 500, daysToExpiry: 30, iv: 0.2 }], spot: 500, r: 0.04, q: 0.01, full: true },
+      });
+      expect((result.content as { type: string; text: string }[])[0].text).not.toContain('validation');
+      expect(result.isError).not.toBe(true);
+      expect((result.structuredContent as any).symbol).toBeNull();
+      expect((result.structuredContent as any).legs[0].basePrice).toBe(30.123456789);
+    } finally {
+      await close();
+    }
+  });
+
   it('a refusal naming the missing fields reaches the model as that code and those names', async () => {
     const { client, close } = await harness(async () => {
       throw new LiveApiError('Could not resolve spot, legs[0].iv for XYZ', 422, 'RESOLUTION_FAILED', false, undefined, { missingFields: ['spot', 'legs[0].iv'], warnings: ['XYZ: no spot price on file (snapshot or scan_tickers)'] });

@@ -145,7 +145,7 @@ export class TokenManager {
     let nextProfile: UserProfile;
 
     try {
-      // S2.4: GoTrue refresh via the captured gotrueRefreshToken cookie. Throws on a
+      // GoTrue refresh via the captured gotrueRefreshToken cookie. Throws on a
       // missing/expired cookie or an MFA step-up the background refresh can't service - which
       // falls through to a full re-login below (the normal path post-GoTrue-cutover when the
       // connector holds no usable refresh cookie).

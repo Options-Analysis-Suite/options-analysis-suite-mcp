@@ -25,7 +25,7 @@ export const INSTITUTIONAL_NOTE = 'From the SEC\'s Form 13F data sets: investmen
 
 const NO_RECORD = 'No institutional (13F) holdings on record for this symbol.';
 
-/** "ETFs holding {T}" (phase C): the proxy's /etf-holders rows - security matches in files classified as the fund's
+/** "ETFs holding {T}": the proxy's /etf-holders rows - security matches in files classified as the fund's
  * own holdings, as reported. */
 export const ETF_HOLDERS_BASIS = "long security matches in files classified as the fund's own holdings (line count at most twice the fund's reported count plus 10, or at most 1,000 for a reported count of exactly 10, which the data source gives many funds as a cap; read with the file or inherited from its last classified file within 20% and 60 days), read within 21 days";
 export const ETF_HOLDERS_EXCLUDED = 'unconfirmed lines, count-mismatch or unknown files, and a fund with any line for the security that is not long (a negative weight, share count or value, or none above zero)';

@@ -11,6 +11,8 @@
 import { MAX_RESPONSE_BYTES } from '../helpers.js';
 import { exDividend, excludedRootsPhrase, isoDate, measuredLevel, measuredValue, metricCoverage, readExcludedRoots, readRegime, RESOLUTION_DIGITS, RESPONSE_MARGIN_BYTES, significant } from './dealerPositioningShaping.js';
 import { readOmittedRows } from './omittedRows.js';
+import type { LiveRateLimit } from '../../proxy/liveApiClient.js';
+import { rateLimitGuide, spotClockGuide, type Guide } from '../liveGuide.js';
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
@@ -24,7 +26,15 @@ const probability = (v: unknown): number | null => {
 const count = (v: unknown): number | null =>
   typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null;
 
-export function summarizeStrategyScan(response: Record<string, unknown>) {
+export interface StrategyScanOptions {
+  /**
+   * The live-broker budget after this call: given, it rides INSIDE the fit with the candidates
+   * and the guide. Absent: no rateLimit field.
+   */
+  rateLimit?: LiveRateLimit | null;
+}
+
+export function summarizeStrategyScan(response: Record<string, unknown>, options: StrategyScanOptions = {}) {
   const body = response ?? {};
   const spot = num(body.spotPrice);
   const pctFromSpot = (price: number | null) =>
@@ -242,19 +252,212 @@ export function summarizeStrategyScan(response: Record<string, unknown>) {
       position: 'one of each leg, times 100, signed for the position (sold legs negative): theta per calendar day, vega per vol point; source "model" is Black-Scholes at each leg\'s IV, "broker" the legs\' published Greeks',
       pctFromSpot: 'percent of spotPrice, signed (below spot is negative)',
       probabilities: 'risk-neutral, lognormal, at the chain\'s own implied volatility at each boundary: model values, not forecasts',
+      // Add reading rules beside the units while preserving the existing definitions.
+      ...scanUnits(candidates, expectedMove !== null),
     },
     resolved: body.resolved ?? null,
+    // The proxy's own success warnings (on success the rate ladder's fallback): the shaper used to drop them.
+    ...(warningsOf(body.warnings).length > 0 ? { warnings: warningsOf(body.warnings) } : {}),
+    ...('rateLimit' in options ? { rateLimit: options.rateLimit ?? null } : {}),
+    guide: {} as Guide,
   };
+  shaped.candidates = candidates;
+  shaped.returned = candidates.length;
+  shaped.guide = scanGuide(shaped, options);
 
-  // Worst-sorted candidates go first when the answer would pass the ceiling.
+  // Fit the final count-dependent guide, budget and candidates together. In particular, an unknown matched count
+  // gains its count line only once rows are removed; that line must not be added outside the measured payload.
   const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
-  const budget = MAX_RESPONSE_BYTES - RESPONSE_MARGIN_BYTES - bytes(shaped);
-  let kept = candidates;
-  while (kept.length > 1 && bytes(kept) > budget) {
-    kept = kept.slice(0, -1);
+  const budget = MAX_RESPONSE_BYTES - RESPONSE_MARGIN_BYTES;
+  while (shaped.candidates.length > 1 && bytes(shaped) > budget) {
+    shaped.candidates = shaped.candidates.slice(0, -1);
+    shaped.returned = shaped.candidates.length;
     shaped.limitedBySize = true;
+    shaped.guide = scanGuide(shaped, options);
   }
-  shaped.candidates = kept;
-  shaped.returned = kept.length;
   return shaped;
+}
+
+const warningsOf = (v: unknown): string[] => (Array.isArray(v) ? v.filter((w): w is string => typeof w === 'string') : []);
+
+/** The rules whose destination is `units`: definitions beside the fields they govern. */
+function scanUnits(candidates: Array<Record<string, unknown>>, withExpectedMove: boolean): Record<string, string> {
+  const u: Record<string, string> = {
+    anchorDelta: 'the anchor\'s absolute published delta; for a two-anchor candidate (iron condor, strangles) the mean of '
+      + 'the two; for a body (straddle, iron butterfly) the call\'s; null when none was sent',
+  };
+  if (candidates.some((c) => c.width !== null && c.width !== undefined)) {
+    u.width = 'the wing distance actually listed; for an iron condor or iron butterfly, the wider of its two wings (the '
+      + 'legs\' strikes show both)';
+  }
+  u.legs = 'a leg\'s Greeks are the broker\'s as published, not checked against the quote, and can be a snapshot older '
+    + 'than it; spreadPct is (ask - bid) over the mid, in percent, null when the mid is zero; iv is null when unpublished '
+    + 'or unusable (0, or above 5)';
+  u.payoff = 'payoff at expiration, from the mid: maxProfit or maxLoss null means unbounded, not unknown; returnOnRisk is '
+    + 'maxProfit over maxLoss, null when either is unbounded or the max loss is 0';
+  u.positionSource = 'source "model" only when every leg has a usable IV, priced with the resolved rate and yield; '
+    + '"broker" sums the legs\' published Greeks and is null (never 0) where a leg lacks one; the legs keep the broker\'s '
+    + 'own Greeks, which can be older than the quote';
+  // an evaluation found "the chance the price ... ends where the position makes money" headlined as the chance the trade
+  // wins: the description's "risk-neutral ... lognormal" and "the chain's own smile" had not come along
+  u.probabilityOfProfit = 'the risk-neutral probability under a lognormal model (not a forecast of the trade winning) '
+    + 'that the price at expiration ends where the position makes money at the mid, each breakeven read at the implied '
+    + 'volatility the chain\'s own smile gives at that price (not a leg\'s own IV at its strike), with the resolved rate and '
+    + 'dividend yield; null (never 0) when '
+    + 'not computable (such as no usable IV in the smile), or when the reported probability is missing or invalid '
+    + '(non-finite or outside 0-1)';
+  u.probabilityOfMaxProfit = 'the same for the region of maximum profit; null when that region is a single price (a '
+    + 'butterfly or straddle body) or unbounded, or when no usable IV prices a boundary of it - never read as 0';
+  // An evaluation found "beat them" read backwards (PoP as an upper bound for short premium): the direction
+  // is said outright.
+  u.probabilityLimits = 'no view on direction; IV has tended to exceed realized, so values have tended to understate, '
+    + 'not overstate, short-premium profit frequency; ignores early assignment, fills, costs. Delta is not used as a probability';
+  // An evaluation found breakevens judged by their strikes against the range; an evaluation found the range,
+  // now named in more answers, called one-sigma beside ivOneSigma (27 bytes of room at 21 dense candidates, so
+  // expectedMoveIv's ivOneSigma sentence was shortened to pay for it).
+  if (withExpectedMove) {
+    u.expectedMove = 'this expiry\'s ATM straddle: callMid+putMid at strike nearest spot with both; lower/upper: '
+      + 'spot -/+ straddle (not one-sigma: see ivOneSigma). pctOfSpot: fraction of spot (0.049 = 4.9%); pctFromSpot: '
+      + 'percent. outsideExpectedMove compares '
+      + 'breakeven price, not strike, to lower/upper';
+  }
+  u.naturalSlippagePct = '(netMid - netNatural) over the size of netMid, in percent: what crossing every leg at the '
+    + 'natural price gives up against the mid, the execution cost a limit at the mid may or may not avoid';
+  u.liquidity = 'minOpenInterest is the thinnest leg\'s open interest, null when any leg\'s is unknown (never 0); '
+    + 'maxSpreadPct is the widest leg\'s spread in percent, null when a leg\'s mid is zero';
+  return u;
+}
+
+/**
+ * The scan's guide: each rule under a stable key when its predicate holds on the shaped answer.
+ */
+function scanGuide(shaped: Record<string, any>, options: StrategyScanOptions): Guide {
+  const g: Guide = {};
+  const strategy = shaped.strategy;
+  const levels = shaped.levels;
+  const provider = shaped.provider;
+  g.bandDelta = 'The delta band runs on the delta the broker publishes: outside trading hours that is the broker\'s last '
+    + 'published value at its own time convention, so a leg\'s delta and the model position.delta priced with the time '
+    + 'left now can read outside the band asked for.';
+  g.skipped = 'Every leg of every candidate has a two-sided quote (bid and ask, the ask above zero and at or above the '
+    + 'bid), a sold leg a bid above zero; a candidate missing one is counted in skipped by reason and never priced from a '
+    + 'last trade or a mark, and a spread whose credit or debit reaches its width is skipped as not a real price. A reason '
+    + 'absent from skipped is a zero count.';
+  if (strategy === 'iron_condor' || strategy === 'iron_butterfly') {
+    g.condorWing = 'An iron condor or butterfly whose credit exceeds one wing keeps money on that whole side: no breakeven '
+      + 'there, and the max loss is on the wider wing (fewer than two breakevens is that case, not missing data).';
+  }
+  if (shaped.expectedMove !== null) {
+    g.expectedMoveIv = 'expectedMove.atmIv is the at-the-money straddle\'s IV: the mean of its usable call/put IVs, '
+      + 'or the sole usable leg\'s IV; null only when neither is usable. '
+      + 'ivOneSigma is the one-sigma move size, spot x atmIv x sqrt(years to expiration), null with atmIv.';
+  } else {
+    g.expectedMoveMissing = 'There is no expected move: expectedMoveUnavailable says why ("atm-quote-missing": the '
+      + 'at-the-money strike lacks a two-sided quote on a leg; "no-strike-with-both-legs"), and every outsideExpectedMove '
+      + 'is null: unknown, not inside.';
+  }
+  g.levelsScope = 'The levels are the gamma flip, call wall, put wall and gamma magnet computed on levels.scope '
+    + '"expiration" (this expiration\'s chain alone) or "window" (the four nearest listed expirations that may still trade).';
+  if (levels.scope === 'window') {
+    g.levelsWindow = 'The window leaves out an expiration whose series has stopped trading: from 4:15 PM New York time on '
+      + 'its day it is left out unless the broker lists nothing else, decided when the book was built (asOf; a cached '
+      + 'answer keeps it). The window is the near-term positioning that moves the market now (get_live_dealer_positioning\'s '
+      + 'default window), not this expiration\'s: for a far expiration its levels can sit well away from the ones that '
+      + 'matter at expiry.';
+  }
+  g.levelCoverage = 'A level is published only under complete coverage (the flip on the flip sweep\'s coverage, the walls '
+    + 'and magnet on net-gamma coverage). In levels.status, "complete" means every active leg was included; "partial" '
+    + 'means only some active legs were included; "unmeasured" means active legs exist but no eligible legs were included; '
+    + '"empty" means no active legs; "unknown" means missing or invalid coverage counts. A null level with any of those '
+    + 'last four statuses is withheld for coverage, not absent; a null beside "complete" is one the computation did not '
+    + 'find. "unavailable" means a missing or invalid reported value, including a level missing despite complete coverage.';
+  const method = levels.gammaFlipMethod;
+  if (method !== null) {
+    g.flipMethod = `levels.gammaFlipMethod "${method}": "repriced" = gamma recomputed from IV for every leg; "frozen-gamma" = `
+      + 'no leg had a usable IV, every published gamma held constant; "mixed" = some of each. The method qualifies the level.'
+      + (method === 'frozen-gamma' || method === 'mixed' ? ' A held gamma is an approximation that can move the level or create one, even over complete coverage.' : '');
+  }
+  if (levels.gammaFlip !== null) {
+    g.flipResolution = 'levels.gammaFlipResolution is the width of the bracket the sign change was found in, not a '
+      + 'confidence interval or an error bound.'
+      + (levels.gammaFlipResolution === null ? ' It is null beside this reported flip: the sampling step was missing, invalid or nonpositive, so the step is unknown - not "no flip".' : '');
+  }
+  g.dealerRegime = levels.dealerRegime !== null
+    ? 'levels.dealerRegime is the computation\'s stated regime when it states one (the sign of net gamma at spot, '
+      + 'interpolated between the strikes bracketing it), and otherwise derived from the sign of net GEX: positive, negative, '
+      + 'or "neutral" when the measured net GEX is exactly zero - so it is not always an at-spot reading; published only '
+      + 'with a measured net gamma under complete coverage.'
+    : 'levels.dealerRegime is null: there is no measured book under complete coverage (levels.status.dealerRegime says '
+      + 'why); it is never "neutral" by default.';
+  if (levels.gammaFlip === null) {
+    const status = levels.gammaFlipSearchStatus;
+    g.flipSearch = 'The flip search samples within 20% of spot, and a pair of crossings within one sample can be missed, '
+      + 'so no detected flip does not prove there is none.'
+      + (status === 'unresolved' ? ' "unresolved": the search reached no conclusion about a crossing.' : '')
+      + (status === null ? ' A null gammaFlipSearchStatus: no leg entered the search, or no recognized status was reported.' : '')
+      + (status === 'found' ? ' "found" beside a null flip: found but withheld for coverage.' : '');
+  }
+  if (levels.openInterestUnpublishedExpirations !== undefined) {
+    g.openInterestUnpublished = 'An expiration in levels.openInterestUnpublishedExpirations had a zero on every contract '
+      + '(as Schwab prints on index options): its legs are excluded, so a level they feed is withheld for incomplete coverage.';
+  }
+  if (shaped.matched === 0) {
+    g.matchedZero = 'matched 0 is a genuine zero over a chain that was read: no candidate passed (skipped says why); an '
+      + 'empty book is never answered this way.';
+  }
+  if (shaped.omittedRows !== undefined) {
+    g.omittedRows = 'omittedRows counts the chain rows that could not be used - quarantined (failed validation), '
+      + 'invalidStrike, notSuccess (marked failed by the broker), unquoted (quotes unreadable), with their total - and no '
+      + 'candidate is built on them.';
+  }
+  if (levels.emptyExpirations !== undefined || levels.omittedRows !== undefined || levels.partial === true) {
+    g.windowGaps = 'levels.emptyExpirations are window dates the broker lists but answered with no contracts, left out of '
+      + 'the levels; the window\'s unusable rows (levels.omittedRows) are left out too; levels.partial is true when a date '
+      + 'or a quote could not be read.';
+  }
+  g.events = shaped.events === null
+    ? 'events is null: the calendar could not be read (the scan is unaffected); that is not "no events".'
+    : 'events gives the first earnings date and the first ex-dividend date on file between today (New York) and the '
+      + 'expiration: a null date means none on file, not none scheduled; the time of day of an earnings release is not on '
+      + 'file; the ex-dividend entry carries its per-share amount and declared (false when no declaration dated on or '
+      + 'before today is on file).';
+  g.sortOrder = 'The sortBy orderings do not rank trades as better or worse.';
+  if (strategy === 'iron_condor' || strategy === 'short_strangle' || strategy === 'long_strangle') {
+    g.sharedAnchor = 'skipped "shared-anchor-strike" counts the pairs the ladder dropped: a put strike whose best call was '
+      + 'taken earlier gets its best pair with a call still free, or none.';
+  }
+  if ((shaped.matched !== null && shaped.returned < shaped.matched) || shaped.limitedBySize) {
+    g.matchedCount = 'matched counts every candidate kept (after the filters and the ladder) before maxResults; '
+      + 'limitedBySize true means the last-sorted candidates were dropped to fit the response.';
+  }
+  g.asOf = 'asOf is when the chain was read; a cached re-scan keeps it, so it does not date the quotes.';
+  const resolved = shaped.resolved !== null && typeof shaped.resolved === 'object' ? shaped.resolved : null;
+  const r = resolved?.r;
+  const suppliedR = r !== null && typeof r === 'object' && r.source === 'supplied';
+  g.rate = (suppliedR ? '' : 'When not supplied, resolved.r is the Treasury series matched to the scanned expiration\'s '
+    + 'tenor (the nearest at or above it: 1 month, 3 months, 6 months, 1 year ...), falling back to the 3-month series '
+    + 'when the matched one cannot be read. ')
+    + 'The levels in the scan are priced at this rate, so they can differ from get_live_dealer_positioning\'s window '
+    + 'levels, which take the 3-month rate.';
+  if (resolved?.q !== null && typeof resolved?.q === 'object' && resolved.q.source === 'profile_yield') {
+    g.profileYield = 'resolved.q.source "profile_yield": no usable trailing yield was resolved, so q is the trailing annual '
+      + 'dividend over the live spot - it moves slightly with spot from call to call - and resolved.q.asOf is when the '
+      + 'profile record was last updated, not when the division was made.';
+  }
+  if (provider === 'moomoo') {
+    g.moomooDelay = 'moomoo serves US option quotes in real time only once the moomoo account holds assets or a US '
+      + 'position; until then they may be delayed (about 15 minutes) with nothing in the data to say so: read moomoo option '
+      + 'prices on such an account as possibly delayed.';
+  }
+  if (resolved?.S !== null && typeof resolved?.S === 'object') g.spotClock = spotClockGuide(provider);
+  if ('rateLimit' in options) {
+    const budget = rateLimitGuide(options.rateLimit ?? null);
+    if (budget) {
+      g.rateLimit = budget + (provider === 'moomoo'
+        ? ' moomoo settles to what it spent: the expirations list, the contract list when it is not cached for the day, '
+          + 'and one snapshot per 400 codes, the underlying\'s among them.'
+        : '');
+    }
+  }
+  return g;
 }

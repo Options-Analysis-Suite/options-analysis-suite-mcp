@@ -266,9 +266,9 @@ export function shapeFundamentalsFull(payload: unknown, extras: Record<string, u
 
 /**
  * No fundamentals on record (the route 404s): a status, never a bare no-data
- * answer. The ETF class has no company statements (their rows were removed
- * with the phase A universe), so SPY answered "No data available" with no
- * reason; the profile's is_etf (set on ETFs, and on some ETNs and trusts)
+ * answer. The ETF class has no company statements, so SPY previously answered
+ * "No data available" without explaining why; the profile's is_etf
+ * (set on ETFs, and on some ETNs and trusts)
  * names an exchange-traded product as one, as get_insider_trading does. A
  * failed profile read says only "this symbol".
  */

@@ -8,7 +8,7 @@ import { register as registerActivist } from './activistFilings.js';
 import { register as registerSecFilings } from './secFilings.js';
 
 /**
- * Proxy failure campaign (review F2 r2 note): the proxy client maps a 404 to null. A summary-mode shaper read that null
+ * Missing-data behavior: the proxy client maps a 404 to null. A summary-mode shaper read that null
  * and answered an internal error; the tool now answers "No data available" (or, for SEC filings, an empty filing list
  * beside the deal flags, which are their own read).
  */

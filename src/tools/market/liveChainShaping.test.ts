@@ -12,7 +12,7 @@
  */
 import { describe, it, expect } from 'bun:test';
 import { summarizeLiveChain, type LiveChainResponse, type LiveOption } from './liveChainShaping.js';
-import { applyResponseSizeGuard, sanitizeMcpWireOutput, utf8ByteLength } from '../helpers.js';
+import { applyResponseSizeGuard, sanitizeMcpWireOutput, utf8ByteLength, WIRE_CEILING_BYTES } from '../helpers.js';
 
 const call = (strike: number, delta: number, over: Partial<LiveOption> = {}): LiveOption => ({
   strike, type: 'call', bid: 1, ask: 1.2, mid: 1.1, iv: 0.2, delta,
@@ -567,4 +567,356 @@ describe('rows the chain left out', () => {
     expect((summarizeLiveChain(wideChain()) as any).omittedRows).toBeUndefined();
     expect((summarizeLiveChain({ ...wideChain(), omittedRows: { total: 'x' } } as any) as any).omittedRows).toBeUndefined();
   });
+});
+
+describe('summarizeLiveChain guide', () => {
+  const BUDGET = { limit: 120, remaining: 117, resetSeconds: 40, provider: 'tradier' };
+  const small = (over: Partial<LiveChainResponse> = {}): LiveChainResponse => ({
+    symbol: 'AAPL', expiration: '2026-10-16', dataSource: 'live', provider: 'tradier', asOf: '2026-10-14T15:00:00.000Z',
+    spotPrice: 250, spotTime: '2026-10-14T14:59:58.000Z', spotStale: false,
+    calls: [call(245, 0.7, { bid: 5.5, ask: 5.7, mid: 5.6, last: 6.1 }), call(250, 0.5, { last: 3.2 }), call(255, 0.25, { last: 1.4 })],
+    puts: [put(245, -0.3, { last: 1.5 }), put(250, -0.5, { last: 3.1 }), put(255, -0.75, { bid: 5.4, ask: 5.6, mid: 5.5, last: 6.2 })],
+    ...over,
+  });
+  const g = (over: Partial<LiveChainResponse> = {}, opts: Record<string, unknown> = {}) =>
+    (summarizeLiveChain(small(over), opts as any) as any).guide as Record<string, string>;
+
+  it('withheld open interest - the note says the totals and the ratio are unknown, and only from 20 contracts', () => {
+    const chain = small({ openInterestUnpublished: true });
+    chain.calls = chain.calls!.map((o) => ({ ...o, openInterest: null }));
+    chain.puts = chain.puts!.map((o) => ({ ...o, openInterest: null }));
+    const note = (summarizeLiveChain(chain) as any).view.note;
+    expect(note).toMatch(/putCallOpenInterestRatio are null \(unknown, not zero\)/);
+    expect(note).toMatch(/at least 20 contracts/);
+    expect((summarizeLiveChain(small()) as any).view.note).not.toMatch(/putCallOpenInterestRatio/);
+  });
+
+  it('withholding does not call an empty side\'s genuine zero unknown', () => {
+    const shaped = summarizeLiveChain(small({
+      openInterestUnpublished: true,
+      calls: Array.from({ length: 20 }, (_, i) => call(240 + i, 0.5, { openInterest: null })),
+      puts: [],
+    }));
+    expect(shaped.totals.calls.openInterest).toBeNull();
+    expect(shaped.totals.puts.openInterest).toBe(0);
+    expect(shaped.totals.puts.contracts).toBe(0);
+    expect(shaped.view.note).toMatch(/nonempty sides/);
+    expect(shaped.view.note).toMatch(/empty side.*openInterest 0 over 0 contracts/i);
+  });
+
+  it('a narrowed window says why in the note; a range that fits says nothing of it', () => {
+    expect((summarizeLiveChain(small()) as any).view.note).not.toMatch(/narrowed evenly/);
+  });
+
+  it('the root rules - the primary on a tie under several roots, a null root, and silence under one root', () => {
+    const several = g({ symbol: 'SPX', roots: ['SPX', 'SPXW'], root: 'SPX',
+      calls: [call(5000, 0.5, { root: 'SPX' }), call(5000, 0.5, { root: 'SPXW' })], puts: [put(5000, -0.5, { root: 'SPX' })], spotPrice: 5000 });
+    expect(several.root).toMatch(/most open interest/);
+    expect(several.root).toMatch(/on a tie/);
+    const rootless = g({ roots: ['AAPL'], root: 'AAPL', calls: [call(250, 0.5, { root: 'AAPL' }), call(255, 0.25, { root: null })] });
+    expect(rootless.root).toMatch(/named no root/);
+    expect(rootless.root).toMatch(/absent means the chain's root/);
+    expect(g({ roots: ['AAPL'], root: 'AAPL', calls: [call(250, 0.5, { root: 'AAPL' })], puts: [put(250, -0.5, { root: 'AAPL' })] }).root).toBeUndefined();
+  });
+
+  it('settlement by root on several roots, a foreign root or an index; not on an ordinary stock', () => {
+    expect(g({ symbol: 'SPX', spotPrice: 250 }).settlement).toMatch(/exchange's specification/);
+    expect(g({ roots: ['SPXW'], root: 'SPXW', symbol: 'SPX', calls: [call(250, 0.5, { root: 'SPXW' })] }).settlement).toMatch(/SPXW at the close/);
+    expect(g().settlement).toBeUndefined();
+  });
+
+  it('Public lists SPX under SPXW only - on Public, for SPX', () => {
+    expect(g({ symbol: 'SPX', provider: 'public' }).publicSpx).toMatch(/SPXW only/);
+    expect(g({ symbol: 'SPX', provider: 'tradier' }).publicSpx).toBeUndefined();
+  });
+
+  it('which roots stay beside left-out adjusted ones, and an empty standard book by listing', () => {
+    expect(g({ excludedRoots: [{ root: 'AAPL1', contracts: 40 }] }).excludedRoots).toMatch(/plus one letter/);
+    expect(g().excludedRoots).toBeUndefined();
+    expect(g({ excludedRoots: [{ root: 'AAPL1', contracts: 40 }], calls: [], puts: [] }).excludedRoots).toMatch(/empty by listing, not an outage/);
+  });
+
+  it('the spot clock - null clauses when unknown, the moomoo clause on moomoo, nothing on a timed fresh spot', () => {
+    expect(g({ spotTime: null, spotStale: null }).spotClock).toMatch(/null for a close or a mark/);
+    expect(g({ spotTime: null, spotStale: null }).spotClock).toMatch(/unknown, never fresh/);
+    expect(g({ provider: 'moomoo' }).spotClock).toMatch(/moomoo[^.]*update time/);
+    expect(g().spotClock).toBeUndefined();
+  });
+
+  it('totals honesty when a side left counts out or a total or ratio is null', () => {
+    expect(g().totals).toBeUndefined();
+    expect(g({ calls: [call(250, 0.5, { volume: null })] }).totals).toMatch(/add up only what the broker reported/);
+  });
+
+  it('last on any shown row, its null clause when a shown last is null; nothing without rows', () => {
+    expect(g().last).toMatch(/hours old/);
+    expect(g().last).not.toMatch(/no trade printed/);
+    expect(g({ calls: [call(250, 0.5, { last: null })] }).last).toMatch(/no trade printed/);
+    expect(g({ spotPrice: null, calls: [call(250, 0.5, { iv: null })], puts: [] }).last).toBeUndefined();
+  });
+
+  it('a null mid explained where a shown row has one', () => {
+    expect(g().mid).toBeUndefined();
+    expect(g({ calls: [call(250, 0.5, { bid: 0 })] }).mid).toMatch(/zero bid/);
+  });
+
+  it('the null legend names every case this tool withholds', () => {
+    const legend = g().nullIsUnknown;
+    for (const fact of ['greeksReason', 'IV', 'last', 'open interest', 'totals']) expect(legend).toContain(fact);
+    expect(legend).toMatch(/different from zero/);
+  });
+
+  it('the withheld Greeks and IVs are this tool\'s call, never the broker\'s mark', () => {
+    const legend = g().nullIsUnknown!;
+    expect(legend).toContain('the Greeks beside an IV this tool found unusable (greeksReason, set by this tool)');
+    expect(legend).toContain('an IV this tool nulled because the broker published a solver sentinel');
+  });
+
+  it('mark where shown; Tradier and moomoo publish none', () => {
+    expect(g().mark).toBeUndefined();
+    expect(g({ provider: 'tastytrade', calls: [call(250, 0.5, { mark: 3.3 })] }).mark).toMatch(/own valuation/);
+    expect(g().markUnpublished).toMatch(/Tradier/);
+    expect(g({ provider: 'schwab' }).markUnpublished).toBeUndefined();
+  });
+
+  it('an unusable IV, and contractsWithoutUsableIv counting never-published IVs with unusable ones', () => {
+    expect(g().iv).toBeUndefined();
+    const iv = g({ calls: [call(250, 0.5, { iv: 0 })] }).iv;
+    expect(iv).toMatch(/sentinel/);
+    expect(iv).toMatch(/never published together with/);
+  });
+
+  it('withheld Greeks beside an unusable IV', () => {
+    expect(g().greeksWithheld).toBeUndefined();
+    expect(g({ calls: [call(250, 1, { iv: 10 })] }).greeksWithheld).toMatch(/zero-vol limit/);
+  });
+
+  it('usable IV does not promise that a broker no-data Greek was published', () => {
+    // Schwab's adapter normalizes a published theta -999 to null independently of its usable 20% IV.
+    const shaped = summarizeLiveChain(small({ provider: 'schwab', calls: [
+      call(250, 0.5, { iv: 0.2, theta: null, gamma: 0.01, vega: 0.1 }),
+      call(255, 1, { iv: 0, theta: -0.1, gamma: 0, vega: 0 }),
+    ] }));
+    expect(shaped.nearTheMoney.calls[0]).toMatchObject({ iv: 0.2, theta: null });
+    expect(shaped.nearTheMoney.calls[0]).not.toHaveProperty('greeksReason');
+    expect(shaped.nearTheMoney.calls[1]).toMatchObject({ greeksReason: 'iv-unusable' });
+    expect(shaped.guide.greeksWithheld).toContain('this tool');
+    expect(shaped.guide.greeksWithheld).toContain('broker no-data values can still be null');
+    expect(shaped.guide.greeksWithheld).not.toContain('keeps the broker\'s Greeks as published');
+  });
+
+  it('the wing selection whenever a wing is shown, and a null wing is not "no options"', () => {
+    expect(g().wings).toMatch(/usable/);
+    expect(g().wings).not.toMatch(/no options/);
+    expect(g({ calls: [call(250, 0.5, { iv: null })] }).wings).toMatch(/not "no options"/);
+  });
+
+  it('a sparse wing explains nearest absolute delta with no tolerance cutoff', () => {
+    const shaped = summarizeLiveChain(small({ calls: [call(250, 0.45)], puts: [put(250, -0.45)] }));
+    expect(shaped.wings.call25Delta?.delta).toBe(0.45);
+    expect(shaped.wings.put25Delta?.delta).toBe(-0.45);
+    expect(shaped.guide.wings).toMatch(/nearest.*\|delta\|.*0\.25/);
+    expect(shaped.guide.wings).toMatch(/no tolerance/);
+  });
+
+  it('a null wing only rules out eligible contracts in the selected primary root', () => {
+    const shaped = summarizeLiveChain(small({
+      symbol: 'SPX', root: 'SPX', roots: ['SPX', 'SPXW'], spotPrice: null,
+      calls: [call(250, 0.5, { root: 'SPX', iv: null }), call(250, 0.25, { root: 'SPXW' })],
+      puts: [put(250, -0.5, { root: 'SPX', iv: null }), put(250, -0.25, { root: 'SPXW' })],
+    }));
+    expect(shaped.wings.call25Delta).toBeNull();
+    expect(shaped.wings.put25Delta).toBeNull();
+    expect(shaped.guide.wings).toMatch(/null wing.*primary root/);
+    expect(shaped.guide.noSpot).toMatch(/wings.*primary root/);
+    expect(shaped.totals.calls.contracts).toBe(2);
+  });
+
+  it('the Greek line on any shown Greek', () => {
+    const line = g().greeks;
+    expect(line).toMatch(/as published/);
+    expect(line).toMatch(/not checked against the quote or the IV beside them/);
+    expect(line).toMatch(/broker's own units/);
+    expect(line).toMatch(/not rescaled and not comparable across brokers/);
+    expect(line).toMatch(/hourly/);
+    expect(line).toMatch(/can carry one theta for the call and the put at a strike/);
+    expect(g({ calls: [call(250, 0.5, { delta: null, iv: null })], puts: [put(250, -0.5, { delta: null, iv: null })] }).greeks).toBeUndefined();
+  });
+
+  it('IV withholding is marked, a shown iv passed the filter, and a limiting delta is not established', () => {
+    const withheld = g({ calls: [call(250, 0.5, { iv: null }), call(255, 0.4)] });
+    expect(withheld.greeksWithheld).toMatch(/^greeksReason "iv-unusable": this tool withholds Greeks for unusable or missing IV/);
+    expect(withheld.greeksWithheld).toContain('A shown iv keeps available Greeks; broker no-data values can still be null.');
+    expect(withheld.greeksWithheld).toContain('a withheld delta 1 beside gamma/vega 0 can be a failed solve\'s zero-vol limit');
+    expect(withheld.greeksWithheld).not.toMatch(/\. Delta 1 with gamma\/vega 0 is/);
+    const missing = g({ calls: [call(250, 0.5, { iv: null, gamma: 0.01, theta: -0.1, vega: 0.1 })] }).greeksWithheld!;
+    expect(missing).not.toMatch(/as they come from a failed solve|come from the same failed solve/);
+    expect(missing).toContain('a withheld delta 1 beside gamma/vega 0 can be a failed solve\'s zero-vol limit');
+    expect(withheld.iv).toContain('a shown iv passed this filter');
+    expect(g({ calls: [call(250, 1)] }).deltaLimit).toContain('neither is established');
+    expect(g({ calls: [call(250, 1)] }).deltaLimit).toContain('no check tells them apart');
+  });
+
+  it('asOf adds the held-quotes clause only on a fetch known to be outside regular hours', () => {
+    const at = (asOf: string | null) => g({ asOf } as any).asOf;
+    const base = 'asOf is the fetch time, not a quote time; quotes are not individually dated.';
+    expect(at('2026-10-14T18:00:00Z')).toBe(base);                                     // 14:00 New York, a Wednesday
+    expect(at('2026-10-14T21:30:00Z')).toBe(`${base} This fetch was outside regular hours: quotes are the last the broker holds.`);
+    expect(at('2026-10-17T15:00:00Z')).toBe(`${base} This fetch was outside regular hours: quotes are the last the broker holds.`); // a Saturday
+    expect(at(null)).toBe(`${base} Outside regular hours the quotes are the last the broker holds. asOf is null: the fetch time is unknown.`);
+  });
+
+  it('a delta of exactly 0 or 1 is suspect', () => {
+    expect(g().deltaLimit).toBeUndefined();
+    const line = g({ calls: [call(250, 1)] }).deltaLimit;
+    expect(line).toMatch(/may be a genuine limit or solver output; neither is established/);
+    expect(line).toMatch(/no check tells them apart/);
+    expect(line).toMatch(/Treat it as suspect beside the quote and IV/);
+    // Migrated from the description: a real premium and usable IV do not identify a solver failure.
+    expect(line).not.toMatch(/exactly 0 or 1 next to a real two-sided quote is that solver/);
+    expect(line).not.toMatch(/real premium and a usable IV[^.]*it is the broker/);
+  });
+
+  it('moomoo quotes may be delayed, on moomoo', () => {
+    expect(g().moomooDelay).toBeUndefined();
+    expect(g({ provider: 'moomoo' }).moomooDelay).toMatch(/15 minutes/);
+  });
+
+  it('asOf is the fetch time and a repeat within 15 seconds may be cached, on every answer', () => {
+    expect(g().asOf).toMatch(/fetch time/);
+    expect(g().cache).toMatch(/15 seconds/);
+  });
+
+  it('a missing asOf explicitly leaves the fetch time unknown', () => {
+    const shaped = summarizeLiveChain(small({ asOf: undefined }));
+    expect(shaped.asOf).toBeNull();
+    expect(shaped.guide.asOf).toMatch(/null.*fetch time.*unknown/);
+    expect(g().asOf).not.toMatch(/fetch time is unknown/);
+  });
+
+  it('a bid below intrinsic, where a shown row has one', () => {
+    expect(g().intrinsic).toBeUndefined();
+    expect(g({ calls: [call(245, 0.7, { bid: 4.5 })] }).intrinsic).toMatch(/below intrinsic/);
+  });
+
+  it('the spot is this broker\'s own, its source by provider; nothing without a spot', () => {
+    expect(g().spotPrice).toMatch(/last, else close/);
+    expect(g({ provider: 'schwab' }).spotPrice).toMatch(/underlying price/);
+    expect(g({ spotPrice: null }).spotPrice).toBeUndefined();
+  });
+
+  it('with no usable spot, no at-the-money pair or window can be read; the wings and totals still come', () => {
+    expect(g().noSpot).toBeUndefined();
+    const x = g({ spotPrice: null });
+    expect(x.noSpot).toMatch(/no usable spot/);
+    expect(x.noSpot).toMatch(/wings and the totals still/);
+  });
+
+  it('the 4:15 parity note at or after 16:00 New York or outside the session, and when asOf is unknown', () => {
+    expect(g().afterClose).toBeUndefined();
+    expect(g({ asOf: '2026-10-14T20:30:00.000Z' }).afterClose).toMatch(/4:15/);
+    expect(g({ asOf: '2026-10-17T15:00:00.000Z' }).afterClose).toMatch(/4:15/);
+    expect(g({ asOf: undefined }).afterClose).toMatch(/4:15/);
+  });
+
+  it('an omitted expiration was the nearest that may still trade; an expiration-day book explains the 4:15 cutoff', () => {
+    expect(g().expiration).toBeUndefined();
+    expect(g({}, { expirationOmitted: true }).expiration).toMatch(/nearest listed/);
+    expect(g({ expiration: '2026-10-14' }).expiration).toMatch(/4:15/);
+  });
+
+  it('an explicit same-day book after the cutoff is never described as filtered', () => {
+    const shaped = summarizeLiveChain(small({ asOf: '2026-10-16T20:30:00.000Z' }), { expirationOmitted: false });
+    expect(shaped.expiration).toBe('2026-10-16');
+    expect(shaped.guide.expiration).toMatch(/default.*4:15/i);
+    expect(shaped.guide.expiration).toMatch(/named expiration is never filtered/);
+    expect(shaped.guide.expiration).not.toMatch(/day's book is passed over from/);
+  });
+
+  it('the default retains an expiring book when the broker lists nothing else', () => {
+    const shaped = summarizeLiveChain(small({ asOf: '2026-10-16T20:30:00.000Z' }), { expirationOmitted: true });
+    expect(shaped.expiration).toBe('2026-10-16');
+    expect(shaped.guide.expiration).toMatch(/nearest listed/);
+    expect(shaped.guide.expiration).toMatch(/nothing else.*retained|retained.*nothing else/);
+    expect(shaped.guide.expiration).toMatch(/early closes.*4:15/i);
+  });
+
+  it('the budget line inside the answer, with the reservation mechanics on tastytrade and moomoo', () => {
+    const plain = summarizeLiveChain(small(), { rateLimit: BUDGET } as any) as any;
+    expect(plain.rateLimit).toEqual(BUDGET);
+    expect(plain.guide.rateLimit).toMatch(/budget after this call/);
+    expect(plain.guide.rateLimit).toMatch(/outstanding reservations/);
+    expect(plain.guide.rateLimit).not.toMatch(/chain longer than its reservation/);
+    expect(g({ provider: 'tastytrade' }, { rateLimit: BUDGET }).rateLimit).toMatch(/chain longer than its reservation/);
+    expect(g().rateLimit).toBeUndefined();
+  });
+
+  it('successful tastytrade and moomoo answers explain the whole-budget exception, including an unknown budget', () => {
+    for (const provider of ['tastytrade', 'moomoo']) {
+      for (const rateLimit of [BUDGET, null]) {
+        const line = g({ provider }, { rateLimit }).rateLimit;
+        expect(line).toMatch(/bigger than the whole budget.*runs alone/);
+        expect(line).toMatch(/charged in full/);
+        expect(line).toMatch(/reset only while something else is in the window/);
+      }
+    }
+    expect(g({ provider: 'tradier' }, { rateLimit: BUDGET }).rateLimit).not.toMatch(/runs alone/);
+  });
+
+  it('the dense grid narrows evenly with rows, guide and rateLimit inside one fit, and the guard passes it whole', () => {
+    const dense = denseChainForGuide();
+    const shaped = summarizeLiveChain(dense, { strikeRange: 40, rateLimit: BUDGET, expirationOmitted: true } as any) as any;
+    expect(shaped.view.narrowedForSize).toBe(true);
+    expect(shaped.view.note).toMatch(/narrowed evenly/);
+    expect(shaped.rateLimit).toEqual(BUDGET);
+    expect(Object.keys(shaped.guide).length).toBeGreaterThan(8);
+    const range = shaped.view.strikeRange;
+    for (const side of [shaped.nearTheMoney.calls, shaped.nearTheMoney.puts]) {
+      expect(side[0].strike).toBe(500 - range / 2);
+      expect(side[side.length - 1].strike).toBe(500 + range / 2);
+    }
+    const wire = applyResponseSizeGuard(shaped);
+    expect(utf8ByteLength(wire)).toBeLessThanOrEqual(WIRE_CEILING_BYTES);
+    expect(JSON.parse(wire)).toEqual(JSON.parse(JSON.stringify(sanitizeMcpWireOutput(shaped))));
+  });
+});
+
+function denseChainForGuide(): LiveChainResponse {
+  const calls: LiveOption[] = []; const puts: LiveOption[] = [];
+  for (let i = 0; i <= 100; i += 1) {
+    const strike = 475 + i / 2;
+    const long = (base: number, scale: number) => base + Math.sqrt(i + 2) / scale;
+    const shared = {
+      bid: long(10, 7), ask: long(10.5, 7), mid: long(10.25, 7), mark: long(10.25, 7), last: long(10.1, 7),
+      iv: long(0.3, 700), gamma: long(0.01, 7e5), theta: -long(0.1, 7e3), vega: long(0.3, 7e4),
+      volume: 1_234_567 + i, openInterest: 7_654_321 + i,
+    };
+    calls.push(call(strike, long(0.2, 170), shared));
+    puts.push(put(strike, -long(0.2, 170), shared));
+  }
+  return { symbol: 'MU', expiration: '2026-10-02', dataSource: 'live', provider: 'tastytrade', asOf: '2026-09-23T19:10:46.783Z', spotPrice: 500, calls, puts };
+}
+
+it('the expanded cautions retain a complete 77-row-per-side window that fitted at an earlier build', () => {
+  const chain = denseChainForGuide();
+  chain.asOf = '2026-09-23T21:10:46.783Z';
+  for (const side of [chain.calls!, chain.puts!]) {
+    for (let i = 0; i < side.length; i++) {
+      for (const [key, value] of Object.entries(side[i])) {
+        if (typeof value === 'number') (side[i] as Record<string, unknown>)[key] = Number(value.toPrecision(13));
+      }
+      if (i >= 14 && i < 22) side[i].gamma = Number((0.01 + Math.sqrt(i + 2) / 7e5).toPrecision(15));
+    }
+  }
+  chain.calls![50].iv = 0;
+  chain.puts![50].delta = 0;
+  const shaped = summarizeLiveChain(chain, { strikeRange: 38, expirationOmitted: true,
+    rateLimit: { provider: 'tastytrade', remaining: 90, limit: 120, resetSeconds: 50 } });
+  expect(shaped.view.narrowedForSize).toBe(false);
+  expect(shaped.nearTheMoney.calls).toHaveLength(77);
+  expect(shaped.nearTheMoney.puts).toHaveLength(77);
+  const wire = JSON.parse(applyResponseSizeGuard(shaped));
+  expect(wire.nearTheMoney.calls).toHaveLength(77);
+  expect(wire.guide).toEqual(shaped.guide);
+  expect(utf8ByteLength(JSON.stringify(wire))).toBeLessThanOrEqual(WIRE_CEILING_BYTES);
 });

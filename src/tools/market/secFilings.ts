@@ -56,11 +56,11 @@ export function register(server: McpServer, client: ProxyClient): void {
         days: z.number().int().min(1).max(90).default(30).describe('scope market: how many days of filings, 1-90 (default 30).'),
         full: z.boolean().optional().describe('Return the raw SEC EDGAR filing payload instead of the compact summary (scope symbol).'),
       },
-      // OpenAI app review treats openWorldHint as public-state mutation. This
-      // tool may read public SEC EDGAR data through the proxy, but it cannot
-      // submit filings or change public or third-party systems.
+      // openWorldHint is true for public internet access, including read-only calls (OpenAI Apps SDK).
+      // The symbol scope can read SEC EDGAR live; market scope and corporate flags read stored filings.
+      // It cannot submit filings or change any public or third-party system.
       outputSchema: marketDataOutputSchema,
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     },
     toolHandler(async ({ symbol, scope, limit, type, days, full }) => {
       if (scope === 'market') {

@@ -5,6 +5,7 @@
  * Converts exceptions into structured MCP error responses.
  */
 import { AuthError, SubscriptionError, ApiError } from '../types.js';
+import { BUDGET_UNKNOWN, liveErrorMeaning, RefusedBeforeRequest, type LiveTool } from './liveGuide.js';
 
 type ToolResult = {
   content: Array<{ type: 'text'; text: string }>;
@@ -13,6 +14,12 @@ type ToolResult = {
 };
 
 export const MAX_RESPONSE_BYTES = 50 * 1024; // 50 KB
+// The guard's line on the wire: Claude Code persists a text result over 50,000 characters
+// to a file, and UTF-8 bytes are never fewer than UTF-16 code units, so 49,920 bytes is always under that line.
+// MAX_RESPONSE_BYTES stays: the margin shapers derive their own budgets (49,152) from it.
+export const WIRE_CEILING_BYTES = 49_920;
+// The collapse branch's word to the model: the values are gone, and what to ask instead.
+export const COLLAPSE_MESSAGE = 'The answer exceeded the response size limit, so no values were returned. Narrow the request (fewer symbols, expirations, strikes or days) and call again.';
 const UTF8_ENCODER = new TextEncoder();
 
 export function utf8ByteLength(value: string): number {
@@ -172,7 +179,7 @@ const BARE_URL_RE = /^\s*https?:\/\/\S+\s*$/i;
  * unrelated escape (%FF) cannot leave the rest encoded the way decoding the
  * whole string at once would (it throws). In each run of consecutive
  * escapes, every position takes the longest valid sequence of up to four
- * escapes (one UTF-8 character, so %C2%A0 stays one character), and a byte
+ * escapes, and a byte
  * that starts none stays encoded. The sequence is found by reading the bytes,
  * not by letting decodeURIComponent throw on each width: four throws for
  * every %FF made a 64 KB run of them cost 60 ms per read, a dozen reads per
@@ -627,11 +634,11 @@ function aggressivelyTrimLargeArrays(data: unknown, maxItems = 5): unknown {
 }
 
 // Intentionally stringify first, then measure the exact UTF-8 wire bytes. A
-// pre-stringify estimator (PR #52) over-counted some ASCII payloads and
+// pre-stringify estimator over-counted some ASCII payloads and
 // under-counted other strings. The shaped data is already capped per tool, so
 // exact TextEncoder measurement is both simpler and correct for multibyte text.
 // Do not reintroduce an estimator without validating it against encoded JSON.
-export function applyResponseSizeGuard(data: unknown, maxResponseBytes = MAX_RESPONSE_BYTES): string {
+export function applyResponseSizeGuard(data: unknown, maxResponseBytes = WIRE_CEILING_BYTES): string {
   data = sanitizeMcpWireOutput(data);
   let json = JSON.stringify(data);
   if (utf8ByteLength(json) <= maxResponseBytes) return json;
@@ -646,8 +653,12 @@ export function applyResponseSizeGuard(data: unknown, maxResponseBytes = MAX_RES
 
   const processedBytes = utf8ByteLength(json);
   if (processedBytes > maxResponseBytes) {
+    // Every value is gone on this branch, a tool's guide with them (the rules it governed no longer apply); what must
+    // reach the model is that nothing came back and how to ask again.
     json = JSON.stringify({
+      dataAvailable: false,
       error: 'Response too large for MCP response budget.',
+      message: COLLAPSE_MESSAGE,
       responseBudget: { tooLarge: true, sizeKb: Math.round(processedBytes / 1024) },
     });
   }
@@ -886,7 +897,11 @@ export function toolHandler<T extends Record<string, unknown>>(
    * of the value rows were chosen with, which rounded would name a
    * different one).
    */
-  opts?: { isSyncTool?: boolean; keepOnEmpty?: readonly string[]; exactPaths?: readonly string[]; shape?: (data: unknown) => unknown },
+  /**
+   * liveTool: a live broker tool: its structured errors carry `meaning` (liveGuide.ts - the code
+   * legend and the budget line), and its text-only errors the budget-unknown sentence.
+   */
+  opts?: { isSyncTool?: boolean; keepOnEmpty?: readonly string[]; exactPaths?: readonly string[]; shape?: (data: unknown) => unknown; liveTool?: LiveTool },
 ): (args: T) => Promise<ToolResult> {
   return async (args: T): Promise<ToolResult> => {
     try {
@@ -981,6 +996,12 @@ export function toolHandler<T extends Record<string, unknown>>(
         structuredContent: structuredContentFromJson(json),
       };
     } catch (err: any) {
+      // A live tool's text-only failures (no structured field to carry it) say the budget is unknown in the text: a
+      // failure after the request left may have spent broker quota.
+      // A refusal the server made before sending anything (RefusedBeforeRequest) cannot have spent quota; and the
+      // sentence follows a full stop, never run on to a message that brought none.
+      const withBudgetNote = (text: string): string => (opts?.liveTool && !(err instanceof RefusedBeforeRequest)
+        ? `${text}${/[.!?:;]$/.test(text) ? '' : '.'} ${BUDGET_UNKNOWN}` : text);
       // Every branch is bounded, not only the structured one. These messages
       // are backend-authored and can quote what the caller sent, so an upstream
       // that echoes a 100,000-character symbol was reaching the client whole.
@@ -1072,7 +1093,10 @@ export function toolHandler<T extends Record<string, unknown>>(
           // and the guidance where the message brought none: "not listed for
           // SPY Retrying will not succeed" read as one sentence.
           const prefix = code ? `API error (${code}): ` : 'API error: ';
-          const guidance = `${hint}${action}`;
+          // A live tool's legend rides in the reserved guidance too:
+          // what the code means and what the budget says decide the next call as much as the retry hint does.
+          const meaning = opts?.liveTool ? liveErrorMeaning(opts.liveTool, code, detailsFit ? details : {}, !detailsFit) : undefined;
+          const guidance = `${hint}${action}${meaning ? ` ${meaning}` : ''}`;
           const reserved = utf8ByteLength(prefix) + utf8ByteLength(guidance) + 1;
           const shownMessage = truncateToBytes(message, Math.max(0, MAX_ERROR_TEXT_BYTES - reserved));
           const separator = shownMessage && guidance && !/[.!?:;]$/.test(shownMessage) && !shownMessage.endsWith(TRUNCATION_SUFFIX) ? '.' : '';
@@ -1089,17 +1113,18 @@ export function toolHandler<T extends Record<string, unknown>>(
               retryable: structured.retryable,
               actionUrl,
               ...(detailsFit ? details : { detailsOmitted: true }),
+              ...(meaning ? { meaning } : {}),
             },
             isError: true,
           };
         }
         return {
-          content: [{ type: 'text', text: `API error: ${truncateToBytes(scrubVendorText(String(err.message ?? '')), MAX_ERROR_MESSAGE_BYTES)}` }],
+          content: [{ type: 'text', text: withBudgetNote(`API error: ${truncateToBytes(scrubVendorText(String(err.message ?? '')), MAX_ERROR_MESSAGE_BYTES)}`) }],
           isError: true,
         };
       }
       return {
-        content: [{ type: 'text', text: `Error: ${truncateToBytes(scrubVendorText(String(err.message || 'Unknown error')), MAX_ERROR_MESSAGE_BYTES)}` }],
+        content: [{ type: 'text', text: withBudgetNote(`Error: ${truncateToBytes(scrubVendorText(String(err.message || 'Unknown error')), MAX_ERROR_MESSAGE_BYTES)}`) }],
         isError: true,
       };
     }

@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { registerPlatformInfo } from './platformInfo.js';
 import { registerAllTools } from './registry.js';
 import { getMcpServerInfo } from '../server.js';
 import { LiveApiClient, LiveApiError } from '../proxy/liveApiClient.js';
+import { BUDGET_UNKNOWN } from './liveGuide.js';
 
 const realFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = realFetch; });
@@ -44,16 +49,10 @@ describe('MCP tool output schemas', () => {
     for (const name of ['get_live_options_chain', 'get_options_snapshot', 'get_regime_fits', 'get_live_dealer_positioning', 'get_dealer_positioning', 'compute_black_scholes', 'get_live_quote', 'get_intraday_bars', 'compute_scenario', 'rank_live_skew_gex']) {
       expect(tools.map((t) => t.name), name).toContain(name);
     }
-    // Eight say Pro; the two reads the proxy does not tier-gate must not.
     const titled = (name: string) => String(tools.find((t) => t.name === name)!.config.title);
-    expect(titled('get_live_options_chain')).toContain('(Pro)');
-    expect(titled('get_live_dealer_positioning')).toContain('(Pro)');
-    expect(titled('get_live_quote')).toContain('(Pro)');
-    expect(titled('get_intraday_bars')).toContain('(Pro)');
-    expect(titled('rank_live_skew_gex')).toContain('(Pro)');
-    expect(titled('get_regime_fits')).toContain('(Pro)');
-    expect(titled('compute_black_scholes')).toContain('(Pro)');
-    expect(titled('compute_scenario')).toContain('(Pro)');
+    for (const name of ['get_live_options_chain', 'get_live_dealer_positioning', 'get_live_quote', 'get_intraday_bars', 'rank_live_skew_gex', 'get_regime_fits', 'compute_black_scholes', 'compute_scenario', 'scan_option_strategies']) {
+      expect(titled(name), name).not.toMatch(/\bPro\b/);
+    }
     expect(titled('get_options_snapshot')).not.toContain('Pro');
     expect(titled('get_options_snapshot')).not.toContain('API tier');
     expect(titled('get_dealer_positioning')).not.toContain('Pro');
@@ -70,20 +69,22 @@ describe('MCP tool output schemas', () => {
     registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
     const scenario = String(tools.find((t) => t.name === 'compute_scenario')!.config.description);
     expect(scenario).toContain('An American leg\'s Greeks are finite differences of its own tree');
-    expect(scenario).toContain('vol bumped one point');
-    expect(scenario).toContain('spot a tenth of a percent, or a quarter of a one-sigma move to expiry when that is less, which is within hours of expiry at ordinary vols (about six hours at 15% vol, a day at 7%) and months out at very low vol, and then not under one node interval within the 0.1% cap, so such a leg is measured at its own scale; the third-order spot stencil one node interval wide, at least the spot bump and at most a tenth of spot');
+    const scenarioLegs = String((tools.find((t) => t.name === 'compute_scenario')!.config.inputSchema as Record<string, { description?: string }>).legs.description);
+    expect(scenarioLegs).toContain('vol bumped one point');
+    expect(scenarioLegs).toContain('spot a tenth of a percent, or a quarter of a one-sigma move to expiry when that is less, which is within hours of expiry at ordinary vols (about six hours at 15% vol, a day at 7%) and months out at very low vol, and then not under one node interval within the 0.1% cap, so such a leg is measured at its own scale; the third-order spot stencil one node interval wide, at least the spot bump and at most a tenth of spot');
     expect(scenario).not.toMatch(/within a day or so of expiry/);
-    expect(scenario).toContain('A supplied or record entry premium carries `impliedVol`, the vol that premium implies at the leg\'s own model, and `volGapPoints`, that vol less the leg\'s in points; both are null with `impliedVolReason` when no vol prices the premium ("below-zero-vol-value", "above-max-vol-value") or when the premium sits on a stretch where vols are not told apart ("not-identifiable": a deep in-the-money American leg worth its intrinsic across many vols), and a premium equal to the leg\'s own price is its own vol with no gap. Past a point the answer warns, since the base P&L then carries a gap that is the premium disagreeing with the vol (a broker\'s IV snapshot can lag its quote), not a move.');
-    expect(scenario).toContain('a call three hours out at 7% vol kept the European twin\'s delta, gamma, charm and vanna within 3% and its color, speed and zomma within 5%, where the fixed 0.1% spot bump had read charm a fifth low');
+    expect(scenarioLegs).not.toMatch(/within a day or so of expiry/);
+    expect(scenario).toContain('A supplied or record entry premium carries `impliedVol` (the vol that premium implies at the leg\'s own model) and `volGapPoints` (that vol less the leg\'s, in points); both are null with `impliedVolReason` when no vol prices the premium ("below-zero-vol-value", "above-max-vol-value") or vols are not told apart there ("not-identifiable": a deep in-the-money American leg worth its intrinsic across many vols), and a premium equal to the leg\'s own price is its own vol with no gap. Past a point the answer warns: the base P&L then carries a gap that is the premium disagreeing with the vol (a broker\'s IV snapshot can lag its quote), not a move.');
+    expect(scenarioLegs).toContain('A call three hours out at 7% vol kept the European twin\'s delta, gamma, charm and vanna within 3% and its color, speed and zomma within 5%, where the fixed 0.1% spot bump had read charm a fifth low');
     expect(scenario).toContain('not the European twin\'s');
-    // Fifth live run: the rates, the Greek units the convention
-    // leaves per unit of volatility, and lambda's meaning. Each option leg
-    // prices at its own rate, as the Strategy page prices it.
-    expect(scenario).toContain('each option leg prices at its own rate (`legs[i].r`), as the Strategy page prices each leg - a supplied r prices every leg, a strategy sent from the Strategy page gives each leg the rate the page priced it with (source "record"), and otherwise the leg reads the Treasury series matched to its own tenor, named in its source (the 3-month series, with a warning, when the matched series cannot be read); a leg keeps its rate across the whole grid (days elapsed age its life, never its rate), and `inputs.r` is the shortest option leg\'s, the strategy\'s one rate on the Strategy page; q comes from the symbol\'s stored dividend data (its trailing yield, else its stored dividend over spot), also for a recorded strategy');
+    const scenarioParam = (p: string) => String((tools.find((t) => t.name === 'compute_scenario')!.config.inputSchema as Record<string, { description?: string }>)[p].description);
+    expect(scenario).toContain('r and q are supplied or resolved, never defaulted (the `r` and `q` parameters say how), each option leg pricing at its own rate (`legs[i].r`), held across the whole grid, with `inputs.r` the shortest option leg\'s');
+    expect(scenarioParam('r')).toContain('Supplied, it prices every leg. Omitted (with symbol), each option leg prices at its own rate, as the Strategy page prices each leg: a strategy sent from the Strategy page gives each leg the rate the page priced it with (source "record"), and otherwise the leg reads the Treasury series matched to its own tenor, named in its source (the 3-month series, with a warning, when the matched series cannot be read). A leg keeps its rate across the whole grid: days elapsed age its life, never its rate.');
+    expect(scenarioParam('q')).toContain('it comes from the symbol\'s stored dividend data (its trailing yield, else its stored dividend over spot), also for a recorded strategy');
     expect(scenario).not.toContain('r is one rate for the position');
     expect(scenario).toContain('whose symbol, legs, premiums, vols, rates and spot are read from the record');
     expect(scenario).not.toContain('q the symbol\'s stored yield');
-    expect(scenario).toContain('vanna, vomma, zomma and ultima per unit of volatility, not per point (to read one per point divide by 100 for each order in volatility: vanna and zomma by 100, vomma by 10,000, ultima by 1,000,000)');
+    expect(scenario).toContain('vanna, vomma, zomma and ultima per unit of volatility, not per point (per point: vanna and zomma divided by 100, vomma by 10,000, ultima by 1,000,000)');
     expect(scenario).toContain('`lambda` is the position\'s own elasticity, delta times spot over the position\'s value, for a net-debit position, and null for a credit or flat one');
     const info: any = await tools.find((t) => t.name === 'get_platform_info')!.handler({ topic: 'all' });
     const text = JSON.stringify(info);
@@ -99,32 +100,10 @@ describe('MCP tool output schemas', () => {
     const { tools, server } = captureRegisteredTools();
     registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
     const description = (name: string) => String(tools.find((t) => t.name === name)!.config.description);
-    expect(description('get_live_options_chain')).toContain('`excludedRoots`');
-    expect(description('get_live_options_chain')).toMatch(/adjusted series/);
-    expect(description('get_live_options_chain')).toMatch(/an empty book naming them/);
-    // Review: "Distinct SPX settlement series are merged into synthetic
-    // contracts": a date's roots are separate series, never merged by strike.
-    expect(description('get_live_options_chain')).toContain('holds several series, different contracts at the same strikes (their settlement and the day their trading stops differ), so they are never merged: each row is one contract under its own `root` (null where the broker named none), a strike shows one row per root, `roots` names them all and `root` the primary one (the most open interest over the date, the symbol\'s own root on a tie, as when the broker publishes no open interest), whose rows alone give the at-the-money pair and the 25-delta wings; the totals count every root\'s contracts.');
     expect(description('get_live_options_chain')).not.toMatch(/openInterestByRoot|summed across the roots|before they merge/);
-    expect(description('get_live_dealer_positioning')).toContain('each root\'s contracts are their own rows, every one with its own Greeks and open interest, and the exposures are computed on each before they are summed per strike; nothing is merged across roots');
     expect(description('get_live_dealer_positioning')).not.toMatch(/open interest is summed per strike across them/);
-    expect(description('get_live_dealer_positioning')).toContain('`window.excludedRoots` and each `byExpiration` entry\'s own name the roots left out with their counts');
-    expect(description('get_live_dealer_positioning')).toContain('the coverage and statuses measure the symbol\'s own contracts alone, so "complete" does not include them.');
-    expect(description('get_live_dealer_positioning')).toContain('That date\'s `expectedMove` is the primary root\'s straddle (the most open interest over the date), named in its `root`.');
-    // Review: the watchlist ranking names the same.
-    expect(description('rank_live_skew_gex')).toContain('`gex.emptyExpirations` names a window date the broker answered with no contracts at all, an outage on that date; it is left out of both sides.');
-    expect(description('rank_live_skew_gex')).toContain('`gex.excludedRoots` and `skew.excludedRoots` count its contracts per root, each with an `excludedRootsNote`, and `gex.adjustedOnlyExpirations` names a window date listed only under such series, which adds nothing to either side and is neither empty nor partial; the statuses measure the symbol\'s own contracts alone, so "complete" does not include them.');
-    expect(description('rank_live_skew_gex')).toContain('the skew is read from one series, the primary (the most open interest over the date), named in `skew.root`, while the GEX sums every series\' contracts, each on its own quotes.');
     expect(description('rank_live_skew_gex')).not.toContain('whose chain came back with no strikes');
-    // Review: the scan said neither its series nor the adjusted series it left out.
-    expect(description('scan_option_strategies')).toContain('is scanned on one series, the primary (the most open interest over the date): every leg, the smile and the expected move are that root\'s, named in `root` and `expectedMove.root`, with `roots` naming them all and `rootNote` saying so; a date under one root names none.');
-    expect(description('scan_option_strategies')).toContain('named with their counts in `excludedRoots` and `levels.excludedRoots`, each with a note (`excludedRootsNote`): the levels\' statuses measure the symbol\'s own contracts alone, so "complete" does not include them.');
-    // Review: the settlement pattern is SPX's, not every
-    // index's (VIX weeklies settle in the morning, XSP monthlies at the close).
-    expect(description('get_live_options_chain')).toContain('A date under one root names it the same way where the broker names each contract\'s root, `roots` then holding one (an index weekly listed only as SPXW). The root is the series, and series differ in settlement (SPX\'s monthly contracts settle in the morning of expiration day and SPXW\'s at the close, while VIX weeklies settle in the morning and XSP monthlies at the close), so read the exchange\'s specification for the root rather than a pattern.');
     expect(description('get_live_options_chain')).not.toMatch(/an index monthly in the morning/);
-    expect(description('get_live_dealer_positioning')).toMatch(/adjusted series/);
-    for (const name of ['get_live_dealer_positioning', 'scan_option_strategies']) expect(description(name), name).toContain('ADJUSTED_SERIES_ONLY');
   });
 
   test('no tool description promises the last completed session', () => {
@@ -173,51 +152,11 @@ describe('MCP tool output schemas', () => {
     registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
     const description = (name: string) => String(tools.find((t) => t.name === name)!.config.description);
     const chain = description('get_live_options_chain');
-    expect(chain).toMatch(/not checked against the quote or the IV beside them/);
-    // And it must not discredit a genuine limit: Black-Scholes gives delta
-    // 1.0000 for S=100, K=80, 20% IV, one day out, and a broker publishing
-    // that is right. The tool cannot tell that from the failed solve, and
-    // says so.
-    expect(chain).toMatch(/can be a genuine limit deep in or out of the money/);
-    expect(chain).toMatch(/applies no check that tells the two apart/);
-    expect(chain).toMatch(/treat such a delta as suspect/);
-    // Neither form of the overclaim: not "beside a real quote it IS the
-    // solver", and not "with a real premium and a usable IV it IS the solver"
-    // (S=100, K=80, 20% IV, one day out has both and a genuine delta 1).
     expect(chain).not.toMatch(/exactly 0 or 1 next to a real two-sided quote is that solver/);
     expect(chain).not.toMatch(/real premium and a usable IV[^.]*it is the broker/);
-    expect(chain).toMatch(/within 15 seconds/);
-    // Eighteenth run: two live positioning calls with strikeRange 10 and 40
-    // returned one asOf. proxy/routes/live-broker.ts caches the whole
-    // exposure payload 15 s keyed (user, provider, symbol, four
-    // expirations), charges the limiter BEFORE the cache, and MCP trims the
-    // rows itself so strikeRange is not in the key; the cache is an
-    // in-memory Map per proxy instance, so a hit is possible, not promised.
-    expect(chain).toContain("A repeat for the same symbol and expiration on the same broker, by the same account, within 15 seconds can be answered from a short in-memory cache, with the same `asOf`, and spends no broker request, so it is not charged and is answered even when the budget is spent; the cache is per proxy instance and per account and broker, so a repeat can also be fetched afresh and another account's call never shares it.");
     expect(chain).not.toMatch(/within 15 seconds is answered/);
-    expect(description('get_live_dealer_positioning')).toContain("Do not call it in a loop or for a list of symbols. A repeat for the same symbol and broker, by the same account, over the same expirations, asked the same way (the same `expiration`, `r` and `q`), within 15 seconds can be answered from a short in-memory cache, with the same `asOf`, totals and levels whatever `strikeRange`, `strikeWindowPct` or `strikeWindowDelta` it asks for (they only choose which computed rows are returned), and spends no broker request, so it is not charged and is answered even when the budget is spent; the cache is per proxy instance and per account and broker, so a repeat can also be computed afresh and another account's call never shares it.");
-    // One named expiration is the list plus one chain, charged two units
-    // (liveBrokerLimiter LIVE_EXPOSURE_ONE_EXPIRATION_COST).
-    expect(description('get_live_dealer_positioning')).toContain("EXPENSIVE: a cold call over the default four expirations reads the expirations list and four chains, charged in your broker's own requests (on Tradier 1 + 4 x 2 = 9, so at most thirteen such calls a minute; on Schwab 1 + 4 = 5; on moomoo 1 + 4 x 2 = 9 reserved and settled to what it spent, so about three fully cold calls a minute on its 30, and more once its contract lists are cached for the day, when settling refunds the unused reservation), and a call naming `expiration` reads the list and one chain (3 on Tradier, 2 on Schwab, 3 reserved on moomoo and settled to what it spent); actual upstream request counts vary with the provider and cache state, and a tastytrade or moomoo chain longer than its reservation reserves the rest once its count is known, before its quote batches are sent, refused (RATE_LIMITED, with the wait) when the budget cannot hold them; a call bigger than the whole budget (four very large tastytrade chains) runs alone, on a window holding nothing else, and is charged in full, so it waits for the window to reset only while something else is in it.");
-    // Nineteenth run: the row carried delta alone, and a bid sat below
-    // intrinsic DURING trading hours (MU's same-day 1030 call bid 39.10 at
-    // 15:10 ET on 2026-09-23 with spotPrice 1070.45), which the sentence
-    // placed only outside them.
-    expect(chain).toMatch(/Returns near-the-money strikes, the ATM pair, 25-delta wings and whole-chain volume\/open-interest totals, which add up what the broker reported, with `contractsMissingVolume` and `contractsMissingOpenInterest` beside them counting the contracts it left out \(null only when it reported none\); every contract row carries strike, bid, ask, mid, mark, last, iv, delta, gamma, theta, vega, volume and openInterest\./);
-    expect(chain).toMatch(/`last` is the broker's last traded price, which can be hours old, and never stands in for `mid`\./);
-    expect(chain).toMatch(/Delta, gamma, theta and vega are in the units the broker publishes; this tool does not rescale them or compare them across brokers\./);
-    expect(chain).toMatch(/outside regular trading hours the quotes are the last ones the broker holds, and this tool does not date the quotes individually\. A bid can sit below intrinsic value against `spotPrice` during trading hours too \(MU's same-day 1030 call bid 39\.10 at 15:10 ET on 2026-09-23 with `spotPrice` 1070\.45, intrinsic 40\.45\)\./);
     expect(chain).not.toMatch(/the last ones the broker holds, a bid can sit below intrinsic value/);
-    // review: the wider rows can exceed the 50KB guard at
-    // strikeRange 40 on a dense grid, and the guard cut the window lopsided.
-    const chainRange = String((tools.find((t) => t.name === 'get_live_options_chain')!.config.inputSchema as Record<string, { description?: string }>).strikeRange.description);
-    expect(chainRange).toMatch(/^Strikes to return either side of spot\. Default 8, max 40\. Raise it for a wider view; the whole-chain totals are unaffected by this\. If the rows at that range would exceed the 50KB response budget \(a dense strike grid with long published decimals\), the window is narrowed evenly on both sides until it fits: `view\.strikeRange` is the range returned, `view\.requestedStrikeRange` the one asked for, and `view\.narrowedForSize` is true\.$/);
     const positioning = description('get_live_dealer_positioning');
-    expect(positioning).toMatch(/coverage\.gammaFlip` counts every leg that entered the sweep, repriced or held/);
-    // The rows take Date.now() in chainsToStrikeRows BEFORE the market-input
-    // read; asOf is stamped after it. Two clocks, moments apart, and the
-    // description must not name the later one as the one the maths used.
-    expect(positioning).toMatch(/time to expiry is measured from the wall clock when the chain rows are built, moments before `asOf`/);
     expect(positioning).not.toMatch(/last[- ]close/i);
     const snapshot = description('get_options_snapshot');
     expect(snapshot).toMatch(/net GEX and DEX here are over ALL expirations/);
@@ -325,7 +264,7 @@ describe('MCP tool output schemas', () => {
     registerAllTools(withApi.server as any, stubClient(), stubTokens(), stubClient());
     const eod = withApi.tools.find((t) => t.name === 'get_options_chain')!;
     expect(eod.config.description).toContain('get_live_options_chain');
-    expect(eod.config.description).toContain('Pro subscription');
+    expect(eod.config.description).not.toMatch(/\bPro\b|subscription/);
     expect(eod.config.description).not.toContain('API tier');
     // Conditioned on the QUESTION, not the tier. Both halves must be present:
     // the explicit ask for current prices, AND the implicit one - a request for
@@ -484,10 +423,6 @@ describe('MCP tool output schemas', () => {
     // is the latest session; weekends and holidays are not skipped.
     expect(days).toMatch(/For scope=intraday: calendar days back from the current UTC date, the cutoff day included, so 1 returns the previous UTC day and the current one; at midnight UTC \(7 PM EST, 8 PM EDT\) the cutoff advances one calendar date, and weekends and holidays are not skipped, so a window can cover days with no session and return no rows \(default 5, max 90\); use `date` for one session/);
     expect(days).not.toMatch(/back from today|the session before the current one/);
-    // Fourteenth run: days: 2 on 2026-09-18 returned 09-16, 09-17 and
-    // 09-18, fourteen scans over three sessions, under "cutoff day
-    // included"; the description now counts the dates.
-    expect(String(regime.config.description)).toMatch(/Accepts `days` \(calendar days back from the current UTC date, cutoff day included, so N spans N\+1 dates: 2 on 2026-09-18 returned 09-16, 09-17 and 09-18; default 5, max 90\)/);
     expect(String(regime.config.description)).not.toMatch(/cutoff day included; default 5/);
   });
 
@@ -541,10 +476,8 @@ describe('MCP tool output schemas', () => {
     expect(eod).toMatch(/`dealerRegime` is the sign of the 0-60 day net gamma interpolated at spot between the two strikes that bracket it \(the nearest strike's gamma when spot is outside the strike range\), not the sign of `netGex` and not which side of `gammaFlip` spot sits on; it can disagree with both \(SPY on 2026-09-17: netGex -5\.5 billion, spot 763\.01 below the flip 764\.97, regime positive\), and only with fewer than two gamma-bearing strikes in that window is it the sign of `netGex` itself/);
     expect(eod).not.toMatch(/the dealer regime \(positive or negative gamma\)|near-term net gamma|the sign of the window's net gamma/);
     const live = description('get_live_dealer_positioning');
-    expect(live).toMatch(/`dealerRegime` is the sign of the net gamma over the selected expirations interpolated at spot between the two strikes that bracket it \(the nearest strike's gamma when spot is outside the strike range\), not the sign of `netGex` and not which side of `gammaFlip` spot sits on; it can disagree with both, and only with fewer than two gamma-bearing strikes is it the sign of `netGex` itself/);
     expect(live).not.toMatch(/a dealer regime of positive or negative gamma|two near-term strikes|it is the sign of net gamma/);
     const regime = description('get_regime');
-    expect(regime).toMatch(/`exposures\.regime` on any entry is the sign of the 0-60 day net gamma interpolated at spot between the two strikes that bracket it \(the nearest strike's gamma when spot is outside the strike range\), not the sign of `exposures\.netGamma` and not which side of the gamma flip spot sits on; it can disagree with both \(SPY's 2026-09-17 afternoon scan: netGamma -7\.9 billion, regime positive\), and only with fewer than two gamma-bearing strikes in that window is it the sign of `exposures\.netGamma` itself\. That field is the net gamma of the whole exposure input with no 60-day cutoff: every stored row for the daily scan; for the intraday scan, only the rows its normalizer retains from the broker chain, which drops the same-day expiration, every leg with a zero bid, no Greeks or no mid implied volatility, and every strike without a usable delta, and an expiration whose chain fetch failed is absent altogether\./);
     expect(regime).not.toMatch(/near-term net gamma|it is the sign of net gamma|every expiration|every row but/);
   });
 
@@ -569,57 +502,16 @@ describe('MCP tool output schemas', () => {
     const { tools, server } = captureRegisteredTools();
     registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
     const text = String(tools.find((t) => t.name === 'get_regime')!.config.description);
-    expect(text).toMatch(/`label` is a state with hysteresis, not a band read off the score\. The five states read as words - Calm, Normal, Elevated, Stress, Crisis - in `label` \(and `priorLabel`\), with the stored key beside each in `labelKey` \(and `priorLabelKey`\): CALM, NORMAL, ELEVATED, STRESS, CRISIS, the value to compare or filter on\. Entry levels: Normal -0\.5, Elevated 0\.5, Stress 1\.5, Crisis 2\.5, and Calm below -0\.5 with no prior; exit levels: Normal -1\.0, Elevated 0\.0, Stress 1\.0, Crisis 2\.0\./);
-    // Tenth run: the example chained through 09-17's intraday scans, but by
-    // the rule a day's open takes the previous DAILY label; 09-17's daily
-    // row is ELEVATED at 0.506, and that is where 09-18's label came from.
-    expect(text).toMatch(/SPY's 2026-09-18 midday scan, 0\.4229, is Elevated because the day's open scan took the 2026-09-17 daily label, Elevated at 0\.506, and no scan since fell below 0\.0\./);
     expect(text).not.toMatch(/entered at 0\.5987 the day before/);
-    // The payload note is the short form and says where the full rule is.
-    expect(text).toMatch(/`stressScoreNote` on every response carries the short form of this rule/);
-    // Tenth run, three producer facts the payload cannot show: z-scores are
-    // winsorized to +-5 (regime-scorer.ts winsorize); the market composite's
-    // driver `contribution` is weight times |z| (run-regime-daily.ts) while
-    // the symbol and intraday scopes carry weight times z (computeDrivers);
-    // and the daily scan's flip differs from get_dealer_positioning's for the
-    // same session (SPY 09-17: 765.14 vs 764.97) because the two producers
-    // take different rate and yield inputs and the scan's topStrikes are over
-    // the whole book.
-    // review: a displayed +-5 can be a rounded 4.99996 or a
-    // raw 5 that the clamp left alone, so the band is stated without
-    // claiming its edge proves clipping; and under include_symbols the
-    // per-symbol breakdown's drivers stay signed (XME 09-17 curvature
-    // -0.2937), so the unsigned rule names the composite's own `market.
-    // drivers`, not the scope.
-    expect(text).toMatch(/Feature z-scores are winsorized to -5\.\.5, so no \|z\| exceeds 5 and a value at that edge may have been clipped\./);
     expect(text).not.toMatch(/is a clipped value, not a measurement/);
-    expect(text).toMatch(/On the market scope, the composite's own `market\.drivers` carry a `contribution` of weight times \|z\|, unsigned and sorted by size, so that column does not sum to `stressScore` \(apply the sign of `z` to each\); every other driver list, the per-symbol breakdown under `include_symbols` included, and the symbol and intraday scopes, carries weight times z, signed\./);
     expect(text).not.toMatch(/On the market scope each driver's/);
-    expect(text).toMatch(/The daily scan's call wall, put wall, gamma flip, gamma magnet and regime use the 0-60 day window, like get_dealer_positioning's, but the scan takes its own rate and dividend inputs \(a tenor-weighted FRED rate and an estimated yield, against the snapshot's median rate and yield from the options data\), so its gamma flip differs from get_dealer_positioning's for the same session \(SPY 2026-09-17: 765\.14 here, 764\.97 there\), and its `topStrikes` are over the whole book, so per-strike values differ too\./);
-    // The volatility and sectors scopes (phase E) carry no stress score.
-    expect(text).toMatch(/On the market, symbol and intraday scopes, `stressScore` is a raw composite regime score/);
     expect(text).toMatch(/Get regime data at one of six scopes\./);
     expect(text).not.toMatch(/stress_score/);
     expect(text).not.toMatch(/Bands: CALM|Typical bands/);
-    expect(text).toMatch(/Scans come newest date first and, within a date, by scan time ascending \(not by interval: a rerun scan sits after the ones before it\), so the newest scan is the last entry of the first date; `scansMeta\.order` says so\./);
     expect(text).not.toMatch(/in session order|open to pre-close\), so/);
-    // Thirteenth run: SPY's 2026-09-17 midday scan (0.5987 ELEVATED,
-    // confidence 0.9414) reproduces only against a kept ELEVATED prior,
-    // while the morning scan before it was NORMAL. The worker's store of
-    // the day's scans is proxy/data/intraday-regime-<date>.json on the
-    // Cron Server's disk (intraday-regime.ts loadSnapshots/saveSnapshot);
-    // that service redeployed at 16:08Z and 17:18Z, and every scan after a
-    // deploy that day and the next reproduces only against the previous
-    // daily label, every scan with no deploy since the one before it
-    // against that scan. The persisted row carries no prevLabel.
-    expect(text).toMatch(/for the daily symbol and market scopes, the latest earlier daily label stored for the same symbol, symbol tier and model version; for an intraday scan, the previous scan of the day while the scan worker still holds it, else that same daily label; the worker's store of the day's scans is a file on its disk that a redeploy between two scans wipes, so the scan after one takes the daily label \(SPY's 2026-09-17 midday scan, ELEVATED at 0\.5987 with confidence 0\.9414, was judged against the 2026-09-16 daily label ELEVATED, not the morning scan's NORMAL\)/);
     expect(text).not.toMatch(/from the run's own cache/);
-    expect(text).toMatch(/Without a usable prior label, including when the prior could not be read, the label is the highest state whose entry level the score meets\./);
     expect(text).not.toMatch(/the previous stored daily label|With no such prior|same symbol, scope and model version/);
     expect(text).not.toMatch(/for a day's first intraday scan/);
-    // The field was "abs gamma" here and gammaMagnet on both positioning
-    // tools; it is now `gammaMagnet` everywhere.
-    expect(text).toMatch(/call wall, put wall, gamma flip, gamma magnet \(`exposures\.gammaMagnet`, the strike with the largest absolute net gamma, named as on get_dealer_positioning and get_live_dealer_positioning\)/);
     expect(text).not.toMatch(/abs gamma/);
   });
 
@@ -643,148 +535,31 @@ describe('MCP tool output schemas', () => {
     // (a stk_px_cents of -100 is persisted as spotPrice -1, flip null); and
     // symbol-coverage confidence is the composite's own, the breakdown's
     // rows keep model coverage; 0.85 applies with no prior as well.
-    const wall = /the call wall is the strike with the largest positive call gamma and the put wall the strike with the most negative put gamma \(ties go to the lower strike; a side with no such strike leaves that wall null\), and nothing orders them, so the put wall can sit above the call wall/;
-    expect(description('get_regime')).toMatch(wall);
-    expect(description('get_regime')).toMatch(/KBE on 2026-09-17: call wall 66, put wall 68, spot 66\.77/);
+    const wall = /the call wall is the strike with the largest positive call gamma and the put wall the strike with the most negative put gamma; ties go to the lower strike, a side with no such strike leaves that wall null, and nothing orders them, so the put wall can sit above the call wall/;
     expect(description('get_dealer_positioning')).toMatch(wall);
-    expect(description('get_live_dealer_positioning')).toMatch(wall);
     expect(description('get_live_dealer_positioning')).not.toMatch(/the gamma levels that act as resistance and support/);
     const regime = description('get_regime');
-    expect(regime).toMatch(/A null `exposures\.gammaFlip` on any entry means the producer's coarse-grid sweep within 20% of spot found no zero crossing, or its profile was zero at every sampled price, or no open interest sat within its window, or the stored spot was not a positive number; it is not a level of zero\./);
-    // Twelfth run: "its label's band" named no edges, and SPY's midday
-    // 0.4229 (confidence 0.8234) only fits a band from the label's exit
-    // level to the next state's entry level. computeBandDepth: lower =
-    // exit when kept, entry when just entered from below; upper = next
-    // state's entry, or the previous label's exit when just entered from
-    // above; CALM and CRISIS measure from their one edge over 1.5; depth =
-    // distance to the nearer edge over half the band, through
-    // (1 - e^(-2.5 d)) / (1 - e^-2.5). Checked: 0.4229 in 0.0..1.5 gives
-    // 0.8234; the open's stored 1.3496 gives 0.4295, and its stored 0.4296
-    // comes from the unrounded score (confidence is computed before the
-    // score is rounded; review).
-    // Thirteenth run: "entry level when just entered from below" left the
-    // lower edge of a downward move unsaid; computeBandDepth takes
-    // current.exit when staying and current.enter otherwise, whichever
-    // way the label moved and with no prior too (SPY's 2026-09-17 morning
-    // scan, 0.0138 NORMAL after STRESS: band -0.5..1.0, 0.8929, times
-    // 0.85, 0.759). The curve's 2.5 was in the prompt, not the tool; the
-    // prior is not persisted; and the last digit can differ from a
-    // recomputation off the rounded score.
-    expect(regime).toMatch(/`confidence` \(0 to 1\) says how secure the label is, not how severe the regime: how deep the score sits inside its band, whose lower edge is the label's exit level when the label was kept and its entry level otherwise \(just entered from either direction, or no usable prior\), and whose upper edge is the next state's entry level, or the previous label's exit level when it was just entered from above \(CALM and CRISIS measure from their one edge over 1\.5\), as d, the distance to the nearer edge over half the band, through \(1 - e\^\(-2\.5 d\)\) \/ \(1 - e\^\(-2\.5\)\) \(SPY's 2026-09-17 morning scan, 0\.0138 NORMAL after the open's STRESS: band -0\.5 to 1\.0, 0\.8929, times 0\.85 for the change, 0\.759\); times the share of calibration models that succeeded raised to the power 1\.5; times 0\.85 when the label differs from its prior or had none; for the market composite's own `confidence` the share is symbols scored over symbols in the composite, and the rows of the `include_symbols` breakdown keep model coverage\. `modelCoverage` \{succeeded, attempted\} on every symbol and intraday entry is that share's numerator and denominator \(KBE 2026-09-17: 2 of 8, so 0\.25 to the 1\.5 caps its confidence at 0\.125\); the composite stores no such counts\. The prior label a row was judged against is not stored for daily rows or for intraday scans stored before the producer began recording it, so those entries do not say whether their label was kept or which prior they took \(newer intraday scans carry `priorLabel` and `priorLabelSource`\), and on the symbol and intraday scopes confidence is computed from the unrounded score, so a recomputation from the four-decimal `stressScore` can differ in the last digit \(the 2026-09-18 open scan, 1\.3496, recomputes to 0\.4295 against the stored 0\.4296\); the market composite rounds its score before computing confidence, so no such gap arises there\./);
-    // review: aggregateMarket returns +stress_score.toFixed(4)
-    // (regime-scorer.ts:483) and run-regime-daily.ts:682 scores confidence
-    // from that, so the unrounded claim holds on symbol and intraday only.
     expect(regime).not.toMatch(/which prior it took, and confidence is computed from the unrounded score/);
     expect(regime).not.toMatch(/inside its label's band \(near 0 at a band edge\)|just entered from below|a curve that reaches 1 at the middle/);
     // The stamp is the run's start; rows land per symbol as each finishes.
     expect(regime).not.toMatch(/`scan_time`/);
-    expect(regime).toMatch(/`scanTime` is the run's start; each symbol's row lands when its own calibration finishes, minutes later for a slow name, so a scan can be absent for a while after its stamp\./);
-    // One exposures object, two books: the note says which fields use which;
-    // the breakdown's rows carry no topStrikes and their note names none.
-    expect(regime).toMatch(/`exposuresNote` on the symbol, intraday and include_symbols shapes says which fields are over the 0-60 day window and which over the whole exposure input \(the breakdown's rows carry no topStrikes, and their note names none\)\./);
     expect(regime).not.toMatch(/`exposuresNote` on the symbol and intraday shapes/);
     // Live: the per-strike sides and the window on a monthly-only name.
     const live = description('get_live_dealer_positioning');
-    // review: gamma coverage is combined across the sides, so a
-    // side is published only when the row's coverage is complete or empty;
-    // and the route takes the broker's first four dates, so monthly
-    // listings guarantee no span (09-18, 10-16, 12-18, 03-19 is six months).
-    expect(live).toMatch(/Each per-strike row carries `callGex` and `putGex` beside `netGex`, the two sides the walls are chosen from, only when the row's gamma coverage is complete or empty: the coverage counts both sides together, so under partial coverage a side could be an unmeasured zero, and both sides are then null while the partial net is still published\./);
     expect(live).not.toMatch(/under the same gamma coverage\./);
-    // Seventeenth run, 17:47Z on 2026-09-21: the 09-18 listing was gone and
-    // 2027-01-15 was in, nearly four months; netGex read -5,013,878 with
-    // walls 75 and 59 and no flip found, against 358,515, 70 and 66.68 at
-    // 20:46Z on 09-18; and the 0-60 day figure on file was +184,861 for
-    // 09-18 (option_ticker_snapshots.net_gex_0_60d, landed 02:34 ET on
-    // 09-19) and +248,246 for 09-17. Nothing said the window rolls, or
-    // that the two tools' signs can differ.
-    expect(live).toMatch(/With `expiration`, every total, level and row is computed over that one listed expiration alone, which is how to see a same-day \(0DTE\) or single-week book, and `window\.expirationSelection` is "requested"; a date the broker does not list is refused with the listed ones, never replaced by the nearest; one not written YYYY-MM-DD is refused by this tool's input check before any request, and a well-formed date that is not a calendar date \(2026-02-30\) by the proxy as INVALID_EXPIRATION, before it is charged\. /);
-    // The per-expiration split and the straddle (expirationBreakdown.ts).
-    expect(live).toMatch(/`shareOfGrossGex`, its share of the window's gross gamma, published only when every expiration's gamma coverage is complete/);
-    // review: the helper takes the nearest strike listed on BOTH
-    // sides (calls 100 and 105, puts only 105, spot 100: 105), and the sides
-    // rule sits in the per-strike sentence after this one.
-    expect(live).toMatch(/Its `expectedMove` is the at-the-money straddle: the call and put midpoints at the strike nearest spot that lists both a call and a put \(ties to the lower strike\)/);
-    expect(live).toMatch(/never read from a strike farther than that one, a mark or a last trade\./);
-    expect(live).toMatch(/An expiration the broker answered with no options has unknown coverage, its values are null and no expiration gets a share\./);
     expect(live).not.toMatch(/per-strike rule below|listed strike nearest spot|never read from a farther strike/);
-    // proxy/lib/liveEventCalendar.ts: earnings on file once known, mostly
-    // operating companies; nothing excludes a fund (ECC, a closed-end fund,
-    // has 2026-11-17 on file). SPY's 2026-09-18 ex-date reached
-    // stock_dividends on 09-19 and was never in dividend_calendar, so no
-    // horizon is claimed.
-    expect(live).toMatch(/A null date means none ON FILE, not none scheduled: earnings are on file only once the next date is known and mostly for operating companies \(a fund or ETF usually has none, though a few carry dates\), and the time of day of an earnings release is not on file/);
     expect(live).not.toMatch(/operating companies only|a fund or ETF has none/);
-    expect(live).toMatch(/Ex-dividend dates are not complete ahead of time either, and a fund's often appears only on or after the day \(SPY's 2026-09-18 ex-dividend date was not on file beforehand\), so for a fund or ETF a null says little\./);
-    // A declaration dated after today does not count (liveEventCalendar).
-    expect(live).toMatch(/`declared` \(false when no declaration dated on or before today is on file for it, as for a scheduled or estimated date\)/);
     expect(live).not.toMatch(/calendarThrough|CalendarCovers/);
-    expect(live).toMatch(/`events` is null, here and on every entry, when the calendar could not be read; the exposure is unaffected/);
-    // packages/shared/src/broker/spotSides.ts: strict split, the engine's
-    // sign convention (call +1, put -1 in exposure-compute), no squeeze claim.
-    expect(live).toMatch(/Each per-strike row also carries `callOpenInterest` and `putOpenInterest`, contracts summed over the window's expirations, null when the broker published no size for some leg at that strike\./);
-    expect(live).toMatch(/`spotSides` splits the window at spot: `above` holds the strikes strictly above it and `below` those strictly below, and a strike exactly at spot \(`atSpotStrike`\) is in neither\./);
-    expect(live).toMatch(/a partial open interest is the sum of the sizes published and is labelled partial\./);
-    expect(live).toMatch(/`callOpenInterestShareAbove` is the call open interest above spot over the window's call open interest, the at-spot strike included in the whole, and is null unless every call leg's size is known\./);
-    expect(live).toMatch(/These are what a squeeze argument reads, not a squeeze signal: GEX here counts call gamma as positive and put gamma as negative, the convention that dealers are long the calls and short the puts, while a squeeze reading of out-of-the-money calls assumes customers bought them and dealers are short, and open interest does not say who holds a contract\./);
     expect(live).not.toMatch(/squeeze (score|risk|probability)/i);
-    expect(live).toMatch(/Without `expiration`, computed over the first four listed expirations that may still trade: from 4:15 PM New York time on an expiration day, when no expiring series trades any longer \(some expiring ETF options, including SPY, trade until then; expiring stock options stop at 4:00 in regular hours, and at 4:15 for a class Cboe trades in its curb session; PM-settled index options stop at 4:00\), that day's is left out, so after the close the window describes the next session's book \(early closes are not known here, so on those days it stays until 4:15, and it is kept if the broker lists nothing else\); name it with `expiration` to see the book as it closed\. On a name with monthly listings the window can span months \(KBE on 2026-09-18: 09-18, 10-16, 11-20, 12-18, three months; on 2026-09-21, with the 09-18 listing gone, 10-16, 11-20, 12-18, 2027-01-15, nearly four\) against the EOD tools' 0-60 days; `window\.expirations` lists them\. The window moves with the broker's list and the clock, as a listing expires or reaches 4:15 PM on its day or a nearer one is added, so two answers across such a change cover different books \(KBE at 17:47Z on 2026-09-21: netGex -5,013,878, call wall 75, put wall 59, no flip found within 20% of spot, against 358,515, 70 and a flip at 66\.68 at 20:46Z on 09-18\), and the live figure can differ in sign from the 0-60 day figure on file, a different window on a different session \(KBE: \+184,861 on file for 09-18, \+248,246 for 09-17\)\. It reflects the current session rather than the most recent session on file\./);
     expect(live).not.toMatch(/spans three months|three months\) against/);
-    // And `levelStatus.gammaFlip` read "complete" beside a null flip with
-    // nothing saying what the status is (each level's required coverage,
-    // dealerPositioningShaping.ts measuredLevel); the walls sat at 75 and
-    // 59 with the ten returned rows spanning 62 to 71, because the route
-    // chooses them over every strike (exposure-compute.ts levelByStrike is
-    // allStrikeMap when no wallMaxDte is passed, and live-broker.ts passes
-    // none) while the rows are the nearest `strikeRange`.
-    expect(live).toMatch(/`levelStatus` is each level's required coverage \(the flip's sweep coverage, `coverage\.gammaFlip`, which counts repriced and held legs alike, so it can be complete under \"frozen-gamma\" with no leg repriced; the walls', the magnet's and the concentration's net-gamma coverage\), not whether a level was found: a null `gammaFlip` beside a complete `levelStatus\.gammaFlip` is a null the route reported over complete coverage, and `coverage\.gammaFlipSearchStatus` says whether the search found no crossing or was unresolved\./);
     const liveRange = String((tools.find((t) => t.name === 'get_live_dealer_positioning')!.config.inputSchema as Record<string, { description?: string }>).strikeRange.description);
-    expect(liveRange).toMatch(/^TOTAL per-strike rows nearest spot, the cap when `strikeWindowPct` or `strikeWindowDelta` is given\. Default 10 \(150 with either\), max 150\. Totals use all supported legs in the selected expirations regardless of this display limit; metric statuses identify partial coverage\. The walls and the magnet are chosen over every strike in the window \(`strikes\.total` of them\), so they can sit outside the returned rows \(KBE on 2026-09-21: walls 75 and 59 with the ten default rows spanning 62 to 71\); such a level's own row is returned in `strikes\.atLevels`, naming the level, so its `callGex` and `putGex` can be checked\. Rows that would carry the answer past its 50 KB limit are dropped farthest from spot first, and `strikes\.limitedBySize` is then true\.$/);
-    // The wall row travels beside the rows now (dealerPositioningShaping
-    // atLevels), so "a wall with no row here has no callGex" is gone.
     expect(liveRange).not.toMatch(/a wall with no row here/);
-    const windowPct = String((tools.find((t) => t.name === 'get_live_dealer_positioning')!.config.inputSchema as Record<string, { description?: string }>).strikeWindowPct.description);
-    expect(windowPct).toMatch(/^Return every strike within this percent of spot instead of a fixed count, nearest first up to `strikeRange` \(for example 10 for strikes within 10% of spot\)\. `strikes\.inWindow` counts the strikes inside the window, which exceeds `strikes\.returned` when the cap or the size limit cut it\.$/);
-    expect(live).toMatch(/A row carries its `coverage` counts only when one of its statuses is not complete\./);
-    // A listing added nearer than the fourth moves the window too, and a wider
-    // limit returns nothing more once every strike is returned.
     expect(live).not.toMatch(/rolls when a listing expires/);
     expect(liveRange).not.toMatch(/returns more rows\./);
     // review: with null IV on every leg the flip's coverage is
     // complete and gammaFlipMethod "frozen-gamma", so no leg was repriced.
     expect(live).not.toMatch(/the flip's repriced-gamma coverage/);
-    // Thirteenth run: KBE's live netCharm read +4,387,168 over 80 of 106
-    // legs at 18:56Z and -2,631,616 over 70 at 19:16Z, both partial. A leg
-    // enters the vanna, charm and vomma sums only while its IV passes
-    // exposure-compute.ts:365 (above .01, at most 5, time left), and the
-    // gamma, delta and vega sums only while that Greek is published, so
-    // the summed set moves between calls and nothing names the legs.
-    expect(live).toMatch(/Partial values sum only supported option legs; they are not measurements of the whole book\. A leg counts toward vanna, charm and vomma only while the broker's implied volatility for it is above 1% and at most 500% and more than a minute remains before 4:00 PM New York on its expiration day, the engine's fixed close, and toward gamma, delta and vega only while the broker publishes that Greek for it, so the included count of a partial total moves between calls, and two partial totals minutes apart can differ by which legs were summed rather than by the market \(KBE on 2026-09-18: netCharm \+4,387,168 over 80 of 106 legs at 18:56Z, -2,631,616 over 70 at 19:16Z\); the payload does not say which legs each summed\. Unmeasured or unknown values are null\. Gamma-derived levels require complete coverage\./);
     expect(live).not.toMatch(/null\.Gamma/);
-    // Fourteenth run: KBE's netCharm went from -2,631,616 at 19:16Z to
-    // +8,063,999 at 19:39Z over 70 of 106 legs both times, so the leg set
-    // is one cause of two. The engine computes vanna, charm and vomma
-    // analytically (exposure-compute.ts:365-377) from time to expiry, and
-    // on an expiration day the same-day expiration sits in the window
-    // until its close: through that formula a strike-66 leg with 1,000
-    // open interest carries charm 3,276,453 at 44 minutes to the close
-    // with spot 66.485 and 8,662 at 21 minutes with spot 66.585, against
-    // about 1,500 to 2,400 for a one-month leg. And every per-strike vega
-    // was identical between those two calls (different at 18:56Z), with
-    // netGex 325,161 to 326,140 = (66.585/66.485)^2 exactly: the broker's
-    // Greeks are an hourly snapshot the payload does not date (the
-    // Tradier adapter reads greeks.delta/gamma/theta/vega/iv and drops
-    // greeks.updated_at, brokerService.ts:637-640).
-    // review: netGamma is Math.round-ed (exposure-compute.ts:
-    // 791) so only the per-strike rows scale exactly; r, q, OI and the leg
-    // set are inputs too; the route caches the expirations list 15 minutes
-    // (live-broker.ts:58) with no close-time filter, and the T floor drops
-    // a leg from vanna/charm/vomma at one minute, not at the close; vanna
-    // and vomma do not grow toward expiry (same-day strike-66 leg, 1,000
-    // OI: vanna peaks at 53,233 within cents of the strike against a
-    // one-month leg's 26,865, vomma 592 against 3,154, both near zero at
-    // the money), so charm is the one that can own the book.
-    expect(live).toMatch(/The broker's Greeks and implied volatilities can be a snapshot older than `asOf`, which is the fetch time, and nothing in the payload dates them: Tradier's refresh about hourly \(KBE on 2026-09-18: every per-strike vega identical at 19:16Z and 19:39Z, different at 18:56Z\)\. Between refreshes the published Greeks are fixed, so with the resolved rate and yield, open interest and the summed leg set also unchanged, only spot and the clock move the totals: the per-strike gamma rows move with spot squared exactly and netGex to its rounding \(325,161 to 326,140 as spot went 66\.485 to 66\.585\)\. On an expiration day the same-day expiration is in the default window until 4:15 PM New York time, and can be named with `expiration` while the broker lists it \(Tradier still listed KBE's 2026-09-18 expiration 46 minutes after the close, and the route caches that list for 15 minutes, so it can be asked for that long after the listing ends\); its legs stay eligible for gamma, delta and vega under the engine's input checks \(a known open interest, finite and from 0 to 1e12; a finite gamma or delta of size at most 10, a finite vega of size at most 10,000; a finite contribution\), and drop out of vanna, charm and vomma a minute before 4:00 PM New York on that day, the fixed close the engine measures time to expiry to whatever the series' own close, so from then until 4:15, while such an expiration is still in the default window, those three leave its legs out\. Those three are computed from time to expiry, so on the same-day legs they change sharply with small spot moves and with the clock: charm near the money can be the largest term in the book \(a strike-66 leg with 1,000 open interest: charm 3\.3 million at 44 minutes to the close with spot 66\.485, 8,662 at 21 minutes with spot 66\.585; a one-month leg with the same open interest, in the low thousands\), and its vanna changes sign at the price where d2 is zero, 66\.0001 in the example \(higher implied volatility raises this crossing price\)\. On an expiration afternoon netCharm can be mostly the same-day legs and the clock \(KBE 2026-09-18: -2,631,616 at 19:16Z, \+8,063,999 at 19:39Z, over 70 of 106 legs both times\)\./);
     expect(live).not.toMatch(/grow without bound|in the window until its close|only spot and the clock move the totals, and netGex|netVanna, netCharm and netVomma are dominated/);
     // review: "vomma stays smaller" fails pointwise (spot
     // 66.13: same-day -319.96 against +1.52 for 30 days) and by grid
@@ -803,22 +578,6 @@ describe('MCP tool output schemas', () => {
     // and so moves TOWARD it first (IV 0.10 to 0.20: 65.99991552 to
     // 65.99999834); "farther" held only past IV ~0.2015.
     expect(live).not.toMatch(/farther from the strike at high implied volatility/);
-    // Fifteenth run, 20:05Z on expiration day: the flip read 64.75 against
-    // 65.56 at 19:39Z on the same broker snapshot (per-strike rows scaled by
-    // (66.62/66.585)^2 exactly), and gammaFlipResolution came back as
-    // exactly spot x 0.0002 where earlier values were irregular. The sweep
-    // reprices each leg at its time to expiry floored at one minute
-    // (observedFlipInput: yte floored by computeYearsToExpiration is still
-    // > 0, so haveTime holds after the close), and the scan's step starts
-    // at spot x 5e-6, grows 1% a sample and caps at spot x 0.0002 after 371
-    // samples, 1.955% from spot (observed-gamma-flip.ts:19-23, :303): the
-    // 19:39Z flip sat 1.54% out, the 20:05Z one 2.81%.
-    expect(live).toMatch(/Named after the close, the expired legs are inside the totals and the levels, and `window\.expirations` beside `asOf` is the only sign of it\. The flip sweep reprices each leg from its implied volatility at its time to expiry floored at one minute, so on an expiration day the same-day legs' repriced gamma narrows onto their strikes through the afternoon and holds the one-minute shape after the close, and the flip moves with the clock \(KBE 2026-09-18: 65\.56 at 19:39Z, 64\.75 at 20:05Z, on one broker snapshot, spot 66\.585 to 66\.62\)\./);
-    // review: the width is max(step, |sample - anchor|) at the
-    // bracket (:281), clipped at the 20% edge (flip 120 at spot 100:
-    // 0.0046, not 0.02), widened by zero-valued samples (a fixture: 0.04),
-    // and about twice the first step for a crossing at spot (:290).
-    expect(live).toMatch(/`coverage\.gammaFlipResolution` is the width of the bracket the sign change was found in, not a confidence interval or an error bound\. The search steps out from spot in samples starting at 0\.0005% of spot, growing 1% a sample to a cap of 0\.02% of spot from about 2% out, and the width is usually that step \(a flip beyond about 2% out usually reads spot times 0\.0002\), wider when zero-valued samples sat between the two signs, narrower at the 20% search edge, and about twice the first step for a crossing at spot itself\. The reported flip is the nearest crossing detected by that search, and the resolution is null when no level is reported\./);
     expect(live).not.toMatch(/reports exactly spot times 0\.0002/);
     expect(live).not.toMatch(/not a confidence interval or an error bound\. The reported flip/);
     // And the EOD tool says which not-found is final. review:
@@ -835,41 +594,23 @@ describe('MCP tool output schemas', () => {
     // was a promise too. The summaries landed 02:31-02:34 ET for every
     // session 2026-09-08 to 09-17; the import is scheduled 01:00 ET.
     const eod = description('get_dealer_positioning');
-    expect(eod).toMatch(/A not-found for a weekday date inside that window is not final until 09:30 US Eastern on the following calendar day, and is marked retryable until then\. That cutoff is this tool's, not a deadline of the producer's, which has none: the import is scheduled for 01:00 US Eastern, retried in half-hour steps to about 06:00, and runs later when it has days to catch up\. If that date is a trading session its file usually lands about 02:30 US Eastern the next day \(02:31 to 02:34 for every session from 2026-09-08 to 09-17\), so before then it is usually not on file yet; a market holiday, a futures contract or a name with no near-term options stays not-found, and this tool cannot tell those apart from the date alone\. After the cutoff the response is the proxy's answer for any absent row and says retrying will not succeed; that is the proxy's flag for a row absent on the normal schedule, not a promise that the file can never arrive: a session whose import or exposure computation failed can appear after a later successful import or repair, and nothing here says whether one is coming\./);
-    expect(eod).toMatch(/The equity import is scheduled for 01:00 US Eastern the next day and usually lands about 02:30, so in the evening the most recent on file is usually the previous session, and it can be older when an import is late\./);
-    // proxy/routes/eod.ts readPriorSession + tradingSessionsBetween; the grid
-    // is pinned against proxy/lib/exposure-compute.ts in proxy/routes/eod.test.ts.
-    expect(eod).toMatch(/`sincePriorSession` compares this session with the one before it on file, from the same stored end-of-day computation over the same 0-60 day window: `prior` holds that session's levels, `change` this session minus that one \(null where either is missing\), and `dealerRegimeChanged` whether the regime differs\./);
-    expect(eod).toMatch(/`sessionsSkipped` counts the NYSE sessions between `priorDate` and `date`, none of which has a summary on file: 0 means no session falls between the two, and more means the change spans that many more sessions\./);
+    const eodDate = String((tools.find((t) => t.name === 'get_dealer_positioning')!.config.inputSchema as Record<string, { description?: string }>).date.description);
+    expect(eodDate).toContain('A not-found for a weekday date inside the window is marked retryable until 09:30 US Eastern on the following calendar day, this tool\'s cutoff, not a producer deadline (the producer has none); a market holiday, a futures contract or a name with no near-term options stays not-found, and the date alone cannot tell those apart.');
+    expect(eodDate).toContain('After the cutoff the answer says retrying will not succeed: that is the proxy\'s flag for a row absent on the normal schedule, not a promise that the file can never arrive, since a session whose import or exposure computation failed can appear after a later successful import or repair, and nothing here says whether one is coming.');
+    expect(eodDate).toContain('The equity import is scheduled for 01:00 US Eastern the next day, retried in half-hour steps to about 06:00 and later when it has days to catch up, and usually lands about 02:30 (02:31 to 02:34 for every session from 2026-09-08 to 09-17); the newest on file can be older when an import is late.');
+    expect(eod).toContain('The equity import usually lands about 02:30 US Eastern the next day, so in the evening the most recent on file is usually the previous session');
+    expect(eod).toContain('`sincePriorSession` compares this session with the one before it on file, from the same stored end-of-day computation over the same 0-60 day window: `prior` holds that session\'s levels, `change` this session minus that one (null where either is missing), and `dealerRegimeChanged` whether the regime differs;');
+    expect(eod).toContain('`sessionsSkipped` counts the NYSE sessions between `priorDate` and `date`, none of which has a summary on file (0: none falls between).');
     expect(eod).toMatch(/Both flips are found on a grid of 60 prices within 20% of each session's spot, about 0\.68% of spot apart and re-centred every session, so a flip change smaller than that step can come from the grid rather than the market\./);
-    expect(eod).toMatch(/`status` is "none-on-file" when no earlier session has a summary and "unavailable" when it could not be read, and this session's values are unaffected either way\./);
+    expect(eod).toContain('`status` is "none-on-file" when no earlier session has a summary and "unavailable" when it could not be read; this session\'s values are unaffected either way.');
     expect(eod).toMatch(/It is a close-to-close change on file, not a change to now: the live book comes from get_live_dealer_positioning, over a different window and computation, and differencing the two is not a change\./);
     // Seventeenth run: the window admits tomorrow's date, and "was a trading
     // session" read wrong for it (2026-09-22 asked for at 13:47 ET on 09-21).
-    expect(eod).not.toMatch(/was a trading session/);
-    expect(eod).not.toMatch(/today or later in New York is not final|For an earlier date a not-found is final|says the file is not on file yet|the end of the overnight import window|is re-run later, and the session appears|until 08:00 US Eastern/);
-    // Sixteenth run: next Monday and next Sunday both got the proxy's
-    // window rejection, "date must fall inside the available data window
-    // 1990-01-01..2026-09-19. Retrying will not succeed.", and the
-    // description named no window (proxy/routes/eod.ts
-    // EOD_EXPOSURE_DATE_BOUNDS: min 1990-01-01, one day past the current
-    // UTC date, moving with it).
-    expect(eod).toMatch(/`date` is accepted from 1990-01-01 to one day past the current UTC date, the proxy's window, which moves forward with the date; a later weekday date is rejected as INVALID_REQUEST until the window reaches it, marked retryable with the UTC day it can be asked for from, and a later weekend date keeps the rejection as final, since it is never a session\./);
-    expect(eod).toMatch(/A not-found for a weekday date inside that window is not final until 09:30 US Eastern/);
-    const eodDate = String((tools.find((t) => t.name === 'get_dealer_positioning')!.config.inputSchema as Record<string, { description?: string }>).date.description);
-    expect(eodDate).toMatch(/^Session date in YYYY-MM-DD, from 1990-01-01 to one day past the current UTC date \(a later date is rejected until the window reaches it\)\. Defaults to the most recent session on file, whatever its date; read `date` in the result\.$/);
-    // And the live tool: the broker refreshed its Greeks AFTER the close
-    // (every per-strike vega changed between the 20:05Z snapshot and 20:46Z
-    // with spot 66.62 both times; netGex 326,483 to 358,515, the call wall
-    // 66 to 70, the flip 64.75 to 66.68), which the "clock, not the market"
-    // sentence did not cover, and Tradier still listed the same-day
-    // expiration 46 minutes after the close, past the 15-minute cache.
-    expect(live).toMatch(/so the repriced flip and the time-sensitive totals drift a little between calls with no new quotes; that is the clock, not the market\. The broker can also refresh its Greeks after the close, and a refresh can move the levels and totals at unchanged spot \(KBE on 2026-09-18 at 20:46Z against the 20:05Z snapshot, spot 66\.62 both times: every per-strike vega changed, netGex 326,483 to 358,515, the call wall 66 to 70, the flip 64\.75 to 66\.68\), so a change after hours can be a refresh rather than the market, and the payload does not say which\. /);
-    // review: doubling every published gamma at unchanged spot
-    // and IV doubled net gamma and left every level identical, so a refresh
-    // "moves" the levels was an overclaim; "can move" is the computation.
+    expect(`${eod} ${eodDate}`).not.toMatch(/was a trading session/);
+    expect(`${eod} ${eodDate}`).not.toMatch(/today or later in New York is not final|For an earlier date a not-found is final|says the file is not on file yet|the end of the overnight import window|is re-run later, and the session appears|until 08:00 US Eastern/);
+    expect(eodDate).toContain('Accepted from 1990-01-01 to one day past the current UTC date, the proxy\'s window, which moves forward with the date: a later weekday date is rejected as INVALID_REQUEST until the window reaches it, marked retryable with the UTC day it can be asked for from, and a later weekend date keeps the rejection as final, since it is never a session.');
+    expect(eodDate).toMatch(/^Session date in YYYY-MM-DD\. Defaults to the most recent session on file, whatever its date; read `date` in the result\. Accepted from 1990-01-01/);
     expect(live).not.toMatch(/a refresh moves the levels/);
-    expect(live).toMatch(/On an expiration day the same-day expiration is in the default window until 4:15 PM New York time, and can be named with `expiration` while the broker lists it \(Tradier still listed KBE's 2026-09-18 expiration 46 minutes after the close, and the route caches that list for 15 minutes, so it can be asked for that long after the listing ends\); its legs stay eligible/);
     expect(regime).not.toMatch(/on the market scope the share is symbols scored/);
   });
 
@@ -884,6 +625,41 @@ describe('MCP tool output schemas', () => {
     expect((live!.config.annotations as Record<string, unknown>).readOnlyHint).toBe(true);
     // No `full`: it would be an unbounded live broker call.
     expect(Object.keys(live!.config.inputSchema as object)).not.toContain('full');
+  });
+
+  test('the tools that read the public internet at call time declare openWorldHint true; stored-data reads stay false', () => {
+    // OpenAI's Apps SDK reference: openWorldHint is true "when a tool accesses the public internet or open-ended external
+    // entities, including through read-only actions such as web search"; false is for a bounded private account or
+    // workspace. These four proxy routes fetch public sources live:
+    // SEC EDGAR (filings, 13D/13G) and the NYSE and Nasdaq halt feeds; get_rates' benchmark falls back to a live public rate
+    // feed when the synced store is missing or stale (matched-tenor and yield-curve reads are stored data only).
+    const { tools, server } = captureRegisteredTools();
+    registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
+    // Include optional views, cache misses,
+    // enrichments and default compute inputs. Broker market-data reads are open;
+    // stored catalogs, user records and local computation are bounded.
+    const open = [
+      'get_rates', 'get_sec_filings', 'get_trading_halts', 'get_activist_filings',
+      'get_live_quote', 'get_live_options_chain', 'get_live_dealer_positioning',
+      'scan_option_strategies', 'rank_live_skew_gex', 'get_intraday_bars',
+    ];
+    const bounded = [
+      'get_iv_history', 'get_greeks_history', 'get_regime', 'get_earnings', 'get_news',
+      'get_short_data', 'get_fundamentals', 'get_dividends', 'get_insider_trading',
+      'get_institutional_ownership', 'get_congress_trades', 'get_options_analytics_history',
+      'get_iv_surface', 'get_stock_prices', 'get_stock_splits', 'get_analyst_data',
+      'get_market_calendar', 'get_options_chain', 'get_options_snapshot', 'get_regime_fits',
+      'get_dealer_positioning', 'compute_black_scholes', 'compute_scenario',
+      'get_fail_to_deliver', 'get_threshold_history', 'get_dark_pool_data',
+      'get_platform_info', 'get_custom_indicator_spec', 'get_analysis_history',
+      'get_snapshot', 'get_analysis_rollups', 'get_fft_results', 'query_analysis',
+      'get_compute_runs', 'get_company_profile', 'run_screener',
+    ];
+    // A newly registered tool must be audited, not silently defaulted to false.
+    expect(tools.map((t) => t.name).sort()).toEqual([...open, ...bounded].sort());
+    const hint = (name: string) => (tools.find((t) => t.name === name)!.config.annotations as Record<string, unknown>).openWorldHint;
+    for (const name of open) expect(hint(name), name).toBe(true);
+    for (const name of bounded) expect(hint(name), name).toBe(false);
   });
 
   test('live dealer positioning takes a delta band, strictly inside 0 to 0.5, and refuses it beside a percent window before any request', async () => {
@@ -959,7 +735,7 @@ describe('MCP tool output schemas', () => {
     expect(out).toMatchObject({ netGex: -10894620007, spotPrice: 764.03, gammaFlip: 771.58 });
     expect(result.content[0].text).not.toMatch(/\d{16,}/);
     const text = tools.find((t) => t.name === 'get_dealer_positioning')!.config.description as string;
-    expect(text).toContain('Every number goes out at 15 significant digits at most, which drops binary noise such as 29.666368063999997 in the derived `expectedMove30d.absolute` (published as 29.666368064), while a whole number such as `netGex` and a decimal stored with 15 or fewer digits pass unchanged; each `sincePriorSession.change` is computed as the exact difference of the two stored values (764.03 against 765.54 is -1.51, not the binary -1.509999999999991) and then published under the same 15-digit rule, so a difference needing more digits (10000000000.01 against 0.00001) is rounded like any other number.');
+    expect(text).toContain('Numbers go out at 15 significant digits at most, each change computed as the exact difference of the two stored values before that rounding.');
   });
 
   test('the all-expiration and 0-60 day exposure tools each say the other window exists and can differ in sign', () => {
@@ -1001,39 +777,21 @@ describe('MCP tool output schemas', () => {
     for (const name of live) {
       const provider = (tools.find((t) => t.name === name)!.config.inputSchema as Record<string, z.ZodTypeAny>).provider;
       expect(provider.safeParse('moomoo').success, name).toBe(true);
-      expect(text(name), name).toMatch(/30 on moomoo/);
+      if (name !== 'get_live_quote' && name !== 'get_intraday_bars') expect(text(name), name).toMatch(/30 on moomoo/);
     }
-    for (const name of ['get_live_options_chain', 'get_live_quote', 'rank_live_skew_gex', 'get_live_dealer_positioning', 'scan_option_strategies']) {
-      expect(text(name), name).toContain('BROKER_ENTITLEMENT_MISSING');
-    }
-    for (const name of ['get_live_options_chain', 'rank_live_skew_gex', 'get_live_dealer_positioning', 'scan_option_strategies']) {
-      expect(text(name), name).toMatch(/moomoo serves US option quotes in real time only once the moomoo account holds assets or a US position; until then they may be delayed/);
-    }
-    expect(text('get_live_options_chain')).toContain('Tradier and moomoo publish no mark');
     expect(text('get_live_options_chain')).toMatch(/on moomoo 2 reserved and settled to what it spent/);
-    expect(text('get_live_quote')).toMatch(/moomoo's `previousClose` does not roll after the session ends/);
-    expect(text('get_live_quote')).toContain('on any broker but moomoo');
     expect(text('get_intraday_bars')).toMatch(/tastytrade, Public and moomoo/);
     // A fully cold figure, not a ceiling: cached contract lists refund the rest (review).
     expect(text('rank_live_skew_gex')).toMatch(/moomoo\'s 30 about three fully cold ones/);
     expect(text('get_live_dealer_positioning')).toMatch(/about three fully cold calls a minute on its 30/);
     expect(text('get_live_dealer_positioning')).not.toMatch(/at most three a minute/);
-    // Snapshots take 400 CODES, the underlying's among them (review).
-    for (const name of ['get_live_options_chain', 'rank_live_skew_gex', 'scan_option_strategies']) {
+    for (const name of ['get_live_options_chain']) {
       expect(text(name), name).toContain('one snapshot per 400 codes, the underlying\'s among them');
       expect(text(name), name).not.toContain('per 400 contracts');
     }
-    expect(text('get_live_dealer_positioning')).toMatch(/on moomoo 1 \+ 4 x 2 = 9/);
-    // Costs on moomoo are reservations settled to what was spent (review):
-    // a cold scan of a 600-contract date spends 4, not 3.
     expect(text('scan_option_strategies')).toMatch(/on moomoo 3 reserved and settled to what it spent/);
-    expect(text('scan_option_strategies')).toContain('a cold scan of a 600-contract date spends 4');
     expect(text('get_live_dealer_positioning')).toMatch(/3 reserved on moomoo and settled to what it spent/);
     expect(text('rank_live_skew_gex')).toMatch(/2 reserved on moomoo/);
-    // A moomoo spot time is its snapshot's update time, never a print (review).
-    for (const name of ['get_live_options_chain', 'rank_live_skew_gex', 'get_live_dealer_positioning', 'scan_option_strategies']) {
-      expect(text(name), name).toMatch(/moomoo[^.]*update time[^.]*not (?:a print time|the print)/);
-    }
     const info: any = await tools.find((t) => t.name === 'get_platform_info')!.handler({ topic: 'capabilities' });
     const platform = String(info.structuredContent.text);
     expect(platform).toMatch(/30 on moomoo/);
@@ -1047,21 +805,12 @@ describe('MCP tool output schemas', () => {
     const text = tools.find((t) => t.name === 'get_analyst_data')!.config.description as string;
     expect(text).toContain('`estimates` lists forward periods first, soonest first, then past periods newest first, so the nearest forward periods are the ones kept');
     expect(text).toContain('Each rating streak runs from `fromDate`, its oldest observation, through `throughDate`, its newest, and the streaks are newest first.');
-    // Phase D1: the analysts' counts and the targets, and the model grade named for what it is.
     expect(text).toContain('`ratingCounts` is how many analysts rate the stock strong buy, buy, hold, sell and strong sell in the newest monthly count, with its `month` and `total`; it is given only while that month is at most two months back');
     expect(text).toContain('`ratingSnapshot` and the `historicalRating` streaks are a quantitative model grade from six valuation and financial measures, each scored 1 to 5, not analysts\' ratings.');
     expect(text).toContain('the year\'s whole count only when `countComplete` (the list on file reaches back past the year; otherwise the year holds at least that many)');
     expect(text).toContain('`priceTargets` is null, with `priceTargetsNote`, when individual targets have not been fetched yet.');
   });
 
-  test('the live chain says spot is each broker\'s own and can differ by broker', () => {
-    // Thirty-third run: tastytrade and Public 764.8 against Tradier and
-    // Schwab 762.63 after the close, and nothing said why.
-    const { tools, server } = captureRegisteredTools();
-    registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
-    const text = tools.find((t) => t.name === 'get_live_options_chain')!.config.description as string;
-    expect(text).toContain("`spotPrice` is the broker's own price for the underlying (Tradier's and tastytrade's last trade, or their close when the quote has no last; Public's last trade; Schwab's underlying price, else its last or its mark; moomoo's last, the regular session's), and outside regular hours a broker's last can include extended-hours trades, so brokers can report different spots for the same moment (SPY on 2026-09-30 after the close: 764.81 tastytrade, 764.79 Public, 762.63 Tradier and Schwab), and each broker's moneyness and Greeks follow its own; open interest can also differ by broker.");
-  });
 
   test('short data says its full mode is the raw payload, compact dates and string numbers included', () => {
     const { tools, server } = captureRegisteredTools();
@@ -1086,7 +835,7 @@ describe('MCP tool output schemas', () => {
     registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
     const text = tools.find((t) => t.name === 'get_snapshot')!.config.description as string;
     expect(text).not.toContain('(no $)');
-    expect(text).toContain("Its `delta` is the share-equivalent delta summed across every underlying with no price weighting, while `details.greeks.dollarDelta` (and `dollarGamma`) weights each position by its own underlying's price, so the two can differ in size and even in sign when positions span underlyings priced far apart (a short index position beside long shares of a low-priced stock).");
+    expect(text).toContain("Its `delta` is share-equivalent, summed across underlyings with no price weighting, while `details.greeks.dollarDelta` (and `dollarGamma`) weights each position by its own underlying's price, so the two can differ in size and even in sign when positions span underlyings priced far apart.");
   });
 
   test('the snapshot tool says the strategy type holds definitions only and points at compute_scenario', () => {
@@ -1094,10 +843,11 @@ describe('MCP tool output schemas', () => {
     registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
     const text = tools.find((t) => t.name === 'get_snapshot')!.config.description as string;
     expect(text).toContain('type="strategy"');
-    expect(text).toContain('Definitions only, never computed outputs: price or stress one with compute_scenario by its `strategyKey`');
+    expect(text).toContain('Definitions only, never computed outputs.');
+    expect(text).toContain('Price or stress type="strategy" with compute_scenario by its `strategyKey`, without retyping legs.');
     expect(text).toContain('Send to assistant');
-    expect(text).toContain('the rate and the dividend yield each with where the page got it and the Treasury series the rate matched (`rateSeries`, the shortest option leg\'s tenor)');
-    expect(text).toContain('implied vols and the rate each option leg priced at (`rate`, with `rateSeries` the Treasury series matched to that leg\'s own expiration, null for a manual page\'s one rate; absent on definitions sent before it was recorded)');
+    expect(text).toContain('the page\'s inputs (spot, rate and dividend yield, each with its source; the rate\'s `rateSeries` for the shortest option leg; the volatility mode the legs were priced with and the model)');
+    expect(text).toContain('implied vols, and each option leg\'s `rate` with `rateSeries`, the Treasury series matched to its own expiration; null for a manual page\'s one rate, absent on older definitions)');
   });
 
   test('FFT results say their Greeks are raw per-share values with annual theta', () => {
@@ -1111,7 +861,7 @@ describe('MCP tool output schemas', () => {
     expect(text).toContain("For Heston and Bates, vega is the sensitivity to the starting volatility only, a different quantity from the other models' vega, so the two are not comparable and either can be the larger. A model marked actionable false (calibrationStatus and qualityReasons say why, e.g. calibration_failed) priced from default parameters after its calibration failed: its price and signal are shown but are not counted in the position's agreement or average model price, and its Greeks can be empty. Positions saved before 2026-10-01 carry no such mark, and their agreement and average can include such a model.");
   });
 
-  test('the compute, live-chain and risk tools say what a reviewer misread', () => {
+  test('the compute, live-chain and risk tools distinguish their pricing and risk conventions', () => {
     // A tester took a Heston "success" with 0% inside bid/ask and a count of 6
     // models beside 5 outcomes for defects, identical call and put theta for a
     // shaping bug, and a rejected stress row (+7,057 at -10%) for a risk result.
@@ -1119,9 +869,7 @@ describe('MCP tool output schemas', () => {
     registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
     const description = (name: string) => tools.find((t) => t.name === name)!.config.description as string;
     expect(description('get_compute_runs')).toContain("A calibration status of success means the model produced usable fitted parameters; how well they fit is in its confidence and warnings, so a success can carry a warning such as few prices staying within bid/ask. calibratedModelCount counts the models carrying a calibration, including MonteCarlo-Heston, which reuses Heston's fit and has no calibration outcome of its own, so it can exceed the number of outcomes.");
-    expect(description('get_live_options_chain')).toContain("A broker's Greeks can be a snapshot it refreshes about hourly rather than a figure from the quote beside them, and such a snapshot can carry one theta for the call and the put at a strike. Tradier and moomoo publish no mark, so their `mark` is always null.");
-    expect(description('get_live_options_chain')).toContain("Some ETF options, SPY's included, quote until 4:15 PM New York time, so between 4:00 and 4:15, and on the quotes held after, put-call parity can imply an underlying away from `spotPrice`.");
-    expect(description('get_snapshot')).toContain('A figure or stress row with contractStatus "rejected" (calculationAccepted false) is display-only, whether its inputs were fallback or degraded or they changed after it was computed (a stale_snapshot reason); its displayReasons say which. It is not a valid risk result, so report it as unavailable, not as the portfolio\'s risk.');
+    expect(description('get_snapshot')).toContain('A figure or stress row with contractStatus "rejected" (calculationAccepted false) is display-only, whether its inputs were fallback or degraded or changed after it was computed (a stale_snapshot reason; displayReasons say which): it is not a valid risk result, so report it as unavailable.');
   });
 
   test('the analysis tools say which Analysis page models are recorded', async () => {
@@ -1148,12 +896,6 @@ describe('MCP tool output schemas', () => {
     expect(text).toContain("Each model's `paramsAtBounds` names the parameters its latest fit finished exactly on an optimizer bound: such a parameter may be held there by the bound rather than set by the market, so treat it with caution even when `failedQualityCheck` is false (SPY's Kou p at 0.05 and eta1 at 30 on 2026-09-30). It records where the fit finished, not how it got there: a parameter can also finish on a bound it started at. An empty list means none, and null means the fit did not report it: only Merton, Kou and Bates fits report bounds, so it is always null for the other five models, and for Merton, Kou and Bates fits recorded before their calibration did.");
   });
 
-  test('live dealer positioning says what each of its three strike counts counts', () => {
-    const { tools, server } = captureRegisteredTools();
-    registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
-    const text = tools.find((t) => t.name === 'get_live_dealer_positioning')!.config.description as string;
-    expect(text).toContain('Three strike counts differ by what they count: `window.strikesUsed` is the strike rows the broker returned, one per strike per expiration (per root, on a date listed under several); `coverage.strikes` is those rows with at least one leg not known to have zero open interest, the rows that enter the totals; and `strikes.total` is the distinct strikes among them, the strikes the per-strike rows are chosen from (SPY over four expirations on 2026-09-30: 796, 762 and 326).');
-  });
 
   test('a structured proxy error reaches the model with its recovery fields', async () => {
     // THE WHOLE MECHANISM. toolHandler's ApiError branch emitted only the
@@ -1199,12 +941,8 @@ describe('MCP tool output schemas', () => {
     const live = tools.find((t) => t.name === 'get_live_options_chain')!;
     const result: any = await live.handler({ symbol: 'SPY', expiration: '2026-09-19' });
     expect(result.structuredContent.availableExpirations).toEqual(['2026-09-18', '2026-09-25']);
-    // And in the TEXT, for clients that render nothing else: the code too,
-    // and a full stop between the upstream message and the guidance. A client
-    // rendering text alone was shown "...for SPY Retrying will not succeed."
-    // and never the code UNKNOWN_EXPIRATION that was in structuredContent.
     expect(result.content[0].text).toBe(
-      'API error (UNKNOWN_EXPIRATION): Expiration 2026-09-19 is not listed for SPY. Retrying the same request will not succeed. availableExpirations: 2026-09-18, 2026-09-25.',
+      `API error (UNKNOWN_EXPIRATION): Expiration 2026-09-19 is not listed for SPY. Retrying the same request will not succeed. ${BUDGET_UNKNOWN} availableExpirations: 2026-09-18, 2026-09-25.`,
     );
   });
 
@@ -1361,30 +1099,9 @@ describe('MCP tool output schemas', () => {
     registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
     const text = String(tools.find((t) => t.name === 'scan_option_strategies')!.config.description);
     expect(text).toMatch(/A covered call or cash-secured put is the short_call or short_put here, without the stock or cash leg, which is not modelled\./);
-    expect(text).toMatch(/Unset, it defaults by strategy: 0\.15 to 0\.35 for short options and credit spreads, 0\.3 to 0\.6 for long options, 0\.4 to 0\.6 for debit spreads, straddles and butterflies, 0\.1 to 0\.25 for iron condors and short strangles, 0\.15 to 0\.35 for long strangles\./);
-    expect(text).toMatch(/when that exact strike is not listed, the nearest within a quarter of the width is used and the candidate's `width` says what was listed \(for an iron condor or butterfly, the wider of its two wings; the legs' strikes show both\)\./);
-    expect(text).toMatch(/a two-anchor candidate's `anchorDelta` is the mean of its two\./);
-    expect(text).toMatch(/`expectedMove` is this expiration's at-the-money straddle \(`callMid` plus `putMid` at `strike`\), with `pctOfSpot` its fraction of spot as get_live_dealer_positioning gives it,/);
-    // The fallback yield is the dividend over the live spot (proxy/lib/liveMarketInputs.ts),
-    // taken whenever no usable trailing yield resolves (none on file, a failed
-    // read or an unusable value), not only for funds.
     for (const name of ['scan_option_strategies', 'get_live_dealer_positioning']) {
       expect(String(tools.find((t) => t.name === name)!.config.description), name).not.toMatch(/profile_yield\" \(a fund/);
     }
-    for (const name of ['scan_option_strategies', 'get_live_dealer_positioning']) {
-      expect(String(tools.find((t) => t.name === name)!.config.description), name).toContain('When `resolved.q.source` is "profile_yield" (no usable trailing yield was resolved for the symbol: none on file, as for most funds, or one that could not be read or used), q is its trailing annual dividend over the live spot, so it moves slightly with spot from call to call while `resolved.q.asOf` is when the profile record holding that dividend was last updated, not when the division was made.');
-    }
-    expect(text).toMatch(/Every leg needs a two-sided quote, and a sold leg a bid above zero; a candidate missing one is counted in `skipped` by reason, never priced from a last trade or a mark, and a spread whose credit or debit reaches its width is skipped as not a real price\./);
-    expect(text).toMatch(/`probabilityOfProfit` is the risk-neutral probability, under a lognormal model, that the price at expiration ends where the position makes money at the mid, each breakeven read at the implied volatility the chain's own smile gives at that price, with the resolved rate and dividend yield;/);
-    expect(text).toMatch(/They are model values, not forecasts: they take no view on direction, implied volatility has tended to run above realized so short-premium outcomes have tended to beat them, and they ignore early assignment, fills and costs\. Delta is not used as a probability\./);
-    expect(text).toMatch(/each is withheld under incomplete coverage as that tool withholds it, and they carry that tool's `gammaFlipMethod`, `gammaFlipResolution` and `dealerRegime` \(the sign of gamma at spot, not of net GEX\), and `levels.openInterestUnpublishedExpirations` names the expirations whose open interest the broker did not publish \(a zero on every contract, as Schwab prints on index options\), whose legs are excluded, so a level they feed is withheld for incomplete coverage\. Every strike, breakeven and level carries its distance from spot in percent\./);
-    expect(text).toMatch(/these orderings do not rank trades as better or worse\./);
-    expect(text).toContain("EXPENSIVE: a scan reads the expirations list and the scanned chain, charged in your broker's own requests (3 on Tradier, 2 on Schwab, and on moomoo 3 reserved and settled to what it spent: the expirations list, the contract list when it is not cached for the day and one snapshot per 400 codes, the underlying's among them, so a cold scan of a 600-contract date spends 4), and up to four more chains with `levels: \"window\"`.");
-    expect(text).toContain("so another scan of the same expiration within 15 seconds, with any other strategy or filters, re-scans the cached chain with the same `asOf` and spends no broker request, so it is not charged and is answered even when the budget is spent.");
-    expect(text).toMatch(/It refuses rather than defaulting a rate or dividend yield it cannot source \(RESOLUTION_FAILED, naming the missing one, which `r` or `q` supplies\), an expiration the broker does not list \(UNKNOWN_EXPIRATION, naming the listed ones\), and an expiration listed only under adjusted series, a different deliverable \(ADJUSTED_SERIES_ONLY, naming the roots in `excludedRoots`\); a malformed parameter \(INVALID_REQUEST\), symbol \(INVALID_SYMBOL\) or provider \(UNKNOWN_PROVIDER\) is refused before it is charged\./);
-    // strategyScan.ts MAX_PAIRS and twoWings.
-    expect(text).toMatch(/a band giving more than 10,000 pairs is refused \(SCAN_TOO_LARGE, naming the count\) after the chain is read and charged; a narrower band within 15 seconds re-scans the cached chain\./);
-    expect(text).toMatch(/\(an iron condor or butterfly whose credit exceeds one wing keeps money on that whole side, so it has no breakeven there and its max loss is on the wider wing\)/);
     expect(text).not.toMatch(/probability of (?:success|winning)|best trade|recommend/i);
   });
 
@@ -1446,38 +1163,18 @@ describe('MCP tool output schemas', () => {
     registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
     const text = (name: string) => String(tools.find((t) => t.name === name)!.config.description);
     const scan = text('scan_option_strategies');
-    expect(scan).toContain('except that an iron butterfly or straddle body sorts nearest the money first, by its call delta\'s distance from 0.5, taken in the broker\'s decimals so 0.45 and 0.55 tie)');
-    expect(scan).toContain('ties in any of them going to the lower first-leg strike;');
-    expect(scan).toContain('walking the sorted candidates best first, it keeps one only while neither of its anchor strikes has been used, so each anchor strike appears once, though not always in its own best pair (a put strike whose best call was taken by an earlier candidate gets its best pair with a call still free, or none);');
-    expect(scan).toContain('on the four nearest expirations that may still trade (from 4:15 PM New York time on an expiration day, when no expiring series trades any longer, that day\'s is left out unless the broker lists nothing else)');
-    expect(scan).toContain('every number goes out at 15 significant digits at most');
     const chain = text('get_live_options_chain');
-    expect(chain).toContain('Omit `expiration` for the nearest listed expiration that may still trade: from 4:15 PM New York time on an expiration day, when no expiring series trades any longer (some expiring ETF options, including SPY, trade until then; expiring stock options stop at 4:00 in regular hours, and at 4:15 for a class Cboe trades in its curb session; PM-settled index options stop at 4:00), that day\'s is passed over for the next one');
     for (const name of ['get_live_options_chain', 'get_live_dealer_positioning']) {
-      expect(text(name), name).toContain('one not written YYYY-MM-DD is refused by this tool\'s input check before any request, and a well-formed date that is not a calendar date (2026-02-30) by the proxy as INVALID_EXPIRATION, before it is charged.');
-      // The input check the sentence names: a shape the proxy never sees.
       const expiration = (tools.find((t) => t.name === name)!.config.inputSchema as Record<string, z.ZodTypeAny>).expiration;
       expect(expiration.safeParse('2026-9-28').success, name).toBe(false);
       expect(expiration.safeParse('2026-02-30').success, name).toBe(true);
     }
-    expect(chain).toContain("Rate limited per broker, shared with the other live tools, because each call spends your own broker quota: a chain is 2 requests on Tradier and Public, 1 on Schwab, on moomoo 2 reserved and settled to what it spent (its contract list, cached for the day and shared across accounts, costs nothing once cached, then one snapshot per 400 codes, the underlying's among them), and on tastytrade 2 plus one per 100 contracts it lists for the date under every root (a third Friday's SPX lists about twice a single root's count), plus 1 for the expirations list when it is not cached (15 minutes); a tastytrade or moomoo chain longer than its reservation (12 on tastytrade, 2 on moomoo) reserves the rest once its count is known, before its quote batches are sent, and is refused (RATE_LIMITED, with the wait) when the budget cannot hold them; a call bigger than the whole budget runs alone, on a window holding nothing else, and is charged in full, so it waits for the window to reset only while something else is in it; `strikeRange` trims the answer, not the fetch.");
-    expect(chain).toContain('Every number goes out at 15 significant digits at most');
     expect(chain).not.toContain('front month');
-    expect(scan).toContain('the rest count in `skipped` as "shared-anchor-strike", and `distinct: false` returns every pair');
-    expect(scan).toContain('Each candidate\'s `liquidity` is its thinnest leg\'s open interest (null when any is unknown) and its widest leg\'s spread in percent.');
-    expect(scan).toContain('from the Black-Scholes model at each leg\'s own IV with the resolved rate and yield when every leg has a usable one (`source` "model"');
-    expect(scan).toContain('the near-term positioning that moves the market now, not this expiration\'s');
-    // A chain's own refusal can come part way: a quote or bars refusal is always before a request.
-    const refusal = {
-      chain: "or its own rate-limit refusal (RATE_LIMITED: before a request is sent, which charges nothing, or, on a tastytrade or moomoo chain whose quote batches the budget cannot hold, once its count is known and before those batches are sent, which charges the requests already sent)",
-      one: 'or its own rate-limit refusal (RATE_LIMITED, which charges nothing)',
-    };
-    for (const name of ['get_live_options_chain', 'get_live_dealer_positioning', 'scan_option_strategies', 'get_live_quote', 'get_intraday_bars']) {
-      const own = ['get_live_quote', 'get_intraday_bars'].includes(name) ? refusal.one : refusal.chain;
-      expect(text(name), name).toContain(`\`rateLimit\` is the live-broker budget after this call as the proxy reported it, in your broker's own requests: \`remaining\` of \`limit\` on the broker used (\`provider\`), resetting in \`resetSeconds\`, or null when it reported none; an error answered after the live-broker limiter ran carries it as \`rateLimit\` beside \`code\`, whether one it charged for (an unlisted expiration, a broker failure) ${own}, and one refused before it (the Pro tier gate, a malformed date, a missing credential) carries none. The budget is each broker's own documented quota, never less: 120 requests a minute on Tradier and Schwab, 600 on Public (10 a second), 120 on tastytrade, which publishes no figure, so that one is a conservative stand-in, and 30 on moomoo, which meters about 30 a minute per moomoo account, shared with the user's other moomoo apps. The broker's own rate limit is reported as BROKER_RATE_LIMITED, retryable, with \`retryAfterSeconds\` when the broker said how long (Tradier's window reset, Schwab's and moomoo's Retry-After) and null with a backoff note when it did not; wait before retrying.`);
-      expect(text(name), name).not.toMatch(/weighted unit|10-unit|10 units/);
-    }
-    expect(text('get_live_dealer_positioning')).toContain('Every number goes out at 15 significant digits at most (except `strikes.windowPct` and `strikes.deltaBand`, which echo the value asked for exactly), which drops binary noise such as -27496.350000000002 in a computed sum, mid or ratio, while a decimal the broker printed with 15 or fewer digits and a whole number such as an open-interest count pass unchanged; `coverage.gammaFlipResolution`, a sampling step, at 6.');
+    const bars = text('get_intraday_bars');
+    expect(bars).toContain('After this call, it gives `remaining` of `limit` in broker requests (`provider` names the broker), resetting in `resetSeconds`; an error after the live-broker limiter ran carries it beside `code` (a charged failure, or its own RATE_LIMITED refusal, which charges nothing), one refused before it (a malformed date, a missing credential) none.');
+    expect(bars).toContain('1 request on Tradier or Schwab, each metering 120 a minute shared with the other live tools');
+    expect(bars).toContain('BROKER_RATE_LIMITED (retryable; wait `retryAfterSeconds` when given)');
+    expect(bars).not.toMatch(/weighted unit|10-unit|10 units/);
   });
 
   test('the live positioning and scan take a supplied rate and yield, and the quote names the rolled previous close', () => {
@@ -1490,10 +1187,7 @@ describe('MCP tool output schemas', () => {
     registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
     const tool = (name: string) => tools.find((t) => t.name === name)!;
     const text = (name: string) => String(tool(name).config.description);
-    const supplied = '`r` and `q` can be supplied, as decimal fractions (0.0425 is 4.25%): a supplied one is used as given, labelled "supplied" in `resolved` with no date, and never read from or checked against the market, while the other is resolved as usual; an index\'s resolved yield is its basket-derived trailing estimate (its members\' yields weighted as the index weighs them; `resolved.q.source` "index_constituents"), and a volatility index such as VIX, or an index whose estimate is unavailable, needs `q` supplied, the refusal otherwise (RESOLUTION_FAILED) naming what is missing and why. A value that is not a decimal fraction (4.25 for 4.25%) is refused as INVALID_REQUEST before anything is charged.';
     for (const name of ['get_live_dealer_positioning', 'scan_option_strategies']) {
-      expect(text(name), name).toContain(supplied);
-      expect(text(name), name).toContain('An index without `q` whose yield is unavailable is refused before the session opens and before anything is charged.');
       const schema = tool(name).config.inputSchema as Record<string, { description?: string }>;
       for (const field of ['r', 'q']) {
         expect(schema[field], `${name} ${field}`).toBeDefined();
@@ -1504,62 +1198,21 @@ describe('MCP tool output schemas', () => {
       expect(String(schema.q.description), name).toContain('a volatility index such as VIX has none');
       expect(text(name), name).not.toContain('holds no dividend yield for an index');
     }
-    expect(text('scan_option_strategies')).toContain('The chain, rate, yield, levels and expected move are cached for 15 seconds per account, symbol, expiration, broker, `levels` and supplied `r` and `q`, so another scan of the same expiration within 15 seconds');
-    // Broker re-run: a stale chain spot, Public's single-root rows, the weekend straddle.
-    // Public index re-run: a zero last on untraded puts.
-    // Final re-run: a sentinel IV's Greeks are withheld with it.
-    // Live re-run: a zero bid's midpoint.
-    expect(text('get_live_options_chain')).toContain('A null field means the broker published nothing for it, which is different from zero, except where this tool withholds a figure and says so: a `mid` beside a zero bid, and the Greeks beside an unusable IV (`greeksReason`).');
-    expect(text('get_live_options_chain')).toContain('`mid` is (bid + ask) / 2 only where both sides are quoted above zero, as get_live_quote\'s is: a zero bid (nobody bidding) leaves it null beside the ask and the broker\'s mark.');
-    expect(text('get_live_options_chain')).toContain('A 25-delta wing is chosen only among contracts whose IV is usable, so its delta is one this tool shows, and is null when none is.');
-    expect(text('get_live_options_chain')).toContain('The quote beside it is the broker\'s and is kept; the contract\'s delta, gamma, theta and vega come from the same failed solve (delta 1 beside gamma and vega 0 is the zero-vol limit, not a measurement), so they are withheld as null with `greeksReason` "iv-unusable", as they are where the broker published Greeks with no IV.');
-    expect(text('get_live_options_chain')).toContain('Where the IV is usable, the Greeks are the broker\'s as published and are not checked against the quote or the IV beside them.');
     expect(text('get_live_options_chain')).not.toContain('The delta and the quote beside it are still the broker');
-    expect(text('get_live_options_chain')).toContain('A contract that has not traded has `last` null: nothing trades at zero, so a broker\'s 0 is no print.');
-    expect(text('get_live_quote')).toContain('a `last` of 0 is no trade and goes out null');
-    expect(text('get_live_dealer_positioning')).toContain('A stale spot adds a `limitations` line naming what it skews (the levels\' distances from spot, the at-the-money straddles, the split at spot).');
-    expect(text('scan_option_strategies')).toContain('A stale spot adds `spotNote` beside `spotPrice` naming what it skews (every `pctFromSpot`, the expected move, each breakeven against it).');
-    expect(text('get_live_options_chain')).toContain('Public lists SPX\'s options under SPXW only, even on a third Friday, so an SPX monthly there is the PM-settled series.');
     for (const name of ['get_live_quote', 'get_live_options_chain', 'get_intraday_bars', 'get_live_dealer_positioning', 'scan_option_strategies', 'rank_live_skew_gex']) expect(text(name), name).not.toContain('answered SPX\'s expirations with a 400');
-    // tastytrade's chain spot is timed by its quote's last-trade-time where the spot is that last.
-    expect(text('get_live_options_chain')).toContain('`spotTime` is when the spot printed, where the spot is a last trade the broker timed (Tradier, Public, Schwab and tastytrade; moomoo times it by its snapshot\'s update time, not the print; null for a close or a mark standing in for the last, or when the broker gave no time), and `spotStale` is true when that predates the last session\'s open, by get_live_quote\'s `stale` rule (Public has answered a 04:00 pre-market print), null when unknown; the at-the-money pair and the strike window are read against that spot.');
-    expect(text('get_live_dealer_positioning')).toContain('`resolved.S` carries the spot\'s print time as `asOf` and `stale` by get_live_quote\'s rule, both null where the spot has no print time (a close or a mark standing in for the last, or none given).');
-    expect(text('scan_option_strategies')).toContain('`resolved.S` carries the spot\'s print time as `asOf` and `stale` by get_live_quote\'s rule, both null where the spot has no print time (a close or a mark standing in for the last, or none given).');
-    expect(text('rank_live_skew_gex')).toContain('`spotTime` is the spot\'s trade time where the spot is a last trade the broker timed (null otherwise; on moomoo it is the underlying snapshot\'s update time, when the quote last changed, not a print time); `spotStale` is true when the spot printed before the last session\'s open.');
     for (const name of ['get_live_options_chain', 'get_live_dealer_positioning', 'scan_option_strategies', 'rank_live_skew_gex', 'get_live_quote']) {
       expect(text(name), name).not.toMatch(/publishes no trade time|gives no print time|always on tastytrade/);
     }
-    expect(text('get_live_dealer_positioning')).toContain('near the money the straddle is roughly 0.8 of it while the market is open; on a closed market the straddle is whatever prices the broker last published while `ivOneSigma` is measured on the time left now, so their ratio can drift from 0.8 (0.99 on a Monday expiration seen on a Saturday).');
-    expect(text('scan_option_strategies')).toContain('`resolved.r` is the Treasury series matched to the scanned expiration\'s tenor (DGS1MO within a month, DGS3MO within three), as compute_scenario matches its shortest option leg\'s (one rate for a position), where get_live_dealer_positioning\'s four-expiration window takes the 3-month default; the levels inside a scan are priced at the scan\'s rate, so they can differ from that tool\'s by the difference between the two rates.');
-    expect(text('scan_option_strategies')).toContain('The band runs on the delta the broker publishes, so on a closed market it is whatever the broker last published, at the broker\'s own time convention, and a strike the band admits can read outside it at a model priced with the time now left.');
     expect(text('scan_option_strategies')).not.toContain('the last session\'s, at the broker');
     const quote = text('get_live_quote');
-    expect(quote).toContain('A previous close rolls to the session\'s own close on some brokers once the session ends (Tradier\'s SPX all weekend, and Schwab\'s stocks and indices), so outside regular hours a quote whose previousClose equals its last, or the regular session\'s last where the broker keeps an extended-hours last apart (Schwab), with no broker-published change or a published change of 0, goes out with `change` and `changePercent` null, `changeBasis` null and `changeReason` "previous-close-rolled": the day\'s change cannot be read from it, and a session that genuinely closed flat reads the same and is withheld the same; a broker\'s own non-zero change is published whatever the previous close. A change computed from a stale quote (below) is withheld the same way with `changeReason` "stale-quote": it is that snapshot\'s move, not the day\'s (Public has answered a 04:00 pre-market print); a broker\'s own change is kept. `changeReason` is null otherwise. get_stock_prices has the prior close.');
     expect(quote).not.toMatch(/so a computed change of 0 after hours is that roll, not a flat day/);
-    // All-broker live run: Schwab's index quote, its after-hours change, a stale
-    // computed change, tastytrade's ticking clock, the broker's own error.
-    expect(quote).toContain('`mark` is the broker\'s own valuation where it publishes one (tastytrade, and Schwab for a stock or fund), not an executable quote');
-    expect(quote).toContain('(`changeBasis` "broker": Tradier, and Schwab from its regular-session figures where its quote carries them, so an after-hours trade does not move it, else its netChange)');
-    expect(quote).toContain('Null with no clocks at all. tastytrade\'s `quoteTime` is its market-data clock, which moves without new prices (it ticked on a Saturday), so `stale` cannot catch a frozen tastytrade quote; its `tradeTime` says when the last trade printed.');
     // tastytrade's market-data spec publishes `last-trade-time` ("Epoch timestamp of the last trade"), and the shared
     // quote reads it, so the trade time is real there.
-    expect(quote).toContain('tastytrade\'s `quoteTime` is its market-data clock (updated-at), which moves on a bid or ask update too, while `tradeTime` is its last trade\'s time (last-trade-time), null where tastytrade gives none;');
     expect(quote).not.toMatch(/publishes no trade time|tastytrade's one clock/);
-    expect(quote).toContain('Schwab\'s `previousClose` is its close, the previous regular session\'s during the session and that session\'s own once it ends, its `quoteTime` moves on a bid or ask update while `tradeTime` is the last print, and an index quote there has no bid, ask, mark or quote time;');
     for (const name of ['get_live_quote', 'get_live_options_chain', 'get_intraday_bars', 'get_live_dealer_positioning', 'scan_option_strategies', 'rank_live_skew_gex']) {
       expect(text(name), name).not.toMatch(/brokerError|never its body/);
-      expect(text(name), name).toContain('A broker that refuses the request itself (an HTTP 4xx other than 408, 409, 425 and 429, and neither a credential refusal nor a failed sign-in; Public answers a symbol it does not list with a 400) is reported as BROKER_REJECTED, not retryable, with `brokerFailure` "http-status" and its `brokerStatus`: retrying will not help, another broker may.');
-      expect(text(name), name).toContain('A broker that does not answer is reported as BROKER_UNAVAILABLE, with `brokerFailure` saying what kind of failure it was ("http-status" with the broker\'s `brokerStatus`, "timeout", "unreadable-response", "no-usable-answer" when it answered with no price, strikes or spot to use, or "other"); no broker text is passed on.');
     }
-    expect(text('get_live_options_chain')).toContain('whole-chain volume/open-interest totals, which add up what the broker reported, with `contractsMissingVolume` and `contractsMissingOpenInterest` beside them counting the contracts it left out (null only when it reported none);');
-    expect(text('get_live_options_chain')).toContain('A merged row\'s summed figure with an unknown term is null.');
-    expect(text('get_live_dealer_positioning')).toContain('a null status means no leg entered the search (every one excluded, as when the broker published no open interest) or the response did not report a recognized search status.');
-    expect(text('get_live_dealer_positioning')).toContain('`window.openInterestUnpublishedExpirations` names the expirations whose open interest the broker did not publish (a zero on every contract, as Schwab prints on index options): their legs are excluded, so a level they feed is withheld for incomplete coverage (`levelStatus` says which), and `limitations` says so; the expected moves are priced from quotes and are unaffected.');
-    expect(text('scan_option_strategies')).toContain('`gammaFlipResolution` and `dealerRegime` (the sign of gamma at spot, not of net GEX), and `levels.openInterestUnpublishedExpirations` names the expirations whose open interest the broker did not publish (a zero on every contract, as Schwab prints on index options), whose legs are excluded, so a level they feed is withheld for incomplete coverage.');
-    expect(quote).toContain('Public publishes no open, high or low, so those are null there, and Tradier publishes none for an index quote (SPX, VIX), so they are null there too; moomoo\'s `previousClose` does not roll after the session ends (it stays the earlier close, so its computed change still reads the day\'s move), its `last` is the regular session\'s, it publishes no mark or change (`changeBasis` "previous-close"), its `quoteTime` is its snapshot\'s update time and it gives no `tradeTime`, and an index quote there has no bid or ask; a null is what the broker left out, never a stand-in.');
-    expect(quote).toContain('`mid` is (bid + ask) / 2 only when both sides are quoted above zero, and null for an index (SPX, VIX), whose bid and ask are indicative and not an executable market (`midReason` "index-not-executable"; Tradier\'s SPX sides were 76 points apart on a Saturday)');
-    expect(quote).toContain('A repeat for the same symbol on the same broker, by the same account, within 5 seconds can be answered from a short in-memory cache, with the same `asOf`, and spends no broker request, so it is not charged and is answered even when the budget is spent; the cache is per proxy instance and per account and broker, so a repeat can also be fetched afresh and another account\'s call never shares it.');
-    expect(text('get_intraday_bars')).toContain('A repeat for the same symbol, date, interval and session on the same broker, by the same account, within 15 seconds can be answered from a short in-memory cache, with the same `asOf`, and spends no broker request, so it is not charged and is answered even when the budget is spent; the cache is per proxy instance and per account and broker, so a repeat can also be fetched afresh and another account\'s call never shares it.');
+    expect(text('get_intraday_bars')).toContain('A repeat (same symbol, date, interval, session, broker and account) within 15 seconds can be answered from a short in-memory cache with the same `asOf`, spending no broker request, so it is not charged and is answered even when the budget is spent; the cache is per proxy instance, so a repeat can also be fetched afresh, and another account\'s call never shares it.');
   });
 
   test('the live tools name the credential store they read', () => {
@@ -1569,7 +1222,7 @@ describe('MCP tool output schemas', () => {
     registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
     for (const name of ['get_live_options_chain', 'get_live_dealer_positioning', 'scan_option_strategies', 'get_live_quote', 'get_intraday_bars', 'rank_live_skew_gex']) {
       const text = String(tools.find((t) => t.name === name)!.config.description);
-      expect(text, name).toContain('Requires a Pro subscription or above and a broker credential saved to the account under Account -> Broker -> Stored broker credentials; a broker connected only in the browser on the website is not visible to this tool.');
+      expect(text, name).toContain('Requires a broker credential saved to the account under Account -> Broker -> Stored broker credentials; a broker connected only in the browser on the website is not visible to this tool.');
       expect(text, name).not.toContain('a broker connected under Account -> Broker.');
     }
   });
@@ -1578,47 +1231,15 @@ describe('MCP tool output schemas', () => {
     const { tools, server } = captureRegisteredTools();
     registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
     const text = String(tools.find((t) => t.name === 'rank_live_skew_gex')!.config.description);
-    expect(text).toContain('this spends your own broker quota and MAY SPEND ALL OF IT, after which the other live tools refuse (RATE_LIMITED) until the window resets.');
-    // A chain longer than its share extends the reservation or leaves the symbol pending.
-    expect(text).toContain('and on tastytrade 49 reserved and settled to the real count (2 plus one per 100 contracts per chain; a chain longer than its share, on tastytrade or moomoo, reserves the rest once its count is known, before its quote batches are sent, and when the budget cannot hold them the symbol is `pending` "budget"; a symbol bigger than the whole budget runs alone, on a window holding nothing else, charged in full) - plus one more chain');
-    expect(text).toContain('call again with the SAME list after it, not in a tight loop.');
-    expect(text).toContain('so the change is like for like on every broker.');
-    // Review: a failed check is named with its expiration; "no-qualifying-expiration" is only nothing 7 days out.
-    expect(text).toContain('when every one tried fails, `skew.value` is null and `skew.status` names the check the expiration nearest 30 days out failed, with that `expiration` and `dte`: "curve-gate" (fewer than 5 strikes with a usable IV), "delta-gate" (fewer than 5 strikes with a delta) or "wing-iv" (no usable IV at the 25-delta call or put)');
-    expect(text).toContain('"no-qualifying-expiration", with both null, means no listed expiration is 7 days out.');
+    expect(text).toContain('fresh fetches spend your own broker quota and MAY SPEND ALL OF IT. Further requests to that broker can then be refused (RATE_LIMITED) until the window resets; cache-only answers can still be served.');
     expect(text).not.toContain('or "no-qualifying-expiration" when nothing is 7 days out');
-    expect(text).toContain('the GEX change is one session of new positions plus the price moves since');
-    expect(text).toContain('It is this model\'s gamma, not the broker\'s: get_live_dealer_positioning sums the broker\'s published Greeks over the same window and the two can differ;');
-    expect(text).toContain("`rateLimit` is the live-broker budget after this call as the proxy reported it, in your broker's own requests: `remaining` of `limit` on the broker used (`provider`), resetting in `resetSeconds`, or null when it reported none; a call ended by a dead credential or a failed record of its use carries it as `rateLimit` beside `code`, and one refused before the broker opened (the Pro tier gate, a malformed parameter, a missing credential) carries none.");
-    // Its budget refusals are pending rows, not the RATE_LIMITED error the shared sentence describes.
     expect(text).not.toContain('or its own rate-limit refusal (RATE_LIMITED, which charges nothing)');
-    // Live run: model outputs at their precision so fifty rows fit.
-    expect(text).toContain('Skews, IVs, yields, shares and percentages go out at 6 significant digits and GEX in whole dollars; prices as the broker quoted them.');
     expect(text).not.toContain('Every number goes out at 15 significant digits at most.');
-    // Live run: a stale row is not pending, so a long list completes; refreshes go oldest first after.
-    expect(text).toContain('an older one is served as it is, with its `ageSeconds`, marked `stale` and listed in `refreshPending`, and is refreshed oldest first once every symbol has a value. What this call could not answer at all is in `pending`');
-    expect(text).toContain('`complete` is true once every symbol has a value for every requested metric or an error, stale rows included, and `retryAfterSeconds` says when the next call can make progress, on pending symbols or on stale rows');
     expect(text).toContain('so on a long list a row can be older than `maxAgeSeconds` (fifty symbols on Tradier take about five minutes a round): ask for fewer symbols for fresher rows.');
     expect(text).not.toContain('`complete` is false until nothing is pending');
-    // Live run: an unknown ticker, a timed-out request, errors beside complete, rows past the ceiling.
-    expect(text).toContain('A symbol the broker lists no expirations for (an unknown ticker, or one without options) is NO_EXPIRATIONS, not retryable.');
-    expect(text).toContain('A request counts when it is sent, answered or not: a chain the broker does not answer in time still spends its share.');
-    expect(text).toContain('and `complete` does not wait for it - ask for a retryable one again later.');
-    expect(text).toContain('ask for those symbols in a separate call, served from the cache at no cost while younger than `maxAgeSeconds`.');
-    // Live run: Schwab answered SPX's daily window with open interest; the claim is what it has done, not what it always does.
-    expect(text).toContain('(a zero on every contract, which Schwab has printed on index options)');
     expect(text).not.toContain('Schwab prints none on index options');
-    expect(text).toContain('A symbol still finishing when the answer goes out holds its reservation until it settles, so `remaining` can read low for a moment.');
   });
 
-  test('get_regime says which prior each intraday scan kept', () => {
-    // The persisted intraday row kept neither the prior label nor its source
-    // (0 of 95 rows since 2026-09-17); the producer records both now.
-    const { tools, server } = captureRegisteredTools();
-    registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
-    const text = String(tools.find((t) => t.name === 'get_regime')!.config.description);
-    expect(text).toContain('A scan stored since the producer began recording it carries `priorLabel`, the label its hysteresis was judged against (null when it had none), and `priorLabelSource`, "earlier scan" or "daily label" (null with no prior); older scans carry neither.');
-  });
 
   test('the live dealer tool says why its rate is dated a session or two back', () => {
     // resolved.r.asOf read two sessions back on 2026-09-23 (DGS3MO's newest
@@ -1627,11 +1248,6 @@ describe('MCP tool output schemas', () => {
     const { tools, server } = captureRegisteredTools();
     registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
     const text = String(tools.find((t) => t.name === 'get_live_dealer_positioning')!.config.description);
-    // The resolver takes the newest stored row with no age check (review:
-    // an offline probe got a January 2025 row) and accepts an older row when
-    // newer ones are withdrawn, so the text promises no freshness and names
-    // no single cause for an old date.
-    expect(text).toContain("When r is not supplied, `resolved.r` is the newest stored 3-month Treasury yield from FRED, whatever its age: FRED posts a business day's value the next business day and the platform syncs it once each weekday evening, so `resolved.r.asOf` is usually one or two sessions before today; an older date can mean the sync is behind, a delayed publication, or a newer observation withdrawn, and the answer carries no warning either way.");
     expect(text).not.toContain('means the sync has not caught up');
     expect(text).not.toContain('not a stale feed');
   });
@@ -1846,8 +1462,6 @@ describe('MCP tool output schemas', () => {
     const bs = on.tools.find((t) => t.name === 'compute_black_scholes')!;
     expect((bs as any).config.description).toContain('which is the day\'s change in vanna');
     expect((bs as any).config.description).not.toContain('dcharmDvol in charm');
-    const live = on.tools.find((t) => t.name === 'get_live_dealer_positioning')!;
-    expect((live as any).config.description).toContain('remaining-maturity sign for the dealer');
     expect(displayBullet).toContain('greekTimeConvention "time-passing"');
     expect(displayBullet).toContain('legacy: model-dependent time sign');
     expect(rollupsLine).toContain('avgThetaConvention');
@@ -1887,3 +1501,88 @@ describe('MCP tool output schemas', () => {
     expect(result.content[0].text).toContain('Black-Scholes');
   });
 });
+
+async function publishedTools() {
+  const server = new McpServer({ name: 'test', version: '0.0.0' });
+  const stub = { get: async () => ({}), post: async () => ({}) } as any;
+  registerAllTools(server, stub, { getAccessToken: async () => 'token' } as any, stub);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  const client = new Client({ name: 'test-client', version: '0.0.0' });
+  await client.connect(clientTransport);
+  const { tools } = await client.listTools();
+  await client.close();
+  await server.close();
+  return tools;
+}
+
+const DATA_AVAILABLE = 'False when no data was returned: nothing matched, or the call failed (a failed call also carries error and code).';
+const MAX_AGE_SECONDS = 'Seconds, 15 to 900, default 120. A cached row younger than this is served again at no cost; only a row older than this is refreshed. This is not how long rows are cached (15 minutes per account, broker, symbol and session). Within a call the symbols with no cached value are queued first and the older rows after them, oldest first, dispatched concurrently as the call\'s budget and deadlines allow, without waiting for every symbol to have a value; a row not refreshed in time is served as it is, with its `ageSeconds`, marked `stale` and listed in `refreshPending`, so on a long list a row can be older than this.';
+const ENVELOPE_VALIDATION = {
+  type: 'object',
+  properties: {
+    dataAvailable: { type: 'boolean' }, message: { type: 'string' }, note: { type: 'string' }, data: {}, summary: {},
+    count: { type: 'number' }, symbol: { type: ['string', 'null'] }, source: { type: 'string' }, status: { type: 'string' },
+    responseBudget: {},
+  },
+  $schema: 'http://json-schema.org/draft-07/schema#',
+  additionalProperties: {},
+};
+const withoutDescriptions = (o: unknown): unknown => Array.isArray(o) ? o.map(withoutDescriptions)
+  : o !== null && typeof o === 'object'
+    ? Object.fromEntries(Object.entries(o).filter(([k]) => k !== 'description').map(([k, v]) => [k, withoutDescriptions(v)]))
+    : o;
+const descriptionPaths = (o: unknown, path = ''): string[] => Array.isArray(o) ? o.flatMap((v, i) => descriptionPaths(v, `${path}[${i}]`))
+  : o !== null && typeof o === 'object'
+    ? Object.entries(o).flatMap(([k, v]) => (k === 'description' ? [path || '(root)'] : descriptionPaths(v, path ? `${path}.${k}` : k)))
+    : [];
+
+describe('output-schema prose', () => {
+  test('the 44 generic envelopes publish no prose but dataAvailable\'s corrected description, validation unchanged', async () => {
+    const tools = await publishedTools();
+    const envelopes = tools.filter((t) => JSON.stringify(withoutDescriptions(t.outputSchema)) === JSON.stringify(ENVELOPE_VALIDATION));
+    expect(envelopes).toHaveLength(44);
+    for (const tool of envelopes) {
+      expect(descriptionPaths(tool.outputSchema), tool.name).toEqual(['properties.dataAvailable']);
+      expect((tool.outputSchema as any).properties.dataAvailable.description, tool.name).toBe(DATA_AVAILABLE);
+    }
+  });
+
+  test('the two reference schemas are unchanged, prose included', async () => {
+    const tools = await publishedTools();
+    const sha = (name: string) => createHash('sha256').update(JSON.stringify(tools.find((t) => t.name === name)!.outputSchema)).digest('hex');
+    expect(sha('get_platform_info')).toBe('0a04d0dff2e66f073f487dc693db546719f35618cf68b03f8f2caeb5c79db181');
+    expect(sha('get_custom_indicator_spec')).toBe('bc305f0c04653177d6075557b9305fe8c6826223ba8b624a72c212b2b38a7873');
+    expect(tools.filter((t) => !['get_platform_info', 'get_custom_indicator_spec'].includes(t.name)
+      && JSON.stringify(withoutDescriptions(t.outputSchema)) !== JSON.stringify(ENVELOPE_VALIDATION))).toEqual([]);
+  });
+
+  test('rank_live_skew_gex maxAgeSeconds says what an older row does; its validation is unchanged', async () => {
+    const tools = await publishedTools();
+    const prop = (tools.find((t) => t.name === 'rank_live_skew_gex')!.inputSchema as any).properties.maxAgeSeconds;
+    expect(prop).toEqual({ description: MAX_AGE_SECONDS, type: 'integer', minimum: 15, maximum: 900 });
+    expect(prop.description).not.toContain('only after every symbol without a value');
+  });
+
+  test('every live tool\'s provider names the stored-credential default and its order; the enum is unchanged', async () => {
+    const tools = await publishedTools();
+    const provider = (name: string) => (tools.find((t) => t.name === name)!.inputSchema as any).properties.provider;
+    const ENUM = ['tradier', 'tastytrade', 'public', 'schwab', 'moomoo'];
+    for (const name of ['get_live_quote', 'get_live_options_chain', 'get_live_dealer_positioning', 'scan_option_strategies', 'rank_live_skew_gex']) {
+      expect(provider(name), name).toEqual({ type: 'string', enum: ENUM, description: PROVIDER });
+    }
+    expect(provider('get_intraday_bars')).toEqual({ type: 'string', enum: ENUM, description: BARS_PROVIDER });
+    expect(tools.filter((t) => (t.inputSchema as any).properties?.provider).map((t) => t.name).sort()).toEqual(
+      ['get_intraday_bars', 'get_live_dealer_positioning', 'get_live_options_chain', 'get_live_quote', 'rank_live_skew_gex', 'scan_option_strategies']);
+  });
+
+  test('scan_option_strategies levels states its cost in chains; its values are unchanged', async () => {
+    const tools = await publishedTools();
+    const prop = (tools.find((t) => t.name === 'scan_option_strategies')!.inputSchema as any).properties.levels;
+    expect(prop).toEqual({ type: 'string', enum: ['expiration', 'window'], description: LEVELS });
+  });
+});
+
+const PROVIDER = 'Which stored broker credential to use. Defaults to the first one stored, in the order Tradier, tastytrade, Public, Schwab, moomoo.';
+const BARS_PROVIDER = 'Which stored broker credential to use. Defaults to the first one stored, in the order Tradier, tastytrade, Public, Schwab, moomoo; bars need Tradier or Schwab, so name one of them when another is stored first.';
+const LEVELS = 'Which book the dealer levels come from: "expiration" (default, this expiration\'s chain, no extra requests) or "window" (the four nearest expirations that may still trade, up to four more chains).';

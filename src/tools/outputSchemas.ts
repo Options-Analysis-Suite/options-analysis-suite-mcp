@@ -1,23 +1,26 @@
 import { z } from 'zod';
 
+// The 44 generic envelopes (38 market, 6 synced) carry validation only: every client reads this prose in tools/list on
+// every connection, and the field names say what they hold. dataAvailable keeps a description because its meaning is
+// not in its name: a structured failure sets it false too (helpers.ts, the structured API error branch).
 const commonOutputFields = {
-  dataAvailable: z.boolean().optional().describe('False when the query completed but no matching data was available.'),
-  message: z.string().optional().describe('Human-readable no-data, status, or guidance message.'),
-  note: z.string().optional().describe('Additional analyst-facing context or caveat.'),
-  data: z.unknown().optional().describe('Primary result payload, used especially when the raw tool output is an array.'),
-  summary: z.unknown().optional().describe('Compact summary object when the tool provides one.'),
-  count: z.number().optional().describe('Returned item count when present.'),
-  symbol: z.string().optional().describe('Ticker symbol when present.'),
-  source: z.string().optional().describe('Logical data-source label when present.'),
-  status: z.string().optional().describe('Human-readable status when present.'),
-  responseBudget: z.unknown().optional().describe('Response-size budget metadata if the payload had to be collapsed.'),
+  dataAvailable: z.boolean().optional()
+    .describe('False when no data was returned: nothing matched, or the call failed (a failed call also carries error and code).'),
+  message: z.string().optional(),
+  note: z.string().optional(),
+  data: z.unknown().optional(),
+  summary: z.unknown().optional(),
+  count: z.number().optional(),
+  // null: the request named no symbol (compute_scenario priced from supplied inputs answers `symbol: null`)
+  symbol: z.string().nullable().optional(),
+  source: z.string().optional(),
+  status: z.string().optional(),
+  responseBudget: z.unknown().optional(),
 };
 
-export const marketDataOutputSchema = z.object(commonOutputFields).passthrough()
-  .describe('Assistant-ready market, regulatory, or screener data returned by Options Analysis Suite.');
+export const marketDataOutputSchema = z.object(commonOutputFields).passthrough();
 
-export const syncedDataOutputSchema = z.object(commonOutputFields).passthrough()
-  .describe('Assistant-ready synced user analysis, compute, scanner, or snapshot data returned by Options Analysis Suite.');
+export const syncedDataOutputSchema = z.object(commonOutputFields).passthrough();
 
 export const platformInfoOutputSchema = z.object({
   topic: z.enum(['models', 'greeks', 'capabilities', 'all'])

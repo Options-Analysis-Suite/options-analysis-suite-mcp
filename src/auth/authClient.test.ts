@@ -1,4 +1,4 @@
-// S2.4 / #69: HTTP-layer tests for the auth client's GoTrue integration - the trusted-proxy
+// HTTP-layer tests for the auth client's GoTrue integration - the trusted-proxy
 // login header, capturing the gotrueRefreshToken cookie at login, and refreshing via
 // /oauth/refresh (with rotation + fail-on-no-session/MFA so the caller re-logins).
 import { describe, expect, test, afterEach } from 'bun:test';
@@ -25,7 +25,7 @@ function jsonResponse(body: unknown, init?: { status?: number; setCookie?: strin
   return new Response(JSON.stringify(body), { status: init?.status ?? 200, headers });
 }
 
-describe('authClient.login - #69 proxy header + GoTrue cookie capture', () => {
+describe('authClient.login sends the proxy header and captures the GoTrue cookie', () => {
   test('sends x-mcp-proxy-secret when MCP_PROXY_SECRET is set and captures the gotrueRefreshToken cookie', async () => {
     process.env.MCP_PROXY_SECRET = 'secret-xyz';
     const cap: { header: string | null; url: string } = { header: null, url: '' };
@@ -35,7 +35,7 @@ describe('authClient.login - #69 proxy header + GoTrue cookie capture', () => {
       return jsonResponse({ accessToken: 'a.b.c' }, { setCookie: 'gotrueRefreshToken=rt-1; Path=/api/v1/oauth; HttpOnly; SameSite=Lax' });
     });
 
-    const tokens = await login(URL, 'u@e.com', 'pw');
+    const tokens = await login(URL, 'user@example.com', 'pw');
     expect(cap.url).toEndWith('/api/v1/auth/login');
     expect(cap.header).toBe('secret-xyz');
     expect(tokens.accessToken).toBe('a.b.c');
@@ -50,12 +50,12 @@ describe('authClient.login - #69 proxy header + GoTrue cookie capture', () => {
       return jsonResponse({ accessToken: 'a.b.c' }, { setCookie: 'gotrueRefreshToken=rt-1' });
     });
 
-    await login(URL, 'u@e.com', 'pw');
+    await login(URL, 'user@example.com', 'pw');
     expect(cap.header).toBeNull();
   });
 });
 
-describe('authClient.refreshAccessToken - #69 /oauth/refresh', () => {
+describe('authClient.refreshAccessToken uses /oauth/refresh', () => {
   test('POSTs /oauth/refresh with the gotrueRefreshToken cookie and captures a rotated cookie', async () => {
     const cap: { url: string; cookie: string | null } = { url: '', cookie: null };
     stubFetch(async (url, init) => {

@@ -213,7 +213,7 @@ describe('the currency of the estimates', () => {
   });
 });
 
-describe('the analysts\' rating counts and individual price targets (phase D1)', () => {
+describe('the analysts\' rating counts and individual price targets', () => {
   const m = (date: string, strongBuy: number, buy: number, hold: number, sell: number, strongSell: number) => ({ date, strongBuy, buy, hold, sell, strongSell });
   // AAPL 2026-10-04, stored shape (proxy/lib/analystExtras.ts); no row for 2026-03.
   const MONTHS = [
@@ -254,9 +254,9 @@ describe('the analysts\' rating counts and individual price targets (phase D1)',
   });
 
   test('price targets of the year, newest first: unnamed analyst null, the split-adjusted target only when it differs', () => {
-    const out = wire({ price_target_news: [ev('2025-09-01', 100), ev('2026-10-01', 355, { analystName: 'Erik Woodring' }), ev('2026-09-02', 1000, { adjPriceTarget: 250, analystCompany: 'Wedbush' })] });
+    const out = wire({ price_target_news: [ev('2025-09-01', 100), ev('2026-10-01', 355, { analystName: 'Research Analyst' }), ev('2026-09-02', 1000, { adjPriceTarget: 250, analystCompany: 'Wedbush' })] });
     expect(out.priceTargets).toEqual([
-      { date: '2026-10-01', firm: 'Morgan Stanley', analyst: 'Erik Woodring', priceTarget: 355, priceWhenPosted: 330.26 },
+      { date: '2026-10-01', firm: 'Morgan Stanley', analyst: 'Research Analyst', priceTarget: 355, priceWhenPosted: 330.26 },
       { date: '2026-09-02', firm: 'Wedbush', analyst: null, priceTarget: 1000, splitAdjustedPriceTarget: 250, priceWhenPosted: 330.26 },
     ]);
     expect(out.priceTargetsMeta).toEqual({ showing: 2, publishedLast12Months: 2, countComplete: true });

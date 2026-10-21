@@ -1,4 +1,4 @@
-// The etf block of get_company_profile and its holdings paging (phase C).
+// The etf block of get_company_profile and its holdings paging.
 import { describe, expect, it } from 'bun:test';
 import { ETF_READ_FAILED, fitHoldingsPage, shapeEtfBlock } from './etfShaping.js';
 import { MAX_RESPONSE_BYTES, sanitizeMcpWireOutput, utf8ByteLength } from '../helpers.js';

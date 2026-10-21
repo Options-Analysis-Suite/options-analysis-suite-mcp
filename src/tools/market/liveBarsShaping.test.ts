@@ -66,4 +66,14 @@ describe('summarizeLiveBars', () => {
       { time: '2026-09-17T09:57:00-04:00', value: 100.1 }, { time: '2026-09-17T09:58:00-04:00', value: 100.1 }, { time: '2026-09-17T09:59:00-04:00', value: 100.1 },
     ] }, pointsKept: 3, pointsTotal: 11 }]);
   });
+
+  // The proxy withholds an indicator that reads volume on a session with a bar the broker published no volume for
+  // (proxy/lib/sessionBars.ts); its reason reaches the answer, so a null is not read as a warm-up gap.
+  it('carries an indicator\'s no-volume reason, and adds none where the proxy gave none', () => {
+    const payload = session(30, '2026-09-17T09:30:00-04:00', null);
+    payload.indicators.push({ name: 'obv', params: {}, latest: { obv: null }, series: { obv: [] }, reason: 'no-volume' } as any);
+    const out: any = summarizeLiveBars(payload, { maxBars: 400, indicatorPoints: 3 });
+    expect(out.indicators[1]).toEqual({ name: 'obv', params: {}, latest: { obv: null }, points: { obv: [] }, pointsKept: 0, pointsTotal: 0, reason: 'no-volume' });
+    expect('reason' in out.indicators[0]).toBe(false);
+  });
 });

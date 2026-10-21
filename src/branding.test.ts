@@ -1,8 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  LOGO_CONTENT_TYPE,
+  LOGO_PATH,
   MCP_ICON_PATH,
   MCP_ICON_VERSION,
   getBrandingHomeHtml,
+  getLogoBytes,
   getMcpIconBytes,
   getMcpIconUrl,
 } from './branding.js';
@@ -43,5 +46,18 @@ describe('MCP branding metadata', () => {
     const url = getMcpIconUrl('https://example.test/mcp-root/');
 
     expect(url).toBe(`https://example.test/mcp-root${MCP_ICON_PATH}?v=${MCP_ICON_VERSION}`);
+  });
+});
+
+// The sign-in pages' brand lockup: the website's logo.webp, served same-origin so the pages'
+// policy can stay closed to every other origin.
+describe('the sign-in pages\' logo', () => {
+  test('the logo is the website\'s logo.webp, served at /logo.webp as image/webp', () => {
+    expect(LOGO_PATH).toBe('/logo.webp');
+    expect(LOGO_CONTENT_TYPE).toBe('image/webp');
+    const logo = getLogoBytes();
+    expect(logo.byteLength).toBe(5162);
+    expect(logo.subarray(0, 4).toString('ascii')).toBe('RIFF');
+    expect(logo.subarray(8, 12).toString('ascii')).toBe('WEBP');
   });
 });

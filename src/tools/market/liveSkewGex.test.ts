@@ -49,6 +49,38 @@ const payload = {
 const text = (result: any) => (result.content as { type: string; text: string }[])[0].text;
 
 describe('registered rank_live_skew_gex tool', () => {
+  it('the complete stored-credential prerequisite fits in the first 1,024 characters', async () => {
+    const { client, close } = await harness(async () => payload);
+    try {
+      const tool = (await client.listTools()).tools.find((t) => t.name === 'rank_live_skew_gex')!;
+      expect(tool.description!.slice(0, 1024)).toContain('Requires a broker credential saved to the account under Account -> Broker -> Stored broker credentials; a broker connected only in the browser on the website is not visible to this tool.');
+    } finally {
+      await close();
+    }
+  });
+
+  it('the audit-failure rule stays in the description while INTERNAL_ERROR cannot identify that failure', async () => {
+    const { client, close } = await harness(async () => payload);
+    try {
+      const tool = (await client.listTools()).tools.find((t) => t.name === 'rank_live_skew_gex')!;
+      expect(tool.description).toContain('A failed credential-use audit ends the whole call; no further symbol is sent.');
+    } finally {
+      await close();
+    }
+  });
+
+  it('maxAgeSeconds states its positive rule first', async () => {
+    const { client, close } = await harness(async () => payload);
+    try {
+      const tool = (await client.listTools()).tools.find((t) => t.name === 'rank_live_skew_gex')!;
+      const d = (tool.inputSchema.properties as Record<string, { description: string }>).maxAgeSeconds.description;
+      expect(d).toMatch(/^Seconds, 15 to 900, default 120\. A cached row younger than this is served again at no cost; only a row older than this is refreshed\. This is not how long rows are cached \(15 minutes per account, broker, symbol and session\)\./);
+      expect(d).toMatch(/so on a long list a row can be older than this\.$/);
+    } finally {
+      await close();
+    }
+  });
+
   it('asks the proxy for the list, de-duplicated and upper-cased, the metrics in one order, the age and the broker', async () => {
     const { client, calls, close } = await harness(async () => payload);
     try {
@@ -136,6 +168,98 @@ describe('registered rank_live_skew_gex tool', () => {
       const result = await client.callTool({ name: 'rank_live_skew_gex', arguments: { symbols: 'AAA,BBB' } });
       expect(result.isError).toBe(true);
       expect(text(result)).toContain('BROKER_CREDENTIAL_INVALID');
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('rank_live_skew_gex guide and budget through a real client', () => {
+  it('the guide, the per-symbol error legend and the budget inside the fit reach both channels', async () => {
+    const budget = { limit: 120, remaining: 80, resetSeconds: 12, provider: 'tradier' };
+    const answer = {
+      schemaVersion: 1, dataSource: 'live', provider: 'tradier', asOf: '2026-10-20T15:00:04.000Z',
+      session: { liveSessionDate: '2026-10-20', marketOpen: true, valuation: 'now' },
+      method: {}, notes: {}, metrics: ['skew', 'gex'], maxAgeSeconds: 120,
+      results: [row('SPY', 0.05, 1)], pending: [], refreshPending: [], retryAfterSeconds: null, complete: true,
+      errors: [{ symbol: 'XYZQ', status: 404, code: 'NO_EXPIRATIONS', error: 'tradier lists no option expirations for XYZQ', retryable: false }],
+    };
+    const { client, close } = await harness(async () => answer, budget);
+    try {
+      const result = await client.callTool({ name: 'rank_live_skew_gex', arguments: { symbols: 'SPY,XYZQ' } });
+      expect(result.isError).not.toBe(true);
+      const wire = result.structuredContent as any;
+      expect(JSON.parse((result.content as { type: string; text: string }[])[0].text)).toEqual(wire);
+      expect(wire.rateLimit).toEqual(budget);
+      expect(wire.guide.rateLimit).toMatch(/budget after this call/);
+      expect(wire.guide.errorCodes).toMatch(/NO_EXPIRATIONS/);
+      expect(wire.units.precision).toMatch(/6 significant digits/);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('the ranking\'s own refusals', () => {
+  it('a refusal before any request says nothing about a budget', async () => {
+    const { client, close } = await harness(async () => ({}));
+    try {
+      const result = await client.callTool({ name: 'rank_live_skew_gex', arguments: { symbols: ' , ' } });
+      const text = (result.content as { type: string; text: string }[])[0].text;
+      expect(result.isError).toBe(true);
+      expect(text).toMatch(/symbols must name at least one ticker/);
+      expect(text).not.toMatch(/rateLimit/);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('ranking guidance through both MCP channels', () => {
+  it('keeps missing values and independently cached priors beside their corrected explanations', async () => {
+    const cached = row('SPY', 0.05, 250);
+    const unknown = row('QQQ', 0.06, 100);
+    const answer = {
+      ...payload, provider: null,
+      results: [
+        { ...cached, baseline: { status: 'unavailable', date: null, spot: null }, skew: { ...cached.skew, prior: { value: null, status: 'unavailable' }, baselineDate: null, change: null } },
+        { ...unknown, skew: { ...unknown.skew, prior: { value: null, status: null }, change: null } },
+      ],
+      pending: [{ symbol: 'PENDING', metrics: ['skew'], reason: null }],
+      errors: [{ symbol: 'AAA', status: 422, code: 'RESOLUTION_FAILED', error: 'Could not resolve r for AAA', retryable: false, missingFields: ['r'] }],
+    };
+    const { client, close } = await harness(async () => answer);
+    try {
+      const response = await client.callTool({ name: 'rank_live_skew_gex', arguments: { symbols: 'SPY,QQQ,PENDING,AAA' } });
+      expect(response.isError).not.toBe(true);
+      const out = response.structuredContent as any;
+      expect(JSON.parse(text(response))).toEqual(out);
+      expect(out.results[0].gex.prior).toBe(750);
+      expect(out.results[0].skew.prior).toBeNull();
+      expect(out.guide.prior).toMatch(/each metric[^.]*priorStatus/);
+      expect(out.guide.prior).toMatch(/priorStatus[^.]*unknown/);
+      expect(out.guide.prior).not.toMatch(/leaves every prior null/);
+      expect(out.guide.cost).not.toMatch(/moomoo|tastytrade/);
+      expect(out.guide.pending).toMatch(/reason[^.]*not reported/);
+      expect(out.guide.errorCodes).toMatch(/missingFields/);
+      expect(out.rateLimit).toBeNull();
+      expect(out.guide.rateLimit).toMatch(/unknown/);
+    } finally {
+      await close();
+    }
+  });
+
+  it('a call-ending credential failure carries the stopped-work and cache legend in both channels', async () => {
+    const { client, close } = await harness(async () => {
+      throw new LiveApiError('Stored credential is invalid', 401, 'BROKER_CREDENTIAL_INVALID', false, '/account', undefined);
+    });
+    try {
+      const response = await client.callTool({ name: 'rank_live_skew_gex', arguments: { symbols: 'SPY' } });
+      expect(response.isError).toBe(true);
+      const out = response.structuredContent as any;
+      expect(out.meaning).toMatch(/nothing more was sent/);
+      expect(out.meaning).toMatch(/symbols computed before it stay cached/);
+      expect(text(response)).toContain(out.meaning);
     } finally {
       await close();
     }

@@ -288,6 +288,20 @@ describe('provider-callback', () => {
     expect(good.status).toBe(302);
   });
 
+  test('a notice page opens with the lockup', async () => {
+    // A callback without the flow's browser cookie is refused on a notice page (the unbound-flow dead end).
+    const LOCKUP = '<div class="lockup"><img src="/logo.webp" alt="" width="40" height="28"><span>Options Analysis Suite</span></div>';
+    const { mcpState } = startProviderFlow();
+    const handoff = sealHandoff({ s: mcpState });
+    const result = await handleProviderCallbackPost(new URLSearchParams({ mcp_state: mcpState, handoff }).toString(), undefined);
+    expect(result.status).toBe(400);
+    expect(result.body).toContain('Sign-in could not be verified');
+    expect(result.body.split(LOCKUP).length - 1).toBe(1);
+    expect(result.body.indexOf(LOCKUP)).toBeLessThan(result.body.indexOf('<h1>'));
+    expect(result.body).toContain('<title>Options Analysis Suite</title>');
+    expect(result.body).not.toContain('class="brand"');
+  });
+
   test('POST rejects an expired handoff blob', async () => {
     const { mcpState, cookie } = startProviderFlow();
     const handoff = sealHandoff({ s: mcpState, e: Date.now() - 1000 });
@@ -308,10 +322,6 @@ describe('provider-callback', () => {
   });
 
   test('POST trusts the sealed blob and issues a code WITHOUT a profile/subscription fetch', async () => {
-    // The auth server verifies the subscription before it seals a handoff, so a
-    // valid blob always represents an active account. The MCP side must NOT
-    // re-fetch the profile (finding R2-3): a transient profile 5xx here would
-    // strand an already-transferred session with no retry. Any fetch = failure.
     let fetched = false;
     globalThis.fetch = (async (_url: string | URL | Request) => {
       fetched = true;
@@ -327,7 +337,7 @@ describe('provider-callback', () => {
 });
 
 /**
- * Flow fixation (#11). The mcp_state id is public - it rides address bars,
+ * Flow fixation. The mcp_state id is public - it rides address bars,
  * Referer headers and logs - so on its own it lets whoever holds it have the NEXT
  * completed sign-in delivered into the MCP client params parked under it. These
  * tests pin the binding that stops that: a flow started in one browser cannot be
@@ -691,8 +701,6 @@ describe('token exchange for provider sign-ins', () => {
 
   test('refresh_token grant maps a malformed 2xx (200, no token) to 503, not invalid_grant', async () => {
     const json = await exchangeProviderCode();
-    // A 200 with no accessToken is a server glitch, not a rejected session:
-    // clients must retry with the same still-valid token, not discard it (R2-4).
     globalThis.fetch = (async (_url: string | URL | Request) => new Response(
       JSON.stringify({ ok: true }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
@@ -707,7 +715,7 @@ describe('token exchange for provider sign-ins', () => {
   });
 });
 
-describe('password sign-in issues no refresh_token (owner stays stable)', () => {
+describe('password sign-in issues no refresh_token', () => {
   /** Mock a successful (non-MFA) password login + active subscription. */
   function mockPasswordLogin(withRefreshCookie: boolean) {
     globalThis.fetch = (async (url: string | URL | Request) => {
@@ -755,7 +763,7 @@ describe('password sign-in issues no refresh_token (owner stays stable)', () => 
     const json = await passwordExchange(true);
     expect(typeof json.access_token).toBe('string');
     expect(json.refresh_token).toBeUndefined();
-    // Credential-backed bearer keeps the 24h TTL (owner stays key:<hash>).
+    // Credential-backed bearer keeps the 24h TTL.
     expect(json.expires_in as number).toBeGreaterThan(80000);
   });
 
@@ -829,6 +837,16 @@ describe('connection consent for shared gateways', () => {
     const result = await authorizeWithPassword(REDIRECT_URI);
     expect(result.status).toBe(302);
     expect(new URL(result.headers.Location).searchParams.get('code')).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  test('the confirmation page opens with the lockup', async () => {
+    const LOCKUP = '<div class="lockup"><img src="/logo.webp" alt="" width="40" height="28"><span>Options Analysis Suite</span></div>';
+    const result = await authorizeWithPassword(GATEWAY);
+    expect(result.body).toContain('<h1>Confirm this connection</h1>');
+    expect(result.body.split(LOCKUP).length - 1).toBe(1);
+    expect(result.body.indexOf(LOCKUP)).toBeLessThan(result.body.indexOf('<h1>'));
+    expect(result.body).toContain('<title>Confirm connection - Options Analysis Suite</title>');
+    expect(result.body).not.toContain('class="brand"');
   });
 
   test('a shared gateway callback is held behind a confirmation naming the destination', async () => {
@@ -1165,7 +1183,7 @@ describe('OAuth page security headers', () => {
         client_id: 'c', redirect_uri: uri, state: 's',
         code_challenge: CODE_CHALLENGE, code_challenge_method: 'S256',
       }));
-      expect(body).toContain('<p class="subtitle">Sign in to connect your account to your AI assistant</p>');
+      expect(body).toContain('<p class="subtitle">Log in to give your AI assistant access to your Options Analysis Suite account.</p>');
       expect(body).not.toMatch(/to ChatGPT|to Claude/);
     }
   });

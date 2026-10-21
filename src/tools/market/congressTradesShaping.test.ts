@@ -8,7 +8,7 @@ const COVERAGE = [
   { chamber: 'senate', firstDisclosure: '2014-01-30', newestDisclosure: '2026-09-30', lastReadAt: '2026-10-04T10:19:00Z', lastFullReadAt: null, tickersDatedFrom: '2021-02-01' },
 ];
 const trade = (over: Record<string, any> = {}) => ({
-  chamber: 'house', member: { id: 'C001123', name: 'Gilbert Ray Cisneros, Jr.', party: 'Democrat', caucus: null, state: 'CA', district: '31' },
+  chamber: 'house', member: { id: 'C001123', name: 'House Member', party: 'Democrat', caucus: null, state: 'CA', district: '31' },
   symbol: 'NVDA', symbolFiled: 'NVDA', symbolBasis: 'dated', asset: 'NVIDIA Corporation', assetType: 'Stock', type: 'Sale', owner: null,
   amount: { text: '$1,001 - $15,000', min: 1001, max: 15000 }, transactionDate: '2026-08-18', disclosedDate: '2026-09-11', lagDays: 24, listed: 1,
   filings: [{ url: 'https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2026/20035390.pdf', disclosed: '2026-09-11' }], comment: null, ...over,
@@ -18,7 +18,7 @@ const ROUTE = {
   summary: { transactions: 323, purchases: 199, sales: 124, other: 0, members: 56, senate: 93, house: 230, firstTrade: '2016-01-05', lastTrade: '2026-08-18', lastDisclosed: '2026-09-11' },
   trades: [
     trade(),
-    trade({ chamber: 'senate', member: { id: 'S000033', name: 'Bernard Sanders', party: 'Independent', caucus: 'Democrat', state: 'VT', district: null }, symbol: 'META', symbolFiled: 'FB', type: 'Purchase', owner: 'Spouse',
+    trade({ chamber: 'senate', member: { id: 'S000033', name: 'Senate Member', party: 'Independent', caucus: 'Democrat', state: 'VT', district: null }, symbol: 'META', symbolFiled: 'FB', type: 'Purchase', owner: 'Spouse',
       amount: { text: 'Over $50,000,000', min: 50000001, max: null }, lagDays: -1,
       filings: [{ url: 'https://efd/1', disclosed: '2021-07-01' }, { url: 'https://efd/2', disclosed: '2022-01-10' }] }),
     trade({ member: { id: 'X000001', name: 'New Member', party: null, caucus: null, state: 'TX', district: '9' }, symbol: null, symbolFiled: null, asset: 'Ohio St 4% 2030', assetType: 'Municipal Security', type: 'receive' }),
@@ -30,7 +30,7 @@ describe('get_congress_trades', () => {
     const out = sanitizeMcpWireOutput(shapeCongressTrades(ROUTE)) as any;
     expect(out.summary).toEqual({ transactions: 323, purchases: 199, sales: 124, other: 0, members: 56, senate: 93, house: 230, firstTrade: '2016-01-05', lastTrade: '2026-08-18', lastDisclosed: '2026-09-11' });
     expect(out.trades[0]).toEqual({
-      member: 'Gilbert Ray Cisneros, Jr.', memberId: 'C001123', party: 'Democrat', chamber: 'House', seat: 'CA-31', label: 'D-CA-31', symbol: 'NVDA', asset: 'NVIDIA Corporation',
+      member: 'House Member', memberId: 'C001123', party: 'Democrat', chamber: 'House', seat: 'CA-31', label: 'D-CA-31', symbol: 'NVDA', asset: 'NVIDIA Corporation',
       assetType: 'Stock', type: 'Sale', owner: null, amountRange: { text: '$1,001 - $15,000', min: 1001, max: 15000 }, tradeDate: '2026-08-18', disclosedDate: '2026-09-11',
       disclosureLagDays: 24, report: 'https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2026/20035390.pdf',
     });

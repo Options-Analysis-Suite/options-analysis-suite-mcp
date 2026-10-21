@@ -172,27 +172,27 @@
     },
     {
       "name": "get_live_options_chain",
-      "description": "Get a LIVE options chain for one expiration from the broker connected to your account (Pro and above); the only tool with intraday option prices"
+      "description": "Get a LIVE options chain for one expiration from the broker connected to your account; the only tool with intraday option prices"
     },
     {
       "name": "get_live_dealer_positioning",
-      "description": "Get LIVE dealer positioning from your connected broker's chain (Pro and above): net GEX/DEX, vega, vanna, charm and vomma, the gamma flip, call and put walls, and the gamma regime over the nearest four expirations"
+      "description": "Get LIVE dealer positioning from your connected broker's chain: net GEX/DEX, vega, vanna, charm and vomma, the gamma flip, call and put walls, and the gamma regime over the nearest four expirations"
     },
     {
       "name": "scan_option_strategies",
-      "description": "Scan one expiration of your connected broker's live chain for option strategy candidates (Pro and above): single options, vertical spreads, iron condors and butterflies, straddles and strangles, priced from two-sided quotes with payoff, risk-neutral model probabilities, position Greeks and distances to the expected move and dealer levels"
+      "description": "Scan one expiration of your connected broker's live chain for option strategy candidates: single options, vertical spreads, iron condors and butterflies, straddles and strangles, priced from two-sided quotes with payoff, risk-neutral model probabilities, position Greeks and distances to the expected move and dealer levels"
     },
     {
       "name": "get_live_quote",
-      "description": "Get a LIVE quote for one underlying (stock, ETF or index) from the broker connected to your account (Pro and above): last, bid, ask, sizes, mid, mark, the session's open, high and low, previous close, volume, the broker's quote and trade times, and change against the previous close"
+      "description": "Get a LIVE quote for one underlying (stock, ETF or index) from the broker connected to your account: last, bid, ask, sizes, mid, mark, the session's open, high and low, previous close, volume, the broker's quote and trade times, and change against the previous close"
     },
     {
       "name": "get_intraday_bars",
-      "description": "Get one session's LIVE intraday bars (1 to 30 minutes) for a stock, ETF or index from the broker connected to your account (Pro and above; Tradier and Schwab), with the session VWAP and its band, a session summary, and Stock Charts indicators computed on the same bars"
+      "description": "Get one session's LIVE intraday bars (1 to 30 minutes) for a stock, ETF or index from the broker connected to your account (Tradier and Schwab), with the session VWAP and its band, a session summary, and Stock Charts indicators computed on the same bars"
     },
     {
       "name": "rank_live_skew_gex",
-      "description": "Rank a watchlist of up to 50 symbols LIVE by 25-delta skew and net GEX, each with its change since the prior session's close, computed by one model on the live chains from the broker connected to your account and on the prior session's stored chains (Pro and above); may spend the whole per-broker request budget, and a long list is finished over several calls with the same list"
+      "description": "Rank a watchlist of up to 50 symbols LIVE by 25-delta skew and net GEX, each with its change since the prior session's close, computed by one model on the live chains from the broker connected to your account and on the prior session's stored chains; may spend the whole per-broker request budget, and a long list is finished over several calls with the same list"
     },
     {
       "name": "get_options_snapshot",
@@ -200,7 +200,7 @@
     },
     {
       "name": "get_regime_fits",
-      "description": "Get the calibrated parameters and fit quality for the eight pricing models on a symbol, with an error history (Pro and above; regime universe of about 124 symbols)"
+      "description": "Get the calibrated parameters and fit quality for the eight pricing models on a symbol, with an error history (regime universe of about 124 symbols)"
     },
     {
       "name": "get_dealer_positioning",
@@ -208,11 +208,11 @@
     },
     {
       "name": "compute_black_scholes",
-      "description": "Price a European option with Black-Scholes from explicit inputs (Pro and above): price, seventeen Greeks in the commercial API's convention, expected move and risk-neutral ITM probability; r and q supplied or resolved from stored market data, never defaulted"
+      "description": "Price a European option with Black-Scholes from explicit inputs: price, seventeen Greeks in the commercial API's convention, expected move and risk-neutral ITM probability; r and q supplied or resolved from stored market data, never defaulted"
     },
     {
       "name": "compute_scenario",
-      "description": "Reprice a multi-leg options strategy across spot moves, vol-point shocks and days elapsed (Pro and above): a P&L grid against each leg's entry, base Greeks in the commercial API's convention, inputs supplied or resolved from stored end-of-day data with their source named, and an optional portfolio fit against held positions (Greeks by underlying, expiration and sector; correlation over sixty daily log returns; a uniform stress across every underlying)"
+      "description": "Reprice a multi-leg options strategy across spot moves, vol-point shocks and days elapsed: a P&L grid against each leg's entry, base Greeks in the commercial API's convention, inputs supplied or resolved from stored end-of-day data with their source named, and an optional portfolio fit against held positions (Greeks by underlying, expiration and sector; correlation over sixty daily log returns; a uniform stress across every underlying)"
     },
     {
       "name": "get_platform_info",

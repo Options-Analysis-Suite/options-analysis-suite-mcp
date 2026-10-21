@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { applyResponseSizeGuard, decodeEscapes, sanitizeMcpWireOutput, settleVendorKeys, toolHandler } from './helpers.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { applyResponseSizeGuard, COLLAPSE_MESSAGE, decodeEscapes, sanitizeMcpWireOutput, settleVendorKeys, toolHandler, WIRE_CEILING_BYTES } from './helpers.js';
+import { marketDataOutputSchema } from './outputSchemas.js';
+import { BUDGET_UNKNOWN, liveErrorMeaning } from './liveGuide.js';
 import { ApiError, AuthError, SubscriptionError } from '../types.js';
 import { LiveApiError } from '../proxy/liveApiClient.js';
 
@@ -98,11 +103,69 @@ describe('applyResponseSizeGuard', () => {
   });
 });
 
-// Field names are camelCase on every tool. Proxy rows carry snake_case
-// columns (market_date, iv_rank, stress_score) and several tools pass them
-// through on raw and full paths, so the wire boundary converts pure
-// lowercase snake_case keys; anything else (a date, a tenor, a ticker, a
-// model or feature display name, a form type) is data and stays as it is.
+describe('the wire ceiling and the collapse branch', () => {
+  const bytes = (text: string) => new TextEncoder().encode(text).byteLength;
+  const rows = (n: number, width: number) => Array.from({ length: n }, (_, id) => ({ id, blob: 'x'.repeat(width) }));
+
+  test('WIRE_CEILING_BYTES is 49,920, under Claude Code\'s 50,000-character line', () => {
+    expect(WIRE_CEILING_BYTES).toBe(49_920);
+    expect(WIRE_CEILING_BYTES).toBeLessThan(50_000);
+  });
+
+  test('an answer between the ceiling and 51,200 bytes is trimmed by default, no longer passed through', () => {
+    const payload = { data: rows(60, 815) };
+    const raw = bytes(JSON.stringify(payload));
+    expect(raw).toBeGreaterThan(WIRE_CEILING_BYTES);
+    expect(raw).toBeLessThanOrEqual(51_200);
+    const guarded = applyResponseSizeGuard(payload);
+    expect(bytes(guarded)).toBeLessThanOrEqual(WIRE_CEILING_BYTES);
+    const parsed = JSON.parse(guarded);
+    expect(parsed.data).toHaveLength(50);
+    expect(parsed.dataMeta).toMatchObject({ truncated: true, originalLength: 60, returned: 50 });
+  });
+
+  test('a guide object survives the first-pass and the aggressive trims whole', () => {
+    const guide = { nullIsUnknown: 'n'.repeat(400), rateLimit: 'r'.repeat(400) };
+    const first = JSON.parse(applyResponseSizeGuard({ guide, data: rows(60, 815) }));
+    expect(first.dataMeta.aggressive).toBeUndefined();
+    expect(first.guide).toEqual(guide);
+    const aggressive = JSON.parse(applyResponseSizeGuard({ guide, data: rows(120, 1200) }));
+    expect(aggressive.dataMeta.aggressive).toBe(true);
+    expect(aggressive.guide).toEqual(guide);
+  });
+
+  test('the collapse says no values came back and how to narrow, and drops the guide with them', () => {
+    const parsed = JSON.parse(applyResponseSizeGuard({ guide: { a: 'kept only beside its values' }, value: 'x'.repeat(60_000) }));
+    expect(parsed.dataAvailable).toBe(false);
+    expect(parsed.message).toBe(COLLAPSE_MESSAGE);
+    expect(parsed.error).toBe('Response too large for MCP response budget.');
+    expect(parsed.responseBudget).toEqual({ tooLarge: true, sizeKb: 59 });
+    expect(parsed.guide).toBeUndefined();
+    expect(COLLAPSE_MESSAGE).toMatch(/no values were returned/);
+    expect(COLLAPSE_MESSAGE).toMatch(/Narrow the request/);
+  });
+
+  test('the collapse reaches a real client in both channels and passes the output schema', async () => {
+    const server = new McpServer({ name: 'ceiling-test', version: '1' });
+    server.registerTool('too_big', { description: 'test', inputSchema: {}, outputSchema: marketDataOutputSchema },
+      toolHandler(async () => ({ value: 'x'.repeat(60_000) })));
+    const client = new Client({ name: 'ceiling-consumer', version: '1' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({ name: 'too_big', arguments: {} });
+      expect(result.isError).not.toBe(true);
+      const wire = result.structuredContent as any;
+      expect(JSON.parse((result.content as { type: string; text: string }[])[0].text)).toEqual(wire);
+      expect(wire.dataAvailable).toBe(false);
+      expect(wire.message).toBe(COLLAPSE_MESSAGE);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+});
+
 describe('sanitizeMcpWireOutput publishes camelCase field names', () => {
   test('converts pure snake_case keys, nested and inside arrays', () => {
     const sanitized = sanitizeMcpWireOutput({
@@ -654,6 +717,108 @@ describe('toolHandler — structuredContent', () => {
       data: [],
       message: 'No data found. Make sure MCP sync is enabled in the platform\'s Account Settings. Data syncs automatically as you use the platform.',
     });
+  });
+});
+
+describe('toolHandler - the live error legend', () => {
+  const BUDGET = { limit: 120, remaining: 119, resetSeconds: 43, provider: 'tradier' };
+  const live = (err: unknown) => toolHandler(async () => { throw err; }, { liveTool: 'quote' })({});
+
+  test('a live structured error carries meaning in both channels, after the retry hint', async () => {
+    const result = await live(new LiveApiError('tradier rejected the quote request (HTTP 400)', 502, 'BROKER_REJECTED', false, undefined, { rateLimit: BUDGET }));
+    const meaning = liveErrorMeaning('quote', 'BROKER_REJECTED', { rateLimit: BUDGET }, false)!;
+    expect((result.structuredContent as any).meaning).toBe(meaning);
+    const text = result.content[0].text;
+    expect(text).toContain(`Retrying the same request will not succeed. ${meaning}`);
+    expect(text.startsWith('API error (BROKER_REJECTED): ')).toBe(true);
+  });
+
+  test('a long upstream message is truncated and the meaning survives whole', async () => {
+    const result = await live(new LiveApiError('M'.repeat(9_000), 502, 'BROKER_UNAVAILABLE', true, undefined, { brokerFailure: 'timeout' }));
+    const meaning = liveErrorMeaning('quote', 'BROKER_UNAVAILABLE', { brokerFailure: 'timeout' }, false)!;
+    const text = result.content[0].text;
+    expect(text).toContain('... [truncated]');
+    expect(text).toContain(meaning);
+    expect(new TextEncoder().encode(text).byteLength).toBeLessThanOrEqual(8 * 1024);
+  });
+
+  test('a capacity-shaped live refusal keeps the capacity caveat and wait whole in both MCP channels at the text ceiling', async () => {
+    const capacityBudget = { limit: 120, remaining: 0, resetSeconds: 60, provider: 'schwab' };
+    const server = new McpServer({ name: 'capacity-guidance-test', version: '1' });
+    const tools = ['quote', 'chain', 'dealer', 'scan', 'ranking', 'bars'] as const;
+    for (const liveTool of tools) {
+      for (const long of [false, true]) {
+        server.registerTool(`${liveTool}_${long}`, { description: 'Offline capacity refusal', inputSchema: {}, outputSchema: marketDataOutputSchema },
+          toolHandler(async () => {
+            throw new LiveApiError(long ? 'M'.repeat(9_000) : 'Rate limit exceeded. Retry in 60 seconds.', 429,
+              'RATE_LIMITED', true, long ? `https://example.invalid/${'a'.repeat(600)}` : undefined,
+              { retryAfterSeconds: 60, rateLimit: capacityBudget, ...(long ? { blob: 'x'.repeat(3_500) } : {}) });
+          }, { liveTool }));
+      }
+    }
+    const client = new Client({ name: 'capacity-guidance-consumer', version: '1' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      for (const liveTool of tools) {
+        for (const long of [false, true]) {
+          const result = await client.callTool({ name: `${liveTool}_${long}`, arguments: {} });
+          const out = result.structuredContent as any;
+          const text = (result.content as Array<{ type: string; text: string }>)[0].text;
+          expect(result.isError).toBe(true);
+          expect(out.rateLimit).toEqual(capacityBudget);
+          expect(out.retryAfterSeconds).toBe(60);
+          expect(out.detailsOmitted).toBeUndefined();
+          expect(out.meaning).toMatch(/remaining 0.*shared limiter capacity/);
+          expect(out.meaning).toMatch(/without this account exhausting its broker quota/);
+          expect(out.meaning).toMatch(/resetSeconds and retryAfterSeconds.*advisory.*not.*budget reset/);
+          expect(out.meaning).not.toContain('is not held by this wait');
+          expect(out.meaning).toContain('shared limiter capacity can refuse it too');
+          expect(out.meaning).toContain("If one answers, still give this refusal's wait (60 seconds) in the answer and say the platform's limiter, not the broker, refused the schwab request.");
+          expect(text).toContain(out.meaning);
+          expect(new TextEncoder().encode(text).byteLength).toBeLessThanOrEqual(8 * 1024);
+          if (long) expect(text).toContain('... [truncated]');
+        }
+      }
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  test('details over the error budget are omitted and the meaning says the budget is unknown', async () => {
+    const result = await live(new LiveApiError('broker failed', 502, 'BROKER_UNAVAILABLE', true, undefined, { rateLimit: BUDGET, blob: 'x'.repeat(6_000) }));
+    const wire = result.structuredContent as any;
+    expect(wire.detailsOmitted).toBe(true);
+    expect(wire.meaning).toContain(BUDGET_UNKNOWN);
+    expect(wire.meaning).not.toMatch(/budget after this call/);
+  });
+
+  test('omitting the broker wait details does not claim the broker supplied none', async () => {
+    const result = await live(new LiveApiError('The broker asks for 12 seconds.', 429, 'BROKER_RATE_LIMITED', true,
+      undefined, { provider: 'tradier', retryAfterSeconds: 12, blob: 'x'.repeat(6_000) }));
+    const wire = result.structuredContent as any;
+    expect(wire.detailsOmitted).toBe(true);
+    expect(wire.meaning).not.toContain('did not say how long');
+    expect(wire.meaning).toContain('wait is unknown here');
+    expect(result.content[0].text).toContain(wire.meaning);
+    expect(new TextEncoder().encode(result.content[0].text).byteLength).toBeLessThanOrEqual(8 * 1024);
+  });
+
+  test('a non-live tool\'s structured error is unchanged: no meaning', async () => {
+    const result = await toolHandler(async () => { throw new LiveApiError('nope', 502, 'BROKER_REJECTED', false, undefined, {}); })({});
+    expect((result.structuredContent as any).meaning).toBeUndefined();
+    expect(result.content[0].text).not.toContain('another stored broker');
+  });
+
+  test('a live tool\'s plain ApiError and unrecognised throw end with the budget-unknown sentence', async () => {
+    expect((await live(new ApiError('upstream said no', 502))).content[0].text.endsWith(BUDGET_UNKNOWN)).toBe(true);
+    expect((await live(new Error('shaping failed'))).content[0].text.endsWith(BUDGET_UNKNOWN)).toBe(true);
+  });
+
+  test('a live tool\'s auth and subscription errors are unchanged (refused before any broker request)', async () => {
+    expect((await live(new AuthError('bad session'))).content[0].text).toBe('bad session');
+    expect((await live(new SubscriptionError('tier required'))).content[0].text).toBe('tier required');
   });
 });
 
@@ -1478,5 +1643,17 @@ describe('a short vendor name is a vendor name in every spelling (review: mixed-
     }
     const breeder = `https://www.K${shaped(OPT, 'lUlUl')}.com/`;
     expect(sanitizeMcpWireOutput({ breeder })).toEqual({ breeder });
+  });
+});
+
+describe('text-only live failures', () => {
+  test('the budget-unknown sentence follows a full stop, never run on to the message', async () => {
+    const text = (await toolHandler(async () => { throw new Error('shaping failed'); }, { liveTool: 'quote' })({})).content[0].text;
+    expect(text).toContain(`shaping failed. ${BUDGET_UNKNOWN}`);
+  });
+  test('a refusal made in the MCP server before any request carries no budget-unknown sentence', async () => {
+    const { RefusedBeforeRequest } = await import('./liveGuide.js');
+    const text = (await toolHandler(async () => { throw new RefusedBeforeRequest('symbols must name at least one ticker'); }, { liveTool: 'ranking' })({})).content[0].text;
+    expect(text).toBe('Error: symbols must name at least one ticker');
   });
 });

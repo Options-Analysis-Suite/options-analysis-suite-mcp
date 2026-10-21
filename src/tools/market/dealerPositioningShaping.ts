@@ -19,6 +19,8 @@
 
 import { MAX_RESPONSE_BYTES, significant } from '../helpers.js';
 import { omittedRowsSentence, readOmittedRows } from './omittedRows.js';
+import type { LiveRateLimit } from '../../proxy/liveApiClient.js';
+import { rateLimitGuide, spotClockGuide, type Guide } from '../liveGuide.js';
 
 export interface DealerPositioningOptions {
   /** Total per-strike rows kept nearest spot (the cap, with strikeWindowPct). */
@@ -31,6 +33,11 @@ export interface DealerPositioningOptions {
    * least one expiration in the window. Takes the place of strikeWindowPct.
    */
   strikeWindowDelta?: number;
+  /**
+   * The live-broker budget after this call: given, it rides INSIDE the fit with the rows and
+   * the guide, so the answer measured is the answer fitted. Absent: no rateLimit field.
+   */
+  rateLimit?: LiveRateLimit | null;
 }
 
 const DEFAULT_STRIKE_RANGE = 10;
@@ -624,14 +631,30 @@ export function summarizeDealerPositioning(
     // Which rate and dividend yield the gamma flip was repriced with. The flip
     // is a repricing across spot levels, so it is only as good as these.
     resolved: body.resolved ?? null,
+    // The proxy's own success warnings (resolver and read-gap warnings): the shaper used to drop them, so an
+    // unsuitable stored yield or a rate fallback never reached the model.
+    ...(warningsOf(body.warnings).length > 0 ? { warnings: warningsOf(body.warnings) } : {}),
+    ...('rateLimit' in options ? { rateLimit: options.rateLimit ?? null } : {}),
+    guide: {} as Guide,
   };
+  const rowsReturned = nearSpot.length > 0 || atLevels.length > 0;
+  const guideFacts = {
+    rowsReturned, requestedWindowPct, provider: shaped.provider, rateLimitGiven: 'rateLimit' in options, rateLimit: options.rateLimit ?? null,
+    regime: dealerRegime,
+  };
+  shaped.guide = dealerGuide(shaped, guideFacts, false);
 
-  // The rows take what the rest of the answer leaves under the ceiling,
-  // dropped farthest from spot first until they fit.
+  // The rows take what the rest of the answer (the guide and the budget included) leaves under the ceiling,
+  // dropped farthest from spot first until they fit. Once rows go, the guide gains the line saying so, and the
+  // rows give way for it too.
   const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
-  const rowBudget = MAX_RESPONSE_BYTES - RESPONSE_MARGIN_BYTES - bytes(shaped);
+  let rowBudget = MAX_RESPONSE_BYTES - RESPONSE_MARGIN_BYTES - bytes(shaped);
   while (nearSpot.length > 1 && bytes(nearSpot) + bytes(atLevels) > rowBudget) {
-    shaped.strikes.limitedBySize = true;
+    if (!shaped.strikes.limitedBySize) {
+      shaped.strikes.limitedBySize = true;
+      shaped.guide = dealerGuide(shaped, guideFacts, true);
+      rowBudget = MAX_RESPONSE_BYTES - RESPONSE_MARGIN_BYTES - bytes(shaped);
+    }
     const farthest = spotPrice === null ? nearSpot.length - 1 : nearSpot.reduce((far, row, index) =>
       (Math.abs((row.strike as number) - spotPrice) >= Math.abs((nearSpot[far].strike as number) - spotPrice) ? index : far), 0);
     nearSpot = nearSpot.filter((_, index) => index !== farthest);
@@ -642,3 +665,262 @@ export function summarizeDealerPositioning(
   shaped.strikes.atLevels = atLevels;
   return shaped;
 }
+
+const warningsOf = (v: unknown): string[] => (Array.isArray(v) ? v.filter((w): w is string => typeof w === 'string') : []);
+
+/**
+ * The dealer guide emits each applicable reading rule under a stable key. It explains neutral regimes,
+ * percent windows without a spot, the magnet and concentration alongside the fields they describe.
+ */
+function dealerGuide(
+  shaped: Record<string, any>,
+  f: { rowsReturned: boolean; requestedWindowPct: number | null; provider: string | null; rateLimitGiven: boolean; rateLimit: LiveRateLimit | null; regime: string | null },
+  limited: boolean,
+): Guide {
+  const g: Guide = {};
+  const cov = shaped.coverage;
+  const entries: Array<Record<string, any>> = shaped.byExpiration;
+  const provider = f.provider;
+  // Governs every exposure value, null ones included.
+  g.exposure = 'netCharm is dealer dollar charm per calendar day on the remaining-maturity sign, the opposite of '
+    + 'compute_black_scholes\' time-passing charm: one day of time passing moves the dealers\' dollar delta by minus it. '
+    + 'GEX counts call gamma positive and put gamma negative (dealers assumed long calls and short puts); a squeeze '
+    + 'reading of out-of-the-money calls assumes customers bought them and dealers are short, and open interest does not '
+    + 'say who holds a contract: spotSides and the open-interest fields are what a squeeze argument reads, not a squeeze signal.';
+  g.walls = 'The call wall is the strike with the largest positive call gamma and the put wall the strike with the most '
+    + 'negative put gamma; ties go to the lower strike, and nothing orders them, so the put wall can sit above the call '
+    + 'wall. A null wall beside a complete levelStatus means no strike has such gamma on that side; beside any other '
+    + 'status it is withheld.';
+  const flipNullComplete = shaped.levels.gammaFlip === null && shaped.levelStatus.gammaFlip === 'complete';
+  // Coverage.gammaFlip's legs, repriced and held alike, are flipMethod's (every answer); not repeated here.
+  g.levelStatus = 'levelStatus is each level\'s required coverage, not whether a level was found: the flip\'s is '
+    + 'coverage.gammaFlip, and the walls\', the magnet\'s and the '
+    + 'concentration\'s is the netGex field status, which can also read "unavailable" (a missing or invalid reported '
+    + 'total despite coverage). A reported null level keeps its coverage status; a missing or invalid reported level '
+    + 'reads "unavailable" when its required coverage is complete.'
+    // An evaluation found "a search result, not withheld" lifted without the next sentence's caveat: one sentence.
+    // Both the repriced grid and the observed-leg adaptive search can miss crossings between samples or outside the range.
+    + (flipNullComplete ? ' Here gammaFlip\'s null over complete coverage (every counted leg entered the search) '
+      + 'is a search result, not withheld, and not proof of no flip: sampling within 20% of spot can miss two crossings in '
+      + 'one interval or a crossing outside the range. See coverage.gammaFlipSearchStatus.' : '');
+  if (shaped.levels.gammaFlip !== null) {
+    // Put the nearest-detected rule beside the coverage rule without enlarging this branch's guide.
+    // Adding it to the old prose displaced a strike on a complete mixed-method window.
+    g.levelStatus = 'levelStatus reports required coverage, not whether a level was found: gammaFlip uses '
+      + 'coverage.gammaFlip; walls, magnet and concentration use netGex\'s field status ("unavailable" for missing/invalid '
+      + 'totals). Missing/invalid levels read "unavailable" under complete coverage; reported null levels keep coverage '
+      + 'status. gammaFlip is nearest to spot among crossings found by sampling; nearer or farther crossings may be missed.';
+  }
+  g.dealerRegime = 'dealerRegime positive means dealers hedge against moves and dampen them, negative that they hedge with '
+    + 'moves and amplify them. It is the sign of net gamma over the selected expirations interpolated at spot between the '
+    + 'two bracketing strikes (the nearest strike\'s gamma when spot is outside them), not the sign of netGex nor which '
+    + 'side of gammaFlip spot is on, and can disagree with both; only with fewer than two gamma-bearing strikes is it '
+    + 'netGex\'s sign, as it is when the route sent none. It is published only when netGex coverage is complete.'
+    + (f.regime === 'neutral' ? ' "neutral" is a net gamma of exactly zero at that point (or a measured zero netGex): neither dampening nor amplifying.' : '')
+    + (f.regime === null ? ' Null here: the regime is not established (netGex coverage is not complete - levelStatus.dealerRegime names its status - or there is no netGex), which is not "neutral".' : '');
+  g.magnet = 'gammaMagnet is the strike with the largest absolute net gamma in the window (ties to the lower strike).';
+  // "its inverse": an evaluation found 0.041 over 236 strikes read as evenly spread
+  g.concentration = 'gammaConcentration is the Herfindahl index of the strikes\' shares of absolute net gamma; its '
+    + 'inverse is the effective number of equally weighted strikes, so it reads about 1 over the number of strikes only '
+    + 'when gamma is spread evenly, and 1 when it all sits at one strike; null when there is no gamma.';
+  const method = cov.gammaFlipMethod;
+  // "not a coverage status": an evaluation found "mixed" read as the coverage
+  const named = (m: string) => `The flip method (coverage.gammaFlipMethod, not a coverage status) is "${m}": `;
+  const methodLine = method === 'repriced'
+    ? named(method) + 'every leg recomputed from IV across the sweep.'
+    : method === 'frozen-gamma'
+      ? named(method) + 'no leg had a usable IV, so every published gamma was held constant.'
+      : method === 'mixed'
+        ? named(method) + 'some legs were repriced from their IV and the rest held their published gamma.'
+        : method === null
+          ? 'The route reported no method (coverage.gammaFlipMethod null): whether any gamma was held is unknown.'
+          : `coverage.gammaFlipMethod "${method}" is not one this tool names.`;
+  g.flipMethod = 'The gamma flip is found by repricing the book across spot levels, and the method qualifies the level. '
+    + methodLine
+    + (method === 'frozen-gamma' || method === 'mixed' ? ' A held gamma is an approximation that can materially move the level or create one where there was none, even over complete coverage.' : '')
+    + (method !== null ? ' A usable IV is finite, above 0 and at most 5 (500%), so a broker IV of 0 or above 5 counts as absent.' : '')
+    + ' coverage.gammaFlip counts every leg that entered the sweep, repriced or held: complete means every counted leg entered it, and it can read complete under "mixed" or "frozen-gamma"; the method, not the count, says whether legs were repriced or held.';
+  if (cov.gammaFlipSearchStatus === null) {
+    g.flipSearch = 'coverage.gammaFlipSearchStatus is null: no leg entered the search (every one excluded, as when the '
+      + 'broker published no open interest) or the route reported no recognized status.';
+  }
+  if (f.rowsReturned) {
+    g.rows = 'A row\'s callGex and putGex (the sides the walls are chosen from) are published only when its gamma '
+      + 'coverage is complete or empty: coverage counts both sides together, so under partial coverage a side could be an '
+      + 'unmeasured zero and both are null while the partial net stays. callOpenInterest and putOpenInterest are contracts '
+      + 'summed over the window\'s expirations, null (not zero) when some leg at that strike has no published size. A row '
+      + 'carries its coverage counts only when one of its statuses is not complete. '
+      + (shaped.window.expirations.length === 1
+        ? 'With one expiration each row carries callDelta and putDelta, the broker\'s per-contract deltas (null when unpublished or outside 0 to 1 for a call, -1 to 0 for a put).'
+        : 'Over several expirations callDelta and putDelta are null by design (a strike has one delta per expiration): not missing data.');
+  }
+  g.spotSides = shaped.spotSides === null
+    ? 'spotSides is null: the route sent no split at spot.'
+    : 'spotSides splits the book at spot: above holds strikes strictly above spot, below strictly below, and a strike exactly '
+      + 'at spot (atSpotStrike) is in neither. Each side\'s netGex retains partial sums with its status; callGex and putGex '
+      + 'are published only under complete or empty gamma coverage. callOpenInterest and putOpenInterest have their own '
+      + 'coverage (a partial open interest is the sum of '
+      + 'the sizes published, labelled partial); callOpenInterestShareAbove is the call open interest above spot over the '
+      + 'window\'s call open interest (the at-spot strike in the whole), null unless every call leg\'s size is known.';
+  if (shaped.levels.callWall !== null || shaped.levels.putWall !== null || shaped.levels.gammaMagnet !== null) {
+    g.rowsAtLevels = 'The walls and the magnet are chosen over every strike in the window (strikes.total of them), so they '
+      + 'can sit outside the returned rows; such a level\'s own row is returned in strikes.atLevels, naming the level.';
+  }
+  if (limited) {
+    g.rowsLimited = 'Rows that would have carried the answer past its size limit were dropped farthest from spot first '
+      + '(strikes.limitedBySize).';
+  }
+  if (shaped.strikes.inWindow !== null) {
+    g.inWindow = 'strikes.inWindow counts the strikes inside the window or band, which exceeds strikes.returned when the '
+      + 'cap or the size limit cut it.';
+  }
+  if (f.requestedWindowPct !== null && shaped.spotPrice === null) {
+    g.windowPctNoSpot = 'strikeWindowPct was not applied: with no spot price there is no percent window, so the rows are '
+      + 'the first strikes in strike order up to the cap, and strikes.windowPct and strikes.inWindow are null.';
+  }
+  if (entries.length > 0) {
+    g.byExpiration = 'Each byExpiration entry is computed alone on the same rows: netGex, netDex, callGex, putGex and '
+      + 'grossGex (its strikes\' call and put gamma exposure sizes summed); daysToExpiration counts calendar days from '
+      // "(a same-day share is 0DTE concentration)" was read as same-day dominance of netCharm.
+      + 'today in New York (0 on the day); shareOfGrossGex is its share of the window\'s gross gamma (gamma only, not a '
+      + 'share of netCharm), published only when every expiration\'s gamma coverage is complete. The sides and grossGex '
+      + 'are null under partial gamma coverage; an expiration the broker answered with no options has unknown coverage '
+      + 'and null values, and then no expiration gets a share.';
+    const anyNull = entries.some((e) => e.expectedMove === null);
+    const anyMove = entries.some((e) => e.expectedMove !== null);
+    g.expectedMove = 'expectedMove is the at-the-money straddle: the call and put midpoints at the strike nearest spot that '
+      + 'lists both (ties lower), summed as straddle, with lower and upper at spot minus and plus it and pctOfSpot its '
+      + 'fraction of spot - the market\'s price for a move by that expiration, not a forecast; never from a farther '
+      + 'strike, a mark or a last trade.'
+      + (anyNull ? ' A null expectedMove carries expectedMoveUnavailable: "atm-quote-missing" (that strike lacks a two-sided quote on a leg) or "no-strike-with-both-legs"; null beside it means the reason was not reported.' : '')
+      + (anyMove ? ' atmIv is the mean of the two legs\' usable IVs, or the one usable leg\'s IV when only one has one, null only when neither has one; ivOneSigma is spot x atmIv x sqrt(years to expiry) (null with atmIv); near the money the straddle is about 0.8 of it while the market is open, but on a closed market the straddle is the broker\'s last prices while ivOneSigma uses the time left now, so the ratio drifts; outside trading hours the midpoints are the broker\'s last quotes.' : '');
+  }
+  const anyEvents = shaped.events !== null || entries.some((e) => e.events !== null);
+  const anyEventsNull = shaped.events === null || entries.some((e) => e.events === null);
+  if (anyEvents) {
+    g.events = 'events flags what falls between today (New York) and each expiration, the day included: earningsOnOrBefore '
+      + '(the first earnings date on file) and exDividendOnOrBefore (the first ex-dividend date on file, its per-share '
+      + 'amount, declared false when no declaration dated on or before today is on file); the top-level events lists the '
+      + 'dates on file from `from` through `through`. An empty list or a null date means none on file, not none scheduled: '
+      + 'earnings are on file only '
+      + 'once known and mostly for operating companies, the release time of day is not on file, and ex-dividend dates are '
+      + 'not complete ahead of time (a fund\'s often appears only on or after the day), so for a fund or ETF an empty or '
+      + 'null events answer says little.';
+  }
+  if (anyEventsNull) {
+    // "unknown, not no events" and the lookup clause: an evaluation found a separate lookup's empty
+    // answer read as none scheduled
+    g.eventsUnread = 'events null (top level or on an entry) means the calendar could not be read - unknown, not no '
+      + 'events; the exposure is unaffected (the dates feed no number), and a separate dividends or earnings lookup '
+      + 'lists only the dates on file, so finding none there does not show that none is scheduled.';
+  }
+  if (entries.some((e) => e.expectedMove === null || e.expectedMove?.root !== undefined)) {
+    g.roots = 'On a date listed under several roots (SPX and SPXW) each root\'s contracts are their own rows with their own '
+      + 'Greeks and open interest; exposures are computed per contract then summed per strike, never merged across roots '
+      + '(settlement and the last trading day differ), every row timed to the engine\'s close for that date '
+      + '(4:00 PM New York on a regular day), an AM-settled '
+      + 'series included; that date\'s expectedMove is the primary root\'s (the most open interest over the date), named in root.';
+  }
+  g.strikeCounts = 'window.strikesUsed counts the strike rows the broker returned, one per strike per expiration (per root '
+    + 'on a multi-root date); coverage.strikes counts those with at least one leg not known to have zero open interest '
+    + '(the rows in the totals); strikes.total counts the distinct strikes among them (what rows are chosen from). A null '
+    + 'count was not reported.';
+  if (shaped.window.expirationSelection !== 'requested') {
+    g.windowRoll = 'In the default window, from 4:15 PM New York on an expiration day (when no expiring series trades: some '
+      + 'ETF options, SPY\'s included, until 4:15; stock options at 4:00 in regular hours, 4:15 for a Cboe curb-session '
+      + 'class; PM-settled index options at 4:00) that day\'s expiration is left out, so after the close the window is the '
+      + 'next session\'s book; early closes are not known (it stays until 4:15), it is kept if the broker lists nothing else, '
+      + 'and naming it with expiration shows the book as it closed.';
+  }
+  g.windowMoves = 'The window moves with the broker\'s list and the clock (a listing expires, reaches 4:15 PM, or a nearer one '
+    + 'is added), so two answers across such a change cover different books; the live figure can differ in sign from the '
+    + '0-60 day figure on file (a different window on a different session).';
+  g.clock = 'Time to expiry is measured from the wall clock when the chain rows are built, moments before asOf; outside '
+    + 'trading hours the quotes are the broker\'s last, so the repriced flip and the time-sensitive totals drift a little '
+    + 'between calls with no new quotes. The broker\'s Greeks and IVs can be a snapshot older than asOf (the fetch time) '
+    + 'and nothing here dates them; a post-close refresh can move levels and totals at an unchanged spot, and the answer '
+    + 'does not say whether a change is a refresh or the market. Between refreshes only spot and the clock move the totals '
+    + '(r, q, open interest and the summed legs unchanged): per-strike gamma scales with spot squared exactly, netGex to '
+    + 'its rounding.';
+  if (provider === 'tradier' || provider === null) {
+    g.tradierGreeks = (provider === null ? 'If the broker is Tradier, it refreshes its Greeks about hourly' : 'Tradier refreshes its Greeks about hourly')
+      + '; the engine computes vanna, charm and vomma from IV and time to expiry, so those totals can change with spot '
+      + 'and the clock between refreshes.';
+  }
+  g.cache = 'The short cache is per proxy instance and per account and broker, so a quick repeat can also be computed '
+    + 'afresh (a new asOf), and another account\'s call never shares it.';
+  if (provider === 'moomoo' || provider === null) {
+    g.moomooDelay = (provider === null ? 'If the broker is moomoo: ' : '')
+      + 'moomoo serves US option quotes in real time only once the moomoo account holds assets or a US position; until then '
+      + 'they may be delayed about 15 minutes with nothing in the data saying so, so read moomoo option prices on such an '
+      + 'account as possibly delayed.';
+  }
+  // The close is named as the engine's for the date, with only the regular day's time:
+  // the proxy's early-close clock and this server deploy apart, so no line states a date rule the deployed
+  // proxy may not share.
+  const sameDay = entries.some((e) => e.daysToExpiration === 0 || e.daysToExpiration === null)
+    || (entries.length === 0 && shaped.window.expirations.length > 0);
+  if (sameDay) {
+    // An evaluation found the 4:15 window and the charm possibilities read as a same-day reading: the possibilities
+    // follow "not a reading of this answer". An evaluation found the legs' exit, leading, displacing the swing: the swing
+    // rule leads. An evaluation found the lead repeated beside "steady dealer buying into the close": the baseline had
+    // drawn its conclusion from an example no longer in the tool description, so the guide states the conclusion.
+    g.sameDay = 'On same-day legs, vanna, charm and vomma change sharply with small spot moves and time to expiry: '
+      + 'one netCharm reading is not a steady rate into the close. A same-day '
+      + 'expiration\'s legs leave vanna, charm and vomma one minute before the '
+      + 'engine\'s close for that date (4:00 PM New York on a regular day) and stay in gamma, delta and vega; the expiration '
+      + 'itself stays in the default window until 4:15 PM New York, so from then until 4:15 those three totals neither '
+      + 'include nor move with its legs. netCharm is not split by expiration; over several expirations this answer '
+      + 'does not show its same-day share; as general possibilities, not a reading of this answer: charm near the money can be the '
+      + 'largest term in the book, a same-day leg\'s vanna changes sign near its strike, and on an expiration afternoon '
+      + 'netCharm can be mostly the same-day legs and the clock. The flip sweep reprices each leg at its '
+      + 'time to expiry floored at one minute, so same-day legs\' repriced gamma narrows onto their strikes until one '
+      + 'minute before that close and holds that shape after it (4:15 PM is the default-window cutoff, not a '
+      + 'repricing boundary; named expirations and those with no later listing are kept): the flip moves with the clock.';
+  }
+  if (shaped.window.expirationSelection === 'requested' && entries.some((e) => e.daysToExpiration === 0 || e.daysToExpiration === null)) {
+    g.sameDayNamed = 'Named after the close, an expiration\'s expired legs are inside the totals and levels; window.expirations '
+      + 'beside asOf is the only sign of it.';
+  }
+  if (['gamma', 'delta', 'vega', 'vanna', 'charm', 'vomma'].some((k) => cov[k].status === 'partial' || cov[k].status === 'unmeasured')) {
+    g.legEligibility = 'A leg counts toward vanna, charm and vomma only while its broker IV is above 1% and at most 500% and '
+      + 'more than a minute remains before the engine\'s close for its expiration day (4:00 PM New York on a regular '
+      + 'day), and toward gamma, delta and vega only '
+      + 'while the broker publishes that Greek; so a partial total\'s included count moves, and two partial totals minutes '
+      + 'apart can differ by which legs were summed, which the answer does not name.';
+  }
+  const resolved = shaped.resolved !== null && typeof shaped.resolved === 'object' ? shaped.resolved : null;
+  g.inputs = resolved === null
+    ? 'The route reported no resolved inputs; r and q are never defaulted, because the flip is a repricing that depends on them.'
+    : 'r and q are resolved from real market data or supplied, never defaulted, because the flip is a repricing that depends '
+      + 'on them; resolved reports the value, source and date used.';
+  const r = resolved?.r;
+  if (r !== null && typeof r === 'object' && r.source !== 'supplied') {
+    g.rateSource = 'resolved.r is the newest stored 3-month Treasury yield (FRED), whatever its age: FRED posts a business '
+      + 'day\'s value the next business day and the platform syncs it each weekday evening, so resolved.r.asOf is usually one '
+      + 'or two sessions back; an older date can mean the sync is behind, a delayed publication or a withdrawn newer '
+      + 'observation, and the answer carries no warning either way.'
+      + (r.asOf === null ? ' Its date is unknown here (resolved.r.asOf null).' : '');
+  }
+  if (resolved?.q !== null && typeof resolved?.q === 'object' && resolved.q.source === 'profile_yield') {
+    g.profileYield = 'resolved.q.source "profile_yield": no usable trailing yield was resolved, so q is the trailing annual '
+      + 'dividend over the live spot - it moves slightly with spot between calls - and resolved.q.asOf is when that profile '
+      + 'record was last updated, not when the division was made.';
+  }
+  if (resolved?.S !== null && typeof resolved?.S === 'object') g.spotClock = spotClockGuide(provider);
+  if (f.rateLimitGiven) {
+    const budget = rateLimitGuide(f.rateLimit);
+    if (budget) {
+      g.rateLimit = budget + (provider === 'moomoo' || provider === 'tastytrade' || provider === null
+        ? ' moomoo reserves and settles to what it spent (about three fully cold calls a minute on its 30, more once its '
+          + 'contract lists are cached for the day, the settle refunding the rest); a tastytrade or moomoo chain longer than '
+          + 'its reservation reserves the rest once its count is known, before its quote batches, and is refused '
+          + 'RATE_LIMITED with the wait when the budget cannot hold them. A call bigger than the whole budget (four very '
+          + 'large tastytrade chains) runs alone on an empty window, charged in full, waiting for a reset only while '
+          + 'something else is in it.'
+        : '');
+    }
+  }
+  return g;
+}
+

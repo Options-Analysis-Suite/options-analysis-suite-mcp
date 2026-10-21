@@ -5,7 +5,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { ProxyClient } from '../../proxy/proxyClient.js';
 import { LiveApiClient, LiveApiError } from '../../proxy/liveApiClient.js';
 import { ApiError } from '../../types.js';
-import { toolHandler } from '../helpers.js';
+import { toolHandler, WIRE_CEILING_BYTES } from '../helpers.js';
 import { register } from './earnings.js';
 import { SEARCH_NOTE, SUMMARY_NOTE, WITHHELD_NOTE } from './transcriptShaping.js';
 
@@ -98,10 +98,10 @@ describe('registered get_earnings tool', () => {
     schemaVersion: 1, symbol: 'AAPL', fiscalYear: 2026, quarter: 3, callDate: '2026-07-30', generatedAt: '2026-10-10T04:23:10+00:00',
     linesWithheld: 1, quotesWithheld: 0,
     summary: {
-      preparedRemarks: [{ speaker: 'Tim Cook', role: 'CEO', summary: 'A June quarter record.', turns: [1] }],
-      qa: [{ askedBy: 'Amit Daryanani', firm: 'Evercore', question: 'Supply or FX?', answeredBy: ['Kevan Parekh'], answer: 'Both.', turns: [10, 11] }],
+      preparedRemarks: [{ speaker: 'Chief Executive', role: 'CEO', summary: 'A June quarter record.', turns: [1] }],
+      qa: [{ askedBy: 'Research Analyst', firm: 'Evercore', question: 'Supply or FX?', answeredBy: ['Finance Executive'], answer: 'Both.', turns: [10, 11] }],
       guidance: [{ text: 'September quarter revenue to grow 9%-11%.', turns: [8] }],
-      quotes: [{ speaker: 'Tim Cook', text: 'We reluctantly raised prices.', turn: 20 }],
+      quotes: [{ speaker: 'Chief Executive', text: 'We reluctantly raised prices.', turn: 20 }],
       sectionSplit: 'detected',
     },
     callsOnFile: CALLS,
@@ -119,10 +119,10 @@ describe('registered get_earnings tool', () => {
       expect(wire.transcript).toEqual({
         dataAvailable: true, kind: 'summary', symbol: 'AAPL', fiscalYear: 2026, quarter: 3, callDate: '2026-07-30',
         note: SUMMARY_NOTE, sectionSplit: 'detected',
-        preparedRemarks: [{ speaker: 'Tim Cook', role: 'CEO', summary: 'A June quarter record.' }],
-        qa: [{ askedBy: 'Amit Daryanani', firm: 'Evercore', question: 'Supply or FX?', answeredBy: ['Kevan Parekh'], answer: 'Both.' }],
+        preparedRemarks: [{ speaker: 'Chief Executive', role: 'CEO', summary: 'A June quarter record.' }],
+        qa: [{ askedBy: 'Research Analyst', firm: 'Evercore', question: 'Supply or FX?', answeredBy: ['Finance Executive'], answer: 'Both.' }],
         guidance: ['September quarter revenue to grow 9%-11%.'],
-        quotes: [{ speaker: 'Tim Cook', text: 'We reluctantly raised prices.' }],
+        quotes: [{ speaker: 'Chief Executive', text: 'We reluctantly raised prices.' }],
         withheld: { lines: 1, quotes: 0, note: WITHHELD_NOTE },
         generatedAt: '2026-10-10T04:23:10+00:00',
         callsOnFile: CALLS,
@@ -266,7 +266,7 @@ describe('registered get_earnings tool', () => {
   it('beside a history and moves that nearly fill the answer, the transcript gives way and the rest is never lost', async () => {
     const calls = Array.from({ length: 24 }, (_, i) => ({ fiscalYear: 2026 - Math.floor(i / 4), quarter: 4 - (i % 4), callDate: '2026-01-01', summary: 'available' }));
     const short = { ...SUMMARY, summary: { ...SUMMARY.summary, qa: [], guidance: [], quotes: [] }, callsOnFile: calls };
-    const oneMatch = { symbol: 'AAPL', query: 'record', terms: ['record'], callsOnFile: calls, calls: [{ fiscalYear: 2026, quarter: 3, callDate: '2026-07-30', matchCount: 1, matches: { preparedRemarks: [{ speaker: 'Tim Cook', summary: 'A June quarter record.' }], qa: [], guidance: [], quotes: [] } }] };
+    const oneMatch = { symbol: 'AAPL', query: 'record', terms: ['record'], callsOnFile: calls, calls: [{ fiscalYear: 2026, quarter: 3, callDate: '2026-07-30', matchCount: 1, matches: { preparedRemarks: [{ speaker: 'Chief Executive', summary: 'A June quarter record.' }], qa: [], guidance: [], quotes: [] } }] };
     const refusal = new LiveApiError('No summary is available for AAPL fiscal 2026 Q2', 404, 'SUMMARY_UNAVAILABLE', false, undefined, { callsOnFile: calls });
     let note = 0;
     const { client, close } = await harness(async (path) => {
@@ -284,8 +284,9 @@ describe('registered get_earnings tool', () => {
           expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(50 * 1024);
           const wire = result.structuredContent as any;
           if (wire.moves === undefined) {
-            // Past this the history and the moves alone are over the guard: nothing of ours left to give way.
-            expect(note).toBeGreaterThan(49_000);
+            // Past this the history and the moves alone are over the guard: nothing of ours left to give way (the
+            // guard's line moved from 51,200 to WIRE_CEILING_BYTES, so this point moved down by the difference).
+            expect(note).toBeGreaterThan(49_000 - (51_200 - WIRE_CEILING_BYTES));
             continue;
           }
           expect(wire.summary.latestReported.date).toBe('2026-07-30');
@@ -295,6 +296,33 @@ describe('registered get_earnings tool', () => {
         }
       }
       expect([...rungs].sort()).toEqual(['bare', 'compact', 'full', 'none', 'notice']);
+    } finally {
+      await close();
+    }
+  });
+
+  it('the transcript is fitted to the wire ceiling, so the guard never trims the answer it is part of', async () => {
+    const calls = Array.from({ length: 24 }, (_, i) => ({ fiscalYear: 2026 - Math.floor(i / 4), quarter: 4 - (i % 4), callDate: '2026-01-01', summary: 'available' }));
+    const short = { ...SUMMARY, summary: { ...SUMMARY.summary, qa: [], guidance: [], quotes: [] }, callsOnFile: calls };
+    let note = 0;
+    const { client, close } = await harness(async (path) => (path.endsWith('/moves') ? { ...MOVES, notes: { ...MOVES.notes, moves: 'm'.repeat(note) } } : short));
+    const guardMeta = (value: unknown): boolean => {
+      if (Array.isArray(value)) return value.some(guardMeta);
+      if (value === null || typeof value !== 'object') return false;
+      const o = value as Record<string, unknown>;
+      if (o.truncated === true && ('originalLength' in o || 'aggressive' in o)) return true;
+      return Object.values(o).some(guardMeta);
+    };
+    try {
+      for (note = 44_000; note <= 50_000; note += 40) {
+        const result = await client.callTool({ name: 'get_earnings', arguments: { symbol: 'AAPL', includeMoves: true, transcript: {} } });
+        const text = (result.content as { type: string; text: string }[])[0].text;
+        expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(WIRE_CEILING_BYTES);
+        const wire = result.structuredContent as any;
+        if (wire.moves === undefined) continue;             // the history and the moves alone are over the ceiling
+        expect(guardMeta(wire)).toBe(false);
+        expect(wire.moves.notes.moves).toHaveLength(note);
+      }
     } finally {
       await close();
     }

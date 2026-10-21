@@ -18,7 +18,7 @@ describe('groupInsiderTrades', () => {
   test('collapses repeated sale rows from the same filing into one event', () => {
     const grouped = groupInsiderTrades([
       {
-        reportingName: 'Wilson-Thompson Kathleen',
+        reportingName: 'Reporting Insider 1',
         filingDate: '2026-02-27',
         transactionDate: '2026-02-25',
         transactionType: 'S-Sale',
@@ -28,7 +28,7 @@ describe('groupInsiderTrades', () => {
         url: 'https://example.com/filing-1',
       },
       {
-        reportingName: 'Wilson-Thompson Kathleen',
+        reportingName: 'Reporting Insider 1',
         filingDate: '2026-02-27',
         transactionDate: '2026-02-25',
         transactionType: 'S-Sale',
@@ -44,7 +44,7 @@ describe('groupInsiderTrades', () => {
       category: 'sale',
       sharesTransacted: 4857,
       rawCount: 2,
-      reportingName: 'Wilson-Thompson Kathleen',
+      reportingName: 'Reporting Insider 1',
       securityName: 'Common Stock',
     });
     expect(grouped[0]?.totalValue).toBeCloseTo((80 * 412.46) + (4777 * 413.952), 6);
@@ -57,7 +57,7 @@ describe('shapeInsiderTradingResponse', () => {
       symbol: 'TSLA',
       insider_trades: [
         {
-          reportingName: 'Taneja Vaibhav',
+          reportingName: 'Reporting Insider 2',
           typeOfOwner: 'officer: Chief Financial Officer',
           formType: '4',
           filingDate: '2026-03-09',
@@ -69,7 +69,7 @@ describe('shapeInsiderTradingResponse', () => {
           url: 'https://example.com/filing-2',
         },
         {
-          reportingName: 'Taneja Vaibhav',
+          reportingName: 'Reporting Insider 2',
           typeOfOwner: 'officer: Chief Financial Officer',
           formType: '4',
           filingDate: '2026-03-09',
@@ -90,7 +90,7 @@ describe('shapeInsiderTradingResponse', () => {
 
     expect(response.insider_trades).toEqual([
       {
-        reportingName: 'Taneja Vaibhav',
+        reportingName: 'Reporting Insider 2',
         typeOfOwner: 'officer: Chief Financial Officer',
         categoryLabel: 'Sale',
         formType: '4',
@@ -124,7 +124,7 @@ describe('shapeInsiderTradingResponse', () => {
       symbol: 'AAPL',
       insider_trades: [
         {
-          reportingName: 'WAGNER SUSAN',
+          reportingName: 'Reporting Insider 3',
           typeOfOwner: 'director',
           formType: '4',
           filingDate: '2026-02-26',
@@ -136,7 +136,7 @@ describe('shapeInsiderTradingResponse', () => {
           url: 'https://example.com/filing-3',
         },
         {
-          reportingName: 'Newstead Jennifer',
+          reportingName: 'Reporting Insider 4',
           typeOfOwner: 'officer: SVP, GC and Secretary',
           formType: '3',
           filingDate: '2026-03-06',
@@ -170,7 +170,7 @@ describe('shapeInsiderTradingResponse', () => {
       symbol: 'META',
       insider_trades: [
         {
-          reportingName: 'Olivan Javier',
+          reportingName: 'Reporting Insider 5',
           typeOfOwner: 'officer: Chief Operating Officer',
           formType: '4',
           filingDate: '2026-03-25',
@@ -184,7 +184,7 @@ describe('shapeInsiderTradingResponse', () => {
           url: 'https://example.com/filing-5',
         },
         {
-          reportingName: 'Olivan Javier',
+          reportingName: 'Reporting Insider 5',
           typeOfOwner: 'officer: Chief Operating Officer',
           formType: '4',
           filingDate: '2026-03-25',
@@ -205,7 +205,7 @@ describe('shapeInsiderTradingResponse', () => {
 
     expect(response.insider_trades).toHaveLength(1);
     expect(response.insider_trades[0]).toMatchObject({
-      reportingName: 'Olivan Javier',
+      reportingName: 'Reporting Insider 5',
       categoryLabel: 'Sale',
       sharesTransacted: 1334,
       directOrIndirect: 'mixed',
@@ -281,10 +281,10 @@ describe('shapeInsiderTradingResponse', () => {
   test('lines filed under another CIK are left out of the list and the summary, counted and said', () => {
     // Live run 2026-10-04: BX listed Blackstone Holdings IV's purchases of another Blackstone vehicle's
     // "Common Shares of Beneficial Interest" at 26.17 (issuer CIK 2049733) as BX purchases, 48% of purchaseValue.
-    const own = { reportingName: 'Gray Jonathan', formType: '4', transactionType: 'S-Sale', filingDate: '2026-09-02', transactionDate: '2026-09-01', securitiesTransacted: 1000, price: 140, companyCik: '0001393818' };
+    const own = { reportingName: 'Reporting Insider 6', formType: '4', transactionType: 'S-Sale', filingDate: '2026-09-02', transactionDate: '2026-09-01', securitiesTransacted: 1000, price: 140, companyCik: '0001393818' };
     const other = { reportingName: 'Blackstone Holdings IV L.P.', formType: '4', transactionType: 'P-Purchase', filingDate: '2026-09-04', transactionDate: '2026-09-03', securitiesTransacted: 769892.884, price: 26.14, companyCik: '0002049733' };
     const r = shapeInsiderTradingResponse({ symbol: 'BX', insider_trades: [own, other] }, { symbol: 'BX', cik: '0001393818' }) as any;
-    expect(r.insider_trades.map((t: any) => t.reportingName)).toEqual(['Gray Jonathan']);
+    expect(r.insider_trades.map((t: any) => t.reportingName)).toEqual(['Reporting Insider 6']);
     expect(r.summary).toMatchObject({ purchases: 0, sales: 1, purchaseValue: 0, saleValue: 140000, rawRows: 2, otherIssuerLines: 1 });
     expect(r.summary.period).toEqual({ from: '2026-09-01', through: '2026-09-01' });
     // The CIK alone does not say whose the lines are (review): the note claims none of the three.
@@ -396,12 +396,12 @@ const MARKET = {
   },
   trades: [
     {
-      symbol: 'PAM', filingDate: '2026-10-02', transactionDate: '2026-09-28', insider: 'Mindlin Damian Miguel', role: 'officer: Vicepresident',
+      symbol: 'PAM', filingDate: '2026-10-02', transactionDate: '2026-09-28', insider: 'Reporting Insider 7', role: 'officer: Vicepresident',
       transactionType: 'P-Purchase', acquiredOrDisposed: 'A', directOrIndirect: 'D', shares: 15000, price: 77.628, value: 1164420.236,
       sharesOwnedAfter: 690893, security: 'American Depositary shares', formType: '4', url: 'https://www.sec.gov/a', attribution: 'issuer',
     },
     {
-      symbol: 'UUU', filingDate: '2026-10-01', transactionDate: '2026-09-30', insider: 'Doe Jane', role: 'director',
+      symbol: 'UUU', filingDate: '2026-10-01', transactionDate: '2026-09-30', insider: 'Reporting Insider 8', role: 'director',
       transactionType: 'P-Purchase', acquiredOrDisposed: 'A', directOrIndirect: 'D', shares: 18000, price: 5134, value: null,
       sharesOwnedAfter: 20000, security: 'Common Stock', formType: '4', url: 'https://www.sec.gov/b', attribution: 'issuer',
     },
@@ -437,7 +437,7 @@ describe('shapeMarketInsiderTrades', () => {
   test('each line in the per-symbol field names, labelled, with its value as the proxy decided it', () => {
     const [pam] = (shapeMarketInsiderTrades(MARKET, 'purchases') as any).trades;
     expect(pam).toEqual({
-      symbol: 'PAM', reportingName: 'Mindlin Damian Miguel', typeOfOwner: 'officer: Vicepresident', categoryLabel: 'Purchase',
+      symbol: 'PAM', reportingName: 'Reporting Insider 7', typeOfOwner: 'officer: Vicepresident', categoryLabel: 'Purchase',
       transactionType: 'P-Purchase', formType: '4', transactionDate: '2026-09-28', filingDate: '2026-10-02', securityName: 'American Depositary shares',
       sharesTransacted: 15000, price: 77.628, value: 1164420.24, directOrIndirect: 'D', acquisitionOrDisposition: 'A', sharesOwned: 690893, url: 'https://www.sec.gov/a',
     });
@@ -517,7 +517,7 @@ describe('shapeMarketInsiderTrades', () => {
   });
 });
 
-describe('quarterly statistics (phase D2)', () => {
+describe('quarterly statistics', () => {
   const side = (lines: number, value = 0, pricedLines = lines) => ({ lines, filings: lines, reporters: lines ? 1 : 0, shares: lines * 100, value, pricedLines });
   const quarter = (q: string, provisional = false) => ({
     quarter: q, from: '2026-07-01', through: '2026-09-30', provisional,
@@ -579,7 +579,7 @@ describe('quarterly statistics (phase D2)', () => {
 // counted beside it, and a sum none of whose parts is known is null.
 describe('insider sums never fold an unknown in as 0', () => {
   const line = (over: Record<string, unknown>) => ({
-    reportingName: 'Doe Jane', formType: '4', transactionType: 'P-Purchase', securityName: 'Common Stock',
+    reportingName: 'Reporting Insider 8', formType: '4', transactionType: 'P-Purchase', securityName: 'Common Stock',
     filingDate: '2026-09-02', transactionDate: '2026-09-01', url: 'https://www.sec.gov/x', securitiesTransacted: 10, price: 5, ...over,
   });
 
@@ -606,6 +606,15 @@ describe('insider sums never fold an unknown in as 0', () => {
     expect('linesWithoutShares' in r.insider_trades[0]).toBe(false);
   });
 
+  test('a line with shares and a $0 price is unpriced: left out of the value and the average price, and counted', () => {
+    const [mixed] = groupInsiderTrades([line({}), line({ securitiesTransacted: 20, price: 0 })]);
+    expect(mixed).toMatchObject({ sharesTransacted: 30, totalValue: 50, price: 5, linesWithoutShares: 0, linesWithoutPrice: 1 });
+    const [alone] = groupInsiderTrades([line({ price: 0 })]);
+    expect(alone).toMatchObject({ sharesTransacted: 10, totalValue: null, price: null, linesWithoutPrice: 1 });
+    const r = shapeInsiderTradingResponse({ symbol: 'X', insider_trades: [line({ price: 0 }), line({ transactionDate: '2026-08-31' }), line({ transactionDate: '2026-08-31', securitiesTransacted: 5, price: 0 })] }) as any;
+    expect(r.summary).toMatchObject({ purchases: 2, purchaseValue: 50, purchasesWithoutValue: 1, purchasesPartiallyValued: 1 });
+  });
+
   test('control: fully carried lines publish no counts', () => {
     const r = shapeInsiderTradingResponse({ symbol: 'X', insider_trades: [line({}), line({ securitiesTransacted: 0, price: null })] }) as any;
     expect(r.insider_trades[0]).toMatchObject({ sharesTransacted: 10, totalValue: 50 });
@@ -623,21 +632,21 @@ describe('insider sums never fold an unknown in as 0', () => {
       symbol: 'X',
       insider_trades: [
         line({}),
-        line({ reportingName: 'Roe Rick', price: null }),
-        line({ reportingName: 'Poe Pat', transactionType: 'S-Sale', price: null }),
+        line({ reportingName: 'Reporting Insider 9', price: null }),
+        line({ reportingName: 'Reporting Insider 10', transactionType: 'S-Sale', price: null }),
       ],
     }) as any;
     expect(r.summary).toMatchObject({ purchases: 2, sales: 1, purchaseValue: 50, saleValue: null, netValue: null, purchasesWithoutValue: 1, salesWithoutValue: 1 });
     const unvaluedPurchase = shapeInsiderTradingResponse({
       symbol: 'X',
-      insider_trades: [line({ price: null }), line({ reportingName: 'Poe Pat', transactionType: 'S-Sale', price: 7 })],
+      insider_trades: [line({ price: null }), line({ reportingName: 'Reporting Insider 10', transactionType: 'S-Sale', price: 7 })],
     }) as any;
     expect(unvaluedPurchase.summary).toMatchObject({ purchases: 1, sales: 1, purchaseValue: null, saleValue: 70, netValue: null, purchasesWithoutValue: 1 });
   });
 
   test('another CIK\'s purchases and sales: the same rule', () => {
     const other = (over: Record<string, unknown>) => line({ companyCik: '0000000100', ...over });
-    const r = shapeInsiderTradingResponse({ symbol: 'X', insider_trades: [line({ companyCik: '200' }), other({ price: null }), other({ reportingName: 'Roe Rick', transactionType: 'S-Sale', price: 7 })] }, { cik: '200' }) as any;
+    const r = shapeInsiderTradingResponse({ symbol: 'X', insider_trades: [line({ companyCik: '200' }), other({ price: null }), other({ reportingName: 'Reporting Insider 9', transactionType: 'S-Sale', price: 7 })] }, { cik: '200' }) as any;
     expect(r.otherIssuers[0]).toMatchObject({ companyCik: '100', purchases: 1, sales: 1, purchaseValue: null, saleValue: 70, purchasesWithoutValue: 1 });
     expect('salesWithoutValue' in r.otherIssuers[0]).toBe(false);
   });
@@ -663,10 +672,10 @@ describe('insider sums never fold an unknown in as 0', () => {
       insider_trades: [
         line({}),
         line({ securitiesTransacted: null }),
-        line({ reportingName: 'Roe Rick' }),
-        line({ reportingName: 'Roe Rick', price: null }),
-        line({ reportingName: 'Poe Pat', transactionType: 'S-Sale', price: 7 }),
-        line({ reportingName: 'Poe Pat', transactionType: 'S-Sale', price: null }),
+        line({ reportingName: 'Reporting Insider 9' }),
+        line({ reportingName: 'Reporting Insider 9', price: null }),
+        line({ reportingName: 'Reporting Insider 10', transactionType: 'S-Sale', price: 7 }),
+        line({ reportingName: 'Reporting Insider 10', transactionType: 'S-Sale', price: null }),
       ],
     }) as any;
     expect(r.summary).toMatchObject({ purchases: 2, sales: 1, purchaseValue: 100, saleValue: 70, netValue: 30, purchasesPartiallyValued: 2, salesPartiallyValued: 1 });
@@ -687,8 +696,8 @@ describe('insider sums never fold an unknown in as 0', () => {
       insider_trades: [
         other({}),
         other({ securitiesTransacted: 1000, price: null }),
-        other({ reportingName: 'Poe Pat', transactionType: 'S-Sale', price: 7 }),
-        other({ reportingName: 'Poe Pat', transactionType: 'S-Sale', securitiesTransacted: null }),
+        other({ reportingName: 'Reporting Insider 10', transactionType: 'S-Sale', price: 7 }),
+        other({ reportingName: 'Reporting Insider 10', transactionType: 'S-Sale', securitiesTransacted: null }),
       ],
     }, { cik: '200' })) as any;
     expect(r.otherIssuers).toEqual([{

@@ -7,12 +7,14 @@ RUN bun install
 COPY src/ src/
 COPY build.ts ./
 COPY mcp-icon.png ./
+COPY logo.webp ./
 RUN bun run build:remote
 
 FROM oven/bun:1.4.2-slim
 WORKDIR /app
 COPY --chown=1001:1001 --from=builder /app/dist-remote/remote.js ./remote.js
 COPY --chown=1001:1001 --from=builder /app/dist-remote/mcp-icon.png ./mcp-icon.png
+COPY --chown=1001:1001 --from=builder /app/dist-remote/logo.webp ./logo.webp
 USER 1001:1001
 EXPOSE 8080
 ENV PORT=8080

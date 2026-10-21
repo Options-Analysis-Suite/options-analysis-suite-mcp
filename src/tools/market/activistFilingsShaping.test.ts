@@ -20,7 +20,7 @@ describe('shapeActivistFilingsResponse', () => {
         },
         {
           formType: '13G/A',
-          filerName: 'Elon R. Musk',
+          filerName: 'Reporting Holder',
           filingDate: '2025-11-10',
           sharesOwned: 717323438,
           percentOwnership: 20.3,
@@ -58,7 +58,7 @@ describe('shapeActivistFilingsResponse', () => {
       recentBelowThresholdFilings: 1,
     });
     expect(shaped.currentHolderSnapshot).toHaveLength(2);
-    expect(shaped.currentHolderSnapshot[0].filerName).toBe('Elon R. Musk');
+    expect(shaped.currentHolderSnapshot[0].filerName).toBe('Reporting Holder');
     expect(shaped.currentHolderSnapshot[1].filerName).toBe('BlackRock, Inc.');
     expect(shaped.recentBelowThreshold).toHaveLength(1);
     expect(shaped.recentBelowThreshold[0].filerName).toBe('The Vanguard Group');

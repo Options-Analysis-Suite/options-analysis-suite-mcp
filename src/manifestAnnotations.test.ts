@@ -22,6 +22,14 @@ function registeredAnnotations(): Map<string, Record<string, unknown>> {
   return out;
 }
 
+describe('MCP package manifest tool summaries', () => {
+  test('name no Pro tier: every MCP session is Pro or above', () => {
+    const manifest = JSON.parse(readFileSync(resolve(__dirname, '../manifest.json'), 'utf8')) as { tools?: Array<{ name?: string; description?: string }> };
+    expect(manifest.tools?.length).toBe(46);
+    for (const tool of manifest.tools ?? []) expect(String(tool.description ?? ''), tool.name).not.toMatch(/\bPro\b/);
+  });
+});
+
 describe('MCP package manifest tool annotations', () => {
   test('keeps Anthropic MCPB manifest packable while submission JSON carries behavior hints', () => {
     const registered = registeredAnnotations();
@@ -86,7 +94,7 @@ describe('tool display names', () => {
     // The behavior hints are untouched beside it.
     const live = tools.find((tool) => tool.name === 'get_live_dealer_positioning')!;
     expect(live.annotations).toEqual({
-      title: 'Live Dealer Positioning / GEX (Pro)', readOnlyHint: true, destructiveHint: false, openWorldHint: true,
+      title: 'Live Dealer Positioning / GEX', readOnlyHint: true, destructiveHint: false, openWorldHint: true,
     });
     await client.close();
     await server.close();

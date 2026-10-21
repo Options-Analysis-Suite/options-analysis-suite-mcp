@@ -1,5 +1,7 @@
 import { describe, test, expect } from 'bun:test';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { ProxyClient } from '../../proxy/proxyClient.js';
 import { register } from './regime.js';
 
@@ -29,6 +31,56 @@ function createHarness(stubResponse: any = {}) {
   if (!captured.handler) throw new Error('Tool handler not captured');
   return { calls, handler: captured.handler };
 }
+
+function intradayBoundaryScans(count: number) {
+  return Array.from({ length: count }, (_, i) => {
+    const date = new Date(Date.UTC(2026, 9, 16 - Math.floor(i / 5))).toISOString().slice(0, 10);
+    return {
+      date, scan_time: `${date}T${['13:45', '15:00', '17:00', '18:30', '19:45'][i % 5]}:00.000Z`,
+      interval: ['open', 'morning', 'midday', 'afternoon', 'pre-close'][i % 5], scope: 'bellwether',
+      label: 'ELEVATED', stress_score: 0.4229, confidence: 0.9414,
+      drivers: ['skew_pressure', 'tail_dominance', 'vol_level'].map((feature, j) => ({ feature, z: 1.234 + j, contribution: 0.1234 + j / 10 })),
+      vector: { _meta: {
+        prevLabel: 'ELEVATED', prevLabelSource: i % 5 ? 'earlier-scan' : 'daily', calibration: { models_succeeded: 8, models_attempted: 8 },
+        gex: { spotPrice: 765.14, netGamma: 123456789.1, netDelta: 23456789.1, netVega: 3456789.1,
+          netVanna: 456789.1, netCharm: 56789.1, netVomma: 6789.1, callWall: 770, putWall: 760,
+          gammaFlip: 764.97, absGamma: 765, regime: 'positive',
+          topStrikes: Array.from({ length: 5 }, (_, j) => ({ strike: 765 + j, netGamma: 123456.123456 + j })),
+        },
+      } },
+    };
+  });
+}
+
+test('a 90-day intraday request retains all 49 scans that fitted before the prior reminder', async () => {
+  const scans = intradayBoundaryScans(49);
+  const result = await createHarness({ symbol: 'SPY', count: scans.length, scans }).handler({ scope: 'intraday', symbol: 'SPY', days: 90 });
+  const wire = JSON.parse(result.content[0].text);
+  expect(wire.scans).toHaveLength(49);
+  expect(wire.scansMeta.order).toContain('newest date first');
+  expect(wire.scansMeta.scanTime).toContain("run's start");
+  expect(Buffer.byteLength(result.content[0].text)).toBeLessThanOrEqual(49_920);
+});
+
+test.each([49, 450])('intraday precision boundary retains the existing view for %i input scans', async (count) => {
+  const scans = intradayBoundaryScans(count);
+  for (const scan of scans) {
+    const gex = scan.vector._meta.gex;
+    for (const key of ['netGamma', 'netDelta', 'netVega', 'netVanna', 'netCharm', 'netVomma'] as const) {
+      if (count === 450) gex[key] = Math.round(gex[key] / 10);
+    }
+  }
+  for (let i = 0; i < (count === 49 ? 92 : 35); i++) {
+    const gex = scans[i % Math.min(count, 50)].vector._meta.gex;
+    const key = i < Math.min(count, 50) ? 'netGamma' : 'netDelta';
+    gex[key] += count === 49 ? 0.03 : 0.3;
+  }
+  const wire = await callRegimeClient({ symbol: 'SPY', count, scans }, { scope: 'intraday', symbol: 'SPY', days: 90 });
+  expect(wire.scans).toHaveLength(Math.min(count, 50));
+  expect(wire.scans[0].exposures.netGamma).toBe(scans[0].vector._meta.gex.netGamma);
+  expect(wire.stressScoreNote).toContain('The next daily label applies this rule against the latest earlier daily, not this scan.');
+  expect(Buffer.byteLength(JSON.stringify(wire))).toBeLessThanOrEqual(49_920);
+});
 
 describe('get_regime — scope routing', () => {
   test('scope=market → /regime/current', async () => {
@@ -399,36 +451,7 @@ describe('get_regime - the tier is published as symbolTier (avoid input/output `
 });
 
 describe('get_regime - the label is a state with hysteresis, on every scope', () => {
-  // Ninth run: SPY's 2026-09-18 midday scan read stress_score 0.4229 with
-  // label ELEVATED, inside the "NORMAL -0.5 to 0.5" band the description
-  // gave under scope=market. The producer's classifyWithHysteresis
-  // (proxy/scripts/regime-worker/regime-scorer.ts) enters a state at its
-  // entry level and keeps it until the score falls below its exit level
-  // (ELEVATED: enter 0.5, exit 0.0), against the previous scan's label, and
-  // every scope uses it: daily symbol (regime-scorer.ts:404), intraday
-  // (intraday-processor.ts:461), market (run-regime-daily.ts:681). The
-  // note that said "Typical bands" rode only the market shape; the intraday
-  // and symbol payloads carried no band statement at all.
-  // review: every prior lookup filters model_version too, so a
-  // label stored under an older version is no prior, and a score of 0
-  // after yesterday's ELEVATED under the old version reads NORMAL by the
-  // no-prior rule (entry levels only); the clause says both.
-  // review: the no-prior rule is not only first scans. A
-  // prior fetch that throws is classified without hysteresis (run-regime-
-  // daily.ts:678, intraday-processor.ts:456), and a stored label outside
-  // STATE_THRESHOLDS falls through prevIdx < 0 to the same loop; score 0
-  // after an unreadable ELEVATED prior reads NORMAL. And "scope" there
-  // is the classification tier this tool publishes as `symbolTier`,
-  // not its own scope selector, so the clause uses the published name.
-  // Tenth run: the note ran to 1,100 characters on every response and
-  // carried a SPY example on every symbol and on the market composite, and
-  // that example chained 09-18's label through 09-17's intraday scans when
-  // the rule it sits under says a day's open takes the previous DAILY label
-  // (09-17 daily: ELEVATED at 0.506). The payload now carries the rule in
-  // short and points at the description, which keeps the full rule and a
-  // corrected example; and the market scope's note sits beside `market`
-  // like every other scope's, not inside it.
-  const hysteresis = /^stressScore is a raw composite regime score, not a 0-100 index\. `label` is a state with hysteresis against the prior label, not a band read off the score \(entry Normal -0\.5, Elevated 0\.5, Stress 1\.5, Crisis 2\.5; exit -1\.0, 0\.0, 1\.0, 2\.0\), so a score inside one band can carry the label above it; `label` is the display word and `labelKey` the stored key; the tool description has the full rule\.$/;
+  const hysteresis = /^stressScore is a raw composite regime score, not a 0-100 index\. `label` is a state with hysteresis, not a band read off the score[^]*Entry levels: Normal -0\.5, Elevated 0\.5, Stress 1\.5, Crisis 2\.5, and Calm below -0\.5 with no prior; exit levels: Normal -1\.0, Elevated 0\.0, Stress 1\.0, Crisis 2\.0\.[^]*So a score inside one band can carry the label above it\.$/;
 
   test('the intraday shape carries the note and says its scan order', async () => {
     const stub = {
@@ -441,16 +464,22 @@ describe('get_regime - the label is a state with hysteresis, on every scope', ()
     };
     const { handler } = createHarness(stub);
     const parsed = JSON.parse((await handler({ scope: 'intraday', symbol: 'SPY' })).content[0].text);
-    expect(parsed.stressScoreNote).toMatch(hysteresis);
+    expect(parsed.stressScoreNote).toContain('Labels use hysteresis, not fixed score bands.');
+    expect(parsed.stressScoreNote).toContain('Entry: Normal -0.5, Elevated 0.5, Stress 1.5, Crisis 2.5; Calm below -0.5 without a prior.');
+    expect(parsed.stressScoreNote).toContain('Exit: Normal -1.0, Elevated 0.0, Stress 1.0, Crisis 2.0.');
+    expect(parsed.stressScoreNote).toContain("If the score meets a higher state's entry, move to the highest such state; else keep the prior until below its exit, then take the highest lower state whose entry is met.");
+    expect(parsed.stressScoreNote).toMatch(/So a score inside one band can carry the label above it\.$/);
     expect(parsed.stressScoreNote).not.toMatch(/Typical bands|2026-09-18/);
-    expect(parsed.stressScoreNote.length).toBeLessThan(400);
+    expect(parsed.stressScoreNote).not.toMatch(/tool description has the full rule/);
+    expect(parsed.stressScoreNote).toContain("The exit level protects only the prior actually used: a later scan judged against the daily prior can get a lower label than a previous scan while its score is still above that previous label's exit. The next daily label applies this rule against the latest earlier daily, not this scan.");
+    expect(parsed.stressScoreNote).toContain('Without a usable prior, including a failed read, take the highest state whose entry is met.');
     // The proxy orders market_date DESC then scan_time ASC (regime.ts
     // /regime/intraday, on the days, date and interval branches alike):
     // the newest scan is the LAST entry of the FIRST date, which the run
     // read as "neither newest-first nor oldest-first".
     // review: scan_time ASC is not interval order; a rerun
     // interval stores a later scan_time and sits after pre-close.
-    expect(parsed.scansMeta).toEqual({ order: 'newest date first; within a date, by scan time ascending (a rerun scan sits after the ones before it, whatever its interval), so the newest scan is the last entry of the first date' });
+    expect(parsed.scansMeta.order).toBe('newest date first; within a date, by scan time ascending (a rerun scan sits after the ones before it, whatever its interval), so the newest scan is the last entry of the first date');
     expect(parsed.scans).toHaveLength(2);
     expect(parsed._scans_meta).toBeUndefined();
     expect(parsed._stress_score_note).toBeUndefined();
@@ -467,6 +496,7 @@ describe('get_regime - the label is a state with hysteresis, on every scope', ()
     });
     const one = JSON.parse((await createHarness(stub()).handler({ scope: 'symbol', symbol: 'SPY', days: 1 })).content[0].text);
     expect(one.stressScoreNote).toMatch(hysteresis);
+    expect(one.stressScoreNote).not.toMatch(/protects only the prior actually used/);   // Intraday only
     expect(one.date).toBe('2026-09-17');
     const many = JSON.parse((await createHarness(stub()).handler({ scope: 'symbol', symbol: 'SPY', days: 5 })).content[0].text);
     expect(many.stressScoreNote).toMatch(hysteresis);
@@ -568,15 +598,15 @@ describe('get_regime - model coverage and the exposures note ride the entries', 
     const stub = () => ({ symbol: 'KBE', scope: 'industry', history: [daily({ date: '2026-09-16' }), daily()] });
     const one = JSON.parse((await createHarness(stub()).handler({ scope: 'symbol', symbol: 'KBE', days: 1 })).content[0].text);
     expect(one.modelCoverage).toEqual({ succeeded: 2, attempted: 8 });
-    expect(one.exposuresNote).toBe(NOTE);
+    expect(one.exposuresNote.startsWith(NOTE + '. ')).toBe(true);
     expect(one.vector).toBeUndefined();
     const many = JSON.parse((await createHarness(stub()).handler({ scope: 'symbol', symbol: 'KBE', days: 5 })).content[0].text);
     expect(many.history.map((h: any) => h.modelCoverage)).toEqual([{ succeeded: 2, attempted: 8 }, { succeeded: 2, attempted: 8 }]);
-    expect(many.exposuresNote).toBe(NOTE);
+    expect(many.exposuresNote.startsWith(NOTE + '. ')).toBe(true);
     const full = JSON.parse((await createHarness(stub()).handler({ scope: 'symbol', symbol: 'KBE', days: 5, full: true })).content[0].text);
     expect(full.history[1].modelCoverage).toEqual({ succeeded: 2, attempted: 8 });
     expect(full.history[1].vector).toBeUndefined();
-    expect(full.exposuresNote).toBe(NOTE);
+    expect(full.exposuresNote.startsWith(NOTE + '. ')).toBe(true);
     // A row without both counts carries no coverage, never a fabricated
     // or half-filled one.
     for (const meta of [undefined, {}, { models_succeeded: 2 }, { models_attempted: 8 }, { calibration: { succeeded: 8 } }]) {
@@ -590,7 +620,7 @@ describe('get_regime - model coverage and the exposures note ride the entries', 
     const parsed = JSON.parse((await createHarness(stub).handler({ scope: 'intraday', symbol: 'SPY' })).content[0].text);
     expect(parsed.scans[0].modelCoverage).toEqual({ succeeded: 8, attempted: 8 });
     expect(parsed.scans[0].vector).toBeUndefined();
-    expect(parsed.exposuresNote).toBe(NOTE);
+    expect(parsed.exposuresNote.startsWith(NOTE + '. ')).toBe(true);
   });
 
   test('the include_symbols rows carry modelCoverage and the shape carries the note once, naming no topStrikes', async () => {
@@ -601,8 +631,8 @@ describe('get_regime - model coverage and the exposures note ride the entries', 
     // exposures are the totals and the levels only), and the note named
     // the field anyway. The breakdown's note names what its rows carry.
     expect(parsed.symbols.industry[0].exposures.topStrikes).toBeUndefined();
-    expect(parsed.exposuresNote).toBe('callWall, putWall, gammaFlip and gammaMagnet are over the 0-60 day window, and so is regime except with fewer than two gamma-bearing strikes there, when it is the sign of netGamma; netGamma and the other net totals are over the whole exposure input');
-    expect(parsed.exposuresNote).not.toMatch(/topStrikes/);
+    expect(parsed.exposuresNote.startsWith('callWall, putWall, gammaFlip and gammaMagnet are over the 0-60 day window, and so is regime except with fewer than two gamma-bearing strikes there, when it is the sign of netGamma; netGamma and the other net totals are over the whole exposure input. ')).toBe(true);
+    expect(parsed.exposuresNote).toMatch(/carry no topStrikes/);
     // The composite stores no model counts and gets no coverage field.
     expect(parsed.market.modelCoverage).toBeUndefined();
     const alone = JSON.parse((await createHarness({ market: { stress_score: 0.39, label: 'ELEVATED', vector: { z: {} } } }).handler({ scope: 'market' })).content[0].text);
@@ -722,5 +752,182 @@ describe('a partial regime answer', () => {
     const { handler } = createHarness({ market });
     const parsed = JSON.parse((await handler({ scope: 'market' }) as any).content[0].text);
     expect('partial' in parsed).toBe(false);
+  });
+});
+
+describe('get_regime rules in the answer', () => {
+  const run = async (stub: unknown, args: Record<string, unknown>) => JSON.parse((await createHarness(stub).handler(args)).content[0].text);
+  const gex = { spotPrice: 66.77, netGamma: -6224697, callWall: 66, putWall: 68, gammaFlip: null, absGamma: 70, regime: 'negative', topStrikes: [{ strike: 59, netGamma: -3204603 }] };
+  const dailyRow = { date: '2026-09-17', label: 'ELEVATED', stress_score: 0.8906, confidence: 0.1183, vector: { z: {}, _meta: { models_succeeded: 2, models_attempted: 8, gex } } };
+  const symbolStub = () => ({ symbol: 'KBE', scope: 'industry', history: [dailyRow] });
+  const intradayStub = (scans: unknown[] = [{ date: '2026-09-18', scan_time: '17:00', interval: 'midday', label: 'ELEVATED', stress_score: 0.4229, vector: { z: {}, _meta: { gex } } }]) => ({ symbol: 'SPY', count: scans.length, scans });
+  const marketStub = (over: Record<string, unknown> = {}) => ({ market: { stress_score: 0.39, label: 'ELEVATED', vector: { z: {}, _meta: { gex } } }, ...over });
+
+  test('the full hysteresis rule in stressScoreNote, the daily prior clause on market and symbol, both on intraday', async () => {
+    const symbol = (await run(symbolStub(), { scope: 'symbol', symbol: 'KBE' })).stressScoreNote;
+    const intraday = (await run(intradayStub(), { scope: 'intraday', symbol: 'SPY' })).stressScoreNote;
+    const market = (await run(marketStub(), { scope: 'market' })).stressScoreNote;
+    for (const note of [symbol, intraday, market]) {
+      expect(note).toMatch(/not a 0-100 index/);
+      expect(note).toMatch(/Calm below -0\.5 (with no|without a) prior/);
+      expect(note).toMatch(/highest lower state whose entry (level it still meets|is met)/);
+      expect(note).toMatch(/including (when the prior could not be read|a failed read)/);
+      expect(note).toMatch(/Calm, Normal, Elevated, Stress/);
+      expect(note).toMatch(/labelKey/);
+      expect(note).toMatch(/priorLabelKey/);
+      expect(note).toMatch(/compar(e|ison).*filter/);
+      expect(note).toContain('the latest earlier daily label stored for the same symbol, symbolTier and model version');
+      expect(note).not.toMatch(/tool description has the full rule/);
+      expect(note).not.toMatch(/2026-09/);
+    }
+    for (const note of [symbol, market]) {
+      expect(note).toContain("a score reaching a higher state's entry level moves the label to the highest state whose entry level it meets;");
+      expect(note).not.toMatch(/moves the label up/);
+    }
+    expect(intraday).toContain("The intraday prior is the day's last scan still in the worker's store; else the latest earlier daily label stored for the same symbol, symbolTier and model version");
+    expect(intraday).toMatch(/redeploy/);
+    expect(symbol).not.toMatch(/scan worker/);
+    expect(market).not.toMatch(/scan worker/);
+  });
+
+  test('the prior-label provenance, the z clip, the driver contribution and confidence, in the guide', async () => {
+    const symbol = (await run(symbolStub(), { scope: 'symbol', symbol: 'KBE' })).guide;
+    expect(symbol.priorLabel).toMatch(/store no prior label/);
+    expect(symbol.zScores).toMatch(/winsorized to -5\.\.5/);
+    expect(symbol.driverContribution).toMatch(/weight times z, signed/);
+    expect(symbol.driverContribution).not.toMatch(/unsigned/);
+    expect(symbol.confidence).toMatch(/how secure the label is, not how severe/);
+    expect(symbol.confidence).toMatch(/modelCoverage/);
+    expect(symbol.confidence).toMatch(/unrounded score/);
+    const intraday = (await run(intradayStub(), { scope: 'intraday', symbol: 'SPY' })).guide;
+    expect(intraday.priorLabel).toMatch(/not recorded, not "no prior"/);
+    const market = (await run(marketStub(), { scope: 'market' })).guide;
+    expect(market.driverContribution).toMatch(/unsigned and sorted by size/);
+    expect(market.driverContribution).not.toMatch(/breakdown/);
+    expect(market.confidence).toMatch(/symbols scored over symbols in the composite/);
+    const withSymbols = (await run(marketStub({ symbols: { industry: [{ symbol: 'KBE', scope: 'industry', ...dailyRow }] } }), { scope: 'market', include_symbols: true })).guide;
+    expect(withSymbols.driverContribution).toMatch(/breakdown/);
+    for (const confidence of [symbol.confidence, intraday.confidence, market.confidence, withSymbols.confidence]) {
+      expect(confidence).toContain("the lower edge the label's exit level when it was kept, else its entry level");
+      expect(confidence).toContain("the upper edge the next state's entry level, or the previous label's exit level when just entered from above");
+      expect(confidence).toContain('Calm and Crisis measure from their one edge over 1.5');
+      expect(confidence).toContain('as d, the distance to the nearer edge over half the band, through (1 - e^(-2.5 d)) / (1 - e^(-2.5))');
+      expect(confidence).toContain('times the share of calibration models that succeeded, raised to the power 1.5');
+      expect(confidence).toContain('times 0.85 when the label differs from its prior or had none');
+    }
+  });
+
+  test('exposuresNote extended on every shape with exposures - its old clauses kept first', async () => {
+    const symbol = (await run(symbolStub(), { scope: 'symbol', symbol: 'KBE' })).exposuresNote;
+    expect(symbol.startsWith('callWall, putWall, gammaFlip and gammaMagnet are over the 0-60 day window')).toBe(true);
+    expect(symbol).toMatch(/largest absolute net gamma/);
+    expect(symbol).toMatch(/the first 10/);
+    expect(symbol).toMatch(/putWall can sit above callWall/);
+    expect(symbol).toMatch(/not a level of zero/);
+    expect(symbol).toMatch(/not the sign of netGamma/);
+    expect(symbol).toMatch(/every stored row for the daily scan/);
+    expect(symbol).toMatch(/own rate and dividend inputs/);
+    const intraday = (await run(intradayStub(), { scope: 'intraday', symbol: 'SPY' })).exposuresNote;
+    expect(intraday).toMatch(/the first 5/);
+    expect(intraday).toMatch(/normalizer/);
+    expect(intraday).toMatch(/chain fetch failed is absent/);
+    const breakdown = (await run(marketStub({ symbols: { industry: [{ symbol: 'KBE', scope: 'industry', ...dailyRow }] } }), { scope: 'market', include_symbols: true })).exposuresNote;
+    expect(breakdown).toMatch(/carry no topStrikes/);
+    const composite = (await run(marketStub(), { scope: 'market' })).exposuresNote;
+    expect(composite).toMatch(/carry no topStrikes/);
+    expect(composite).toMatch(/every stored row for the daily scan/);
+    for (const note of [symbol, intraday, breakdown, composite]) {
+      expect(note).toContain('callWall is the strike with the largest positive call gamma');
+      expect(note).toContain('putWall the strike with the most negative put gamma');
+      expect(note).toContain('ties go to the lower strike');
+      expect(note).toContain('a side with no such strike leaves that one null');
+      expect(note).toContain('nothing orders them, so putWall can sit above callWall');
+    }
+  });
+
+  test('scansMeta says what scanTime is on every intraday answer, and why a window can be empty', async () => {
+    const one = await run(intradayStub(), { scope: 'intraday', symbol: 'SPY' });
+    expect(one.scansMeta.scanTime).toMatch(/run's start/);
+    expect(one.scansMeta.emptyWindow).toBeUndefined();
+    const empty = await run(intradayStub([]), { scope: 'intraday', symbol: 'SPY', days: 2 });
+    expect(empty.scansMeta.scanTime).toMatch(/run's start/);
+    expect(empty.scansMeta.emptyWindow).toMatch(/weekends and holidays not skipped/);
+    expect(empty.scansMeta.emptyWindow).toMatch(/days 2/);
+  });
+
+  test('the breakdown\'s selection when include_symbols brought symbols; that none came when it did not', async () => {
+    expect((await run(marketStub(), { scope: 'market' })).guide.symbolSelection).toBeUndefined();
+    const withSymbols = (await run(marketStub({ symbols: { industry: [{ symbol: 'KBE', scope: 'industry', ...dailyRow }] } }), { scope: 'market', include_symbols: true })).guide;
+    expect(withSymbols.symbolSelection).toMatch(/capped at 8/);
+    expect(withSymbols.symbolSelection).toMatch(/symbolCoverage/);
+    const none = (await run(marketStub(), { scope: 'market', include_symbols: true })).guide;
+    expect(none.symbolSelection).toMatch(/Pro and above/);
+  });
+});
+
+describe('regime', () => {
+  const run = async (stub: unknown, args: Record<string, unknown>) => JSON.parse((await createHarness(stub).handler(args)).content[0].text);
+  test('a breakdown whose read FAILED is not called a Pro feature', async () => {
+    const failed = await run({ market: { stress_score: 0.4, label: 'ELEVATED' }, partial: true, unavailable: ['symbols'] }, { scope: 'market', include_symbols: true });
+    expect(failed.guide.symbolSelection).toMatch(/could not be read/);
+    expect(failed.guide.symbolSelection).not.toMatch(/Pro and above/);
+  });
+  test('an empty window asked by date says the date overrides days, not a count back', async () => {
+    const empty = await run({ symbol: 'SPY', count: 0, scans: [] }, { scope: 'intraday', symbol: 'SPY', date: '2026-09-20' });
+    expect(empty.scansMeta.emptyWindow).toMatch(/2026-09-20/);
+    expect(empty.scansMeta.emptyWindow).toMatch(/overrides days/);
+    expect(empty.scansMeta.emptyWindow).not.toMatch(/counts calendar dates back/);
+  });
+});
+
+async function callRegimeClient(stub: unknown, args: Record<string, unknown>) {
+  const server = new McpServer({ name: 'regime-guidance-test', version: '1' });
+  register(server, { get: async () => structuredClone(stub) } as unknown as ProxyClient);
+  const client = new Client({ name: 'regime-guidance-reader', version: '1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const result = await client.callTool({ name: 'get_regime', arguments: args });
+    expect(result.isError).not.toBe(true);
+    const text = (result.content as Array<{ type: string; text: string }>)[0].text;
+    expect(JSON.parse(text)).toEqual(result.structuredContent);
+    return result.structuredContent as Record<string, any>;
+  } finally {
+    await client.close();
+    await server.close();
+  }
+}
+
+describe('confidence and empty-window guidance matches the returned rows', () => {
+  test('market breakdown confidence explains counts and unrounded scores even when counts were not stored', async () => {
+    for (const counts of [
+      { models_succeeded: 2, models_attempted: 8 },
+      { models_succeeded: 2 },
+      { models_attempted: 8 },
+      {},
+    ]) {
+      const stub = {
+        market: { date: '2026-10-15', label: 'NORMAL', stress_score: 0.2, confidence: 0.8 },
+        symbols: { industry: [{ symbol: 'KBE', scope: 'industry', label: 'ELEVATED', stress_score: 0.8906, confidence: 0.1183, vector: { _meta: counts } }] },
+      };
+      const out = await callRegimeClient(stub, { scope: 'market', include_symbols: true });
+      expect(out.symbols.industry[0].modelCoverage).toEqual('models_succeeded' in counts && 'models_attempted' in counts ? { succeeded: 2, attempted: 8 } : undefined);
+      const note = out.guide.confidence;
+      expect(note).toMatch(/composite.*symbols scored over symbols in the composite/);
+      expect(note).toMatch(/composite rounds its score/);
+      expect(note).toMatch(/breakdown.*modelCoverage \{succeeded, attempted\}.*numerator and denominator/);
+      expect(note).toMatch(/absent when.*count is missing.*not stored, never full coverage/);
+      expect(note).toMatch(/rows.*unrounded score.*four-decimal stressScore can differ in the last digit/);
+    }
+    const summary = await callRegimeClient({ market: { label: 'NORMAL', stress_score: 0.2 } }, { scope: 'market' });
+    expect(summary.guide.confidence).not.toMatch(/breakdown|modelCoverage/);
+  });
+
+  test('an empty interval filter does not assert that the whole date has no scans', async () => {
+    const out = await callRegimeClient({ symbol: 'SPY', count: 0, scans: [] }, { scope: 'intraday', symbol: 'SPY', date: '2026-10-16', interval: 'morning' });
+    expect(out.scansMeta.emptyWindow).toMatch(/matching this request.*2026-10-16/);
+    expect(out.scansMeta.emptyWindow).toMatch(/interval morning/);
+    expect(out.scansMeta.emptyWindow).not.toMatch(/No scan is stored for date/);
+    expect(out.scansMeta.emptyWindow).toMatch(/date overrides days/);
   });
 });

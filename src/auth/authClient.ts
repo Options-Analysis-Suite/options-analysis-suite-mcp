@@ -60,7 +60,7 @@ function extractCookieValue(headers: Headers, name: string): string | null {
 }
 
 /**
- * SECURITY NOTE - this is an INTENTIONAL, reviewed design (internal decision #69), NOT a
+ * SECURITY NOTE - the trusted-proxy header does not create a
  * credential-login brute-force bypass. Automated security scanners tend to flag "a header
  * that exempts logins from a rate-limit / brute-force check" as a vulnerability; that
  * pattern-match does not hold here, for three independent reasons:
@@ -83,9 +83,8 @@ function extractCookieValue(headers: Headers, name: string): string | null {
  * IP-aggregation false positive - removing noisy "suspicious activity" logs and a needless
  * latency penalty on every legitimate login, with zero loss of account protection.
  *
- * History: a 2026-06-20 automated-scanner PR proposed deleting this helper as a "fix"; it
- * was reviewed and closed after confirming all three points above. Do not remove without
- * re-checking the backend rate-limiter behavior it relies on.
+ * Preserve these protections when changing the helper, and re-check the backend
+ * rate-limiter behavior it relies on.
  */
 function mcpProxyHeaders(): Record<string, string> {
   const secret = process.env.MCP_PROXY_SECRET;
@@ -133,7 +132,7 @@ async function loginRaw(
     throw new AuthError('Login succeeded but no token returned. Please contact support.');
   }
 
-  // S2.4: the GoTrue session's refresh token arrives as the HttpOnly gotrueRefreshToken cookie
+  // The GoTrue session's refresh token arrives as the HttpOnly gotrueRefreshToken cookie
   // (not in the JSON body). Capture it so refresh goes through /oauth/refresh; '' if absent, in
   // which case a later refresh falls back to a full re-login.
   const refreshToken = extractCookieValue(response.headers, 'gotrueRefreshToken') ?? '';
@@ -174,7 +173,7 @@ export async function refreshAccessToken(
   authServerUrl: string,
   refreshToken: string,
 ): Promise<AuthTokens> {
-  // S2.4: GoTrue sessions refresh via /oauth/refresh, reading the gotrueRefreshToken cookie
+  // GoTrue sessions refresh via /oauth/refresh, reading the gotrueRefreshToken cookie
   // (the legacy /auth/refresh was retired). The caller (TokenManager.doRefresh) re-logins on
   // ANY thrown error, so every non-success outcome here - no captured cookie, invalid/expired
   // session (401), no_session, or an MFA step-up the connector can't service in the background

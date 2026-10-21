@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'bun:test';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import type { LiveApiClient, LiveRateLimit } from '../../proxy/liveApiClient.js';
 import { summarizeStrategyScan } from './strategyScanShaping.js';
 import { plainDecimal, register } from './strategyScan.js';
 import { toolHandler } from '../helpers.js';
@@ -282,5 +286,317 @@ describe('the scanned series and the adjusted series left out', () => {
     });
     // The tool's advertised output schema (a passthrough of the shared market fields) accepts it whole.
     expect(marketDataOutputSchema.safeParse(result.structuredContent).success).toBe(true);
+  });
+});
+
+describe('summarizeStrategyScan guide and units', () => {
+  const BUDGET = { limit: 120, remaining: 115, resetSeconds: 20, provider: 'tradier' };
+  const s = (over: Record<string, unknown> = {}, opts: Record<string, unknown> = {}) => (summarizeStrategyScan as any)(scan(over), opts) as any;
+  const g = (over: Record<string, unknown> = {}, opts: Record<string, unknown> = {}) => s(over, opts).guide as Record<string, string>;
+  const lv = (over: Record<string, unknown>) => ({ levels: { ...scan().levels, ...over } });
+
+  it('units gains its rows and keeps every existing value', () => {
+    const u = s().units;
+    expect(u.prices).toBe('per share; one contract is 100 shares');
+    expect(u.probabilities).toBe('risk-neutral, lognormal, at the chain\'s own implied volatility at each boundary: model values, not forecasts');
+    expect(u.anchorDelta).toMatch(/absolute published delta/);
+    expect(u.anchorDelta).toContain('for a two-anchor candidate (iron condor, strangles) the mean of the two');
+    expect(u.anchorDelta).toContain('for a body (straddle, iron butterfly) the call\'s');
+    expect(u.legs).toMatch(/spreadPct is \(ask - bid\) over the mid/);
+    expect(u.payoff).toMatch(/UNBOUNDED, not unknown|unbounded, not unknown/i);
+    expect(u.positionSource).toMatch(/only when every leg has a usable IV/);
+    expect(u.probabilityOfProfit).toMatch(/at the mid/);
+    expect(u.probabilityOfProfit).toMatch(/^the risk-neutral probability under a lognormal model \(not a forecast of the trade winning\) that the price at expiration ends where the position makes money at the mid, each breakeven read at the implied volatility the chain's own smile gives at that price \(not a leg's own IV at its strike\), with the resolved rate and dividend yield;/);
+    expect(u.probabilityOfMaxProfit).toMatch(/single price/);
+    expect(u.probabilityOfMaxProfit).toMatch(/no usable IV/);
+    expect(u.probabilityLimits).toMatch(/early assignment/);
+    expect(u.probabilityLimits).toMatch(/Delta is not used as a probability/);
+    expect(u.naturalSlippagePct).toMatch(/netMid - netNatural/);
+    expect(u.liquidity).toMatch(/thinnest leg/);
+  });
+
+  it('the direction of the IV caveat, and what outsideExpectedMove compares', () => {
+    // read backwards as "a rough upper bound on how often a short put is profitable"
+    expect(s().units.probabilityLimits).toBe('no view on direction; IV has tended to exceed realized, so values have '
+      + 'tended to understate, not overstate, short-premium profit frequency; ignores early assignment, fills, costs. '
+      + 'Delta is not used as a probability');
+    // a breakeven below lower was called inside the range because its strike sits above lower
+    expect(s().units.expectedMove).toMatch(/outsideExpectedMove compares breakeven price, not strike, to lower\/upper$/);
+  });
+
+  it('lower/upper is the straddle range, not a one-sigma range', () => {
+    // Distinguish the spot -/+ straddle range from ivOneSigma in the same result.
+    expect(s().units.expectedMove).toContain('lower/upper: spot -/+ straddle (not one-sigma: see ivOneSigma). pctOfSpot');
+    expect(g().expectedMoveIv).toMatch(/ ivOneSigma is the one-sigma move size, spot x atmIv x sqrt\(years to expiration\), null with atmIv\.$/);
+  });
+
+  it('units.width on a wing strategy, units.expectedMove beside an expected move', () => {
+    expect(s().units.width).toMatch(/wider of its two wings/);
+    expect(s({ candidates: [candidate({ width: null })] }).units.width).toBeUndefined();
+    expect(s().units.expectedMove).toContain('pctOfSpot: fraction of spot (0.049 = 4.9%); pctFromSpot: percent');
+    expect(s({ expectedMove: null, expectedMoveUnavailable: 'atm-quote-missing' }).units.expectedMove).toBeUndefined();
+  });
+
+  it('always: bandDelta, skipped, levelsScope, levelCoverage, dealerRegime, events, sortOrder, asOf, rate', () => {
+    const x = g();
+    expect(x.bandDelta).toMatch(/delta the broker publishes/);
+    expect(x.skipped).toMatch(/never priced from a last trade or a mark/);
+    expect(x.levelsScope).toMatch(/"expiration"/);
+    expect(x.levelCoverage).toMatch(/withheld for coverage, not absent/);
+    expect(x.dealerRegime).toMatch(/sign of net GEX/i);
+    expect(x.events).toMatch(/could not be read/);
+    expect(x.sortOrder).toMatch(/do not rank trades/);
+    expect(x.asOf).toMatch(/does not date the quotes/);
+    expect(x.rate).toMatch(/3-month/);
+  });
+
+  it('events: the on-file line beside a read calendar, the unreadable line beside a null one', () => {
+    expect(g({ events: { from: '2026-09-28', through: '2026-10-16', earningsOnOrBefore: null, exDividendOnOrBefore: null } }).events).toMatch(/none on file, not none scheduled/);
+  });
+
+  it('condorWing and sharedAnchor by strategy', () => {
+    expect(g().condorWing).toBeUndefined();
+    expect(g({ request: { ...scan().request, strategy: 'iron_condor' } }).condorWing).toMatch(/no breakeven there/);
+    expect(g().sharedAnchor).toBeUndefined();
+    expect(g({ request: { ...scan().request, strategy: 'short_strangle' } }).sharedAnchor).toMatch(/shared-anchor-strike/);
+  });
+
+  it('the expected move: expectedMoveIv beside one, expectedMoveMissing without', () => {
+    expect(g().expectedMoveIv).toContain("the mean of its usable call/put IVs, or the sole usable leg's IV; null only when neither is usable");
+    expect(g().expectedMoveMissing).toBeUndefined();
+    const missing = g({ expectedMove: null, expectedMoveUnavailable: 'atm-quote-missing' });
+    expect(missing.expectedMoveMissing).toMatch(/unknown, not inside/);
+    expect(missing.expectedMoveIv).toBeUndefined();
+  });
+
+  it('the window: levelsWindow on scope "window" only', () => {
+    expect(g().levelsWindow).toBeUndefined();
+    expect(g(lv({ scope: 'window' })).levelsWindow).toMatch(/4:15 PM New York/);
+    expect(g(lv({ scope: 'window' })).levelsWindow).toMatch(/near-term positioning/);
+  });
+
+  it('the flip: method, resolution, search caveat on a null flip', () => {
+    expect(g().flipMethod).toMatch(/approximation/);
+    expect(g().flipMethod).toMatch(/even over complete coverage\./);
+    expect(g().flipMethod).not.toMatch(/whatever the coverage/);
+    expect(g(lv({ coverage: coverage({ gammaFlipMethod: 'repriced' }) })).flipMethod).not.toMatch(/approximation/);
+    expect(g().flipResolution).toMatch(/not a confidence interval/);
+    expect(g(lv({ coverage: coverage({ gammaFlipResolution: null }) })).flipResolution).toMatch(/step is unknown/);
+    expect(g().flipSearch).toBeUndefined();
+    expect(g(lv({ gammaFlip: null, coverage: coverage({ gammaFlipSearchStatus: 'unresolved' }) })).flipSearch).toMatch(/no conclusion/);
+    expect(g(lv({ gammaFlip: null, coverage: coverage({ gammaFlipSearchStatus: 'not-found' }) })).flipSearch).toMatch(/20% of spot/);
+  });
+
+  it('openInterestUnpublished, windowGaps and omittedRows when present', () => {
+    expect(g().openInterestUnpublished).toBeUndefined();
+    expect(g(lv({ openInterestUnpublishedExpirations: ['2026-10-16'] })).openInterestUnpublished).toMatch(/zero on every contract/);
+    expect(g().windowGaps).toBeUndefined();
+    expect(g(lv({ partial: true })).windowGaps).toMatch(/could not be read/);
+    expect(g().omittedRows).toBeUndefined();
+    expect(g({ omittedRows: { quarantined: 1, invalidStrike: 0, notSuccess: 0, unquoted: 0, total: 1 } }).omittedRows).toMatch(/quarantined/);
+  });
+
+  it('matchedZero on zero matches; matchedCount when fewer are returned than matched', () => {
+    expect(g().matchedZero).toBeUndefined();
+    expect(g({ matched: 0, candidates: [] }).matchedZero).toMatch(/genuine zero/);
+    expect(g().matchedCount).toMatch(/before maxResults/);
+    expect(g({ matched: 1 }).matchedCount).toBeUndefined();
+  });
+
+  it('inputs: profileYield, the tenor clause of rate unless supplied, the spot clock', () => {
+    expect(g().profileYield).toBeUndefined();
+    const resolved = { S: { value: 100, source: 'broker-moomoo', asOf: '2026-09-28T14:59:00Z', stale: false }, r: { value: 0.04, source: 'fred', asOf: '2026-09-25' }, q: { value: 0.01, source: 'profile_yield', asOf: '2026-08-01' } };
+    const x = g({ resolved, provider: 'moomoo' });
+    expect(x.profileYield).toMatch(/moves slightly with spot/);
+    expect(x.rate).toMatch(/matched to the scanned expiration's tenor/);
+    expect(x.spotClock).toMatch(/moomoo[^.]*update time/);
+    expect(x.moomooDelay).toMatch(/15 minutes/);
+    expect(g({ resolved: { ...resolved, r: { value: 0.04, source: 'supplied', asOf: null } } }).rate).not.toMatch(/matched to the scanned expiration's tenor/);
+    expect(g().moomooDelay).toBeUndefined();
+  });
+
+  it('the budget inside the answer and the proxy warnings surfaced', () => {
+    const plain = s({ warnings: ['Risk-free: 1M unavailable; falling back to 3M'] }, { rateLimit: BUDGET });
+    expect(plain.rateLimit).toEqual(BUDGET);
+    expect(plain.guide.rateLimit).toMatch(/budget after this call/);
+    expect(plain.guide.rateLimit).not.toMatch(/400 codes/);
+    expect(plain.warnings).toEqual(['Risk-free: 1M unavailable; falling back to 3M']);
+    expect(g({ provider: 'moomoo' }, { rateLimit: BUDGET }).rateLimit).toMatch(/400 codes/);
+    expect(s().warnings).toBeUndefined();
+    expect(s().rateLimit).toBeUndefined();
+  });
+
+  it('a zero-candidate answer carries every guide its predicates make true', () => {
+    const x = g({ matched: 0, candidates: [] });
+    for (const key of ['bandDelta', 'skipped', 'levelsScope', 'matchedZero', 'asOf']) expect(x[key]).toBeDefined();
+  });
+});
+
+describe('scan_option_strategies through the handler - guide, budget and warnings', () => {
+  it('the guide, the budget inside the fit and the proxy warnings reach both channels, and the schema accepts them', async () => {
+    let handler: any;
+    const budget = { limit: 120, remaining: 117, resetSeconds: 31, provider: 'tradier' };
+    const server = { registerTool: (_name: string, _config: unknown, h: unknown) => { handler = h; } };
+    register(server as any, {
+      get: async (_p: string, _q: unknown, onRateLimit?: (r: typeof budget) => void) => { onRateLimit?.(budget); return scan({ warnings: ['Risk-free: 1M unavailable; falling back to 3M'] }); },
+    } as any);
+    const result = await handler({ symbol: 'SPY', expiration: '2026-10-16', strategy: 'bull_put_spread' });
+    const wire = result.structuredContent;
+    expect(JSON.parse(result.content[0].text)).toEqual(wire);
+    expect(wire.rateLimit).toEqual(budget);
+    expect(wire.warnings).toEqual(['Risk-free: 1M unavailable; falling back to 3M']);
+    expect(wire.guide.rateLimit).toMatch(/budget after this call/);
+    expect(wire.units.payoff).toMatch(/unbounded/);
+    expect(marketDataOutputSchema.safeParse(wire).success).toBe(true);
+  });
+});
+
+describe('scan', () => {
+  it('naturalSlippagePct explains the execution cost a limit at the mid may or may not avoid', () => {
+    expect((summarizeStrategyScan(scan()) as any).units.naturalSlippagePct).toMatch(/a limit at the mid may or may not avoid/);
+  });
+});
+
+describe('unknown values and the final fit', () => {
+  const budget: LiveRateLimit = { limit: 120, remaining: 117, resetSeconds: 31, provider: 'tradier' };
+
+  async function registeredScan(payload: Record<string, unknown>) {
+    const server = new McpServer({ name: 'scan-guide-review', version: '1' });
+    register(server, {
+      get: async (_path: string, _params: unknown, onRateLimit?: (value: LiveRateLimit) => void) => {
+        onRateLimit?.(budget);
+        return payload;
+      },
+    } as unknown as LiveApiClient);
+    const client = new Client({ name: 'scan-guide-consumer', version: '1' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({
+        name: 'scan_option_strategies',
+        arguments: { symbol: 'SPY', expiration: '2026-10-16', strategy: 'iron_condor', width: 5 },
+      });
+      expect(result.isError).not.toBe(true);
+      const wire = result.structuredContent as any;
+      expect(JSON.parse((result.content as Array<{ text: string }>)[0].text)).toEqual(wire);
+      return wire;
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }
+
+  it('distinguishes unavailable level data from incomplete coverage and defines every status', async () => {
+    const states = [
+      { coverage: undefined, value: undefined, status: 'unknown', meaning: /"unknown"[^.]*missing or invalid coverage/ },
+      { coverage: { total: 0, included: 0 }, value: null, status: 'empty', meaning: /"empty"[^.]*no active legs/ },
+      { coverage: { total: 20, included: 0 }, value: null, status: 'unmeasured', meaning: /"unmeasured"[^.]*no eligible legs were included/ },
+      { coverage: { total: 20, included: 19 }, value: 110, status: 'partial', meaning: /"partial"[^.]*only some[^.]*included/ },
+      { coverage: full(20), value: undefined, status: 'unavailable', meaning: /"unavailable"[^.]*missing or invalid[^.]*complete coverage/ },
+      { coverage: full(20), value: null, status: 'complete', meaning: /null beside "complete"[^.]*did not find/ },
+    ];
+    for (const state of states) {
+      const wire = await registeredScan(scan({ levels: {
+        ...scan().levels, callWall: state.value, coverage: coverage({ gamma: state.coverage }),
+      } }));
+      expect(wire.levels.callWall).toBeNull();
+      expect(wire.levels.status.callWall).toBe(state.status);
+      expect(wire.guide.levelCoverage).toMatch(state.meaning);
+      expect(wire.guide.levelCoverage).not.toContain('a levels.status other than "complete" is withheld for coverage');
+    }
+  });
+
+  it('keeps invalid probabilities unknown without diagnosing absent smile IV', async () => {
+    for (const probabilityOfProfit of [1.5, -0.1, Number.NaN, undefined]) {
+      const wire = await registeredScan(scan({ candidates: [candidate({ probabilityOfProfit })] }));
+      expect(wire.candidates[0].probabilityOfProfit).toBeNull();
+      expect(wire.candidates[0].legs[0].iv).toBe(0.3);
+      expect(wire.units.probabilityOfProfit).toMatch(/missing or invalid/);
+      expect(wire.units.probabilityOfProfit).toMatch(/outside 0-1/);
+      expect(wire.units.probabilityOfProfit).toMatch(/no usable IV/);
+      expect(wire.units.probabilityOfProfit).toMatch(/never 0/);
+    }
+  });
+
+  it('explains a missing or invalid step beside a reported flip without calling it unreported', async () => {
+    for (const gammaFlipResolution of [undefined, 0, -1, Number.NaN]) {
+      const wire = await registeredScan(scan({ levels: {
+        ...scan().levels, coverage: coverage({ gammaFlipResolution }),
+      } }));
+      expect(wire.levels.gammaFlip).toBe(97.5);
+      expect(wire.levels.gammaFlipResolution).toBeNull();
+      expect(wire.guide.flipResolution).toMatch(/missing, invalid or nonpositive/);
+      expect(wire.guide.flipResolution).toMatch(/step is unknown/);
+      expect(wire.guide.flipResolution).not.toContain('the sampling step was not reported');
+    }
+  });
+
+  it('fits the final count guide with candidates and rateLimit when matched is unknown', async () => {
+    const denseLeg = (strike: number) => ({
+      ...leg('sell', 'put', strike), bid: 1.23456789012345, ask: 2.23456789012345, mid: 1.73456789012345,
+      spreadPct: 57.6576576576576, iv: 0.234567890123456, delta: 0.234567890123456, gamma: 0.0234567890123456,
+      theta: -0.0234567890123456, vega: 0.123456789012345, openInterest: 1000, volume: 100,
+    });
+    const dense = candidate({
+      legs: [denseLeg(90), denseLeg(85), denseLeg(110), denseLeg(115)],
+      breakevens: [{ price: 89.1234567890123 }, { price: 111.123456789012 }], anchorDelta: 0.234567890123456,
+      netMid: 1.23456789012345, netNatural: 1.12345678901234, naturalSlippagePct: 9.23456789012345,
+      maxProfit: 1.23456789012345, maxLoss: 3.76543210987655, returnOnRisk: 0.327868852459016,
+      probabilityOfProfit: 0.812345678901234, probabilityOfMaxProfit: 0.712345678901234,
+      position: { delta: 1.23456789012345, gamma: 0.234567890123456, theta: 1.23456789012345, vega: -1.23456789012345, source: 'model' },
+      liquidity: { minOpenInterest: 1000, maxSpreadPct: 57.6576576576576 },
+    });
+    // Sweep a full candidate's worth of room: the late-added count line must never cross the shaper's own budget.
+    for (let padding = 0; padding <= 2500; padding += 64) {
+      const warning = 'x'.repeat(padding);
+      const payload = { symbol: 'SPY', provider: 'tradier', matched: null,
+        candidates: Array.from({ length: 25 }, () => dense), warnings: [warning] };
+      const shaped = summarizeStrategyScan(payload, { rateLimit: budget });
+      const wire = await registeredScan(payload);
+      expect(shaped.limitedBySize).toBe(true);
+      expect(new TextEncoder().encode(JSON.stringify(shaped)).length).toBeLessThanOrEqual(49_152);
+      expect(new TextEncoder().encode(JSON.stringify(wire)).length).toBeLessThanOrEqual(49_152);
+      expect(wire.returned).toBeGreaterThan(1);
+      expect(wire.returned).toBeLessThan(25);
+      expect(wire.limitedBySize).toBe(true);
+      expect(wire.responseBudget).toBeUndefined();
+      expect(wire.matched).toBeNull();
+      expect(wire.guide.matchedCount).toMatch(/last-sorted candidates were dropped/);
+      expect(wire.rateLimit).toEqual(budget);
+      expect(wire.warnings).toEqual([warning]);
+    }
+  });
+
+  it('the expanded units retain all 21 distinct candidates within the response budget', async () => {
+    const denseLeg = (strike: number) => ({
+      ...leg('sell', 'put', strike), bid: 1.23456789012345, ask: 2.23456789012345, mid: 1.73456789012345,
+      spreadPct: 57.6576576576576, iv: 0.234567890123456, delta: 0.234568, gamma: 0.0234567890123456,
+      theta: -0.0234567890123456, vega: 0.123456789012345, openInterest: 1000, volume: 100,
+    });
+    const candidates = Array.from({ length: 21 }, (_, i) => candidate({
+      legs: [
+        { ...denseLeg(70 + i), action: 'sell', type: 'put' }, { ...denseLeg(65 + i), action: 'buy', type: 'put' },
+        { ...denseLeg(110 + i), action: 'sell', type: 'call' }, { ...denseLeg(115 + i), action: 'buy', type: 'call' },
+      ],
+      breakevens: [{ price: 70 + i - 1.23456789012345 }, { price: 110 + i + 1.23456789012345 }],
+      anchorDelta: 0.234567890123456, netMid: 1.23456789012345, netNatural: 1.12345678901234,
+      naturalSlippagePct: 9.23456789012345, maxProfit: 1.23456789012345, maxLoss: 3.76543210987655,
+      returnOnRisk: 0.327868852459016, probabilityOfProfit: 0.812345678901234, probabilityOfMaxProfit: 0.712345678901234,
+      position: { delta: 1.23456789012345, gamma: 0.234567890123456, theta: 1.23456789012345, vega: -1.23456789012345, source: 'model' },
+      liquidity: { minOpenInterest: 1000, maxSpreadPct: 57.6576576576576 },
+    }));
+    for (const ivOneSigma of [5.2, 5.234567890123456]) {
+      const shaped = summarizeStrategyScan({ symbol: 'SPY', provider: 'tradier', spotPrice: 100,
+        request: { strategy: 'iron_condor', maxResults: 25 },
+        expectedMove: { ...scan().expectedMove, ivOneSigma }, matched: 21, candidates });
+      expect(shaped.returned).toBe(21);
+      expect(shaped.limitedBySize).toBe(false);
+      const result = await toolHandler(async () => shaped)({});
+      const wire = result.structuredContent as any;
+      expect(wire.returned).toBe(21);
+      expect(wire.responseBudget).toBeUndefined();
+      expect(wire.units).toEqual(shaped.units);
+      expect(Buffer.byteLength(JSON.stringify(wire))).toBeLessThanOrEqual(49_152);
+    }
   });
 });

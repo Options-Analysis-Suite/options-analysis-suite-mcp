@@ -17,6 +17,7 @@ import { createHash, createHmac, createCipheriv, createDecipheriv, randomBytes, 
 import { loginForOAuth, getProfile, refreshAccessToken } from './auth/authClient.js';
 import { AuthError } from './types.js';
 import type { AuthTokens } from './types.js';
+import { LOGO_PATH } from './branding.js';
 
 const AUTH_SERVER_URL = process.env.OAS_AUTH_SERVER_URL || 'https://api.optionsanalysissuite.com';
 
@@ -51,9 +52,8 @@ const ALLOWED_REDIRECTS = [
   // single shared callback URL for every server it hosts. Removing this entry
   // breaks the live Smithery listing for this MCP.
   //
-  // CORRECTED. PR #141 / mcp PR #8 argued the shared-callback risk was bounded
-  // by "PKCE binding the code to the originating browser session". That is
-  // WRONG: PKCE binds a code to whoever holds the verifier, and in the lure that
+  // PKCE does not bind a code to the originating browser session. It binds
+  // the code to whoever holds the verifier, and in the lure that
   // matters the attacker chose the challenge and holds it. Per-client_id
   // redirect binding in DCR does not help either - attacker and victim would use
   // the same gateway client and the same callback. The real property is that a
@@ -107,13 +107,40 @@ export function isProviderSignInEnabled(): boolean {
   return handoffKey() !== null;
 }
 
-/** Supabase provider ids the auth server allowlists (Microsoft's id is `azure`). */
+/** Supabase provider ids the auth server allowlists (Microsoft's id is `azure`), in the website's button order. */
 const SIGN_IN_PROVIDERS = [
   { id: 'google', label: 'Google' },
+  { id: 'azure', label: 'Microsoft' },
   { id: 'apple', label: 'Apple' },
   { id: 'github', label: 'GitHub' },
-  { id: 'azure', label: 'Microsoft' },
 ] as const;
+
+/**
+ * The providers' marks, the website's (apps/web/src/components/auth/ProviderMark.tsx) verbatim: Google's four
+ * colours, Microsoft's four squares, Apple and GitHub in the button's ink. Inline SVG is markup, not a load, so the
+ * pages' policy needs nothing for it. Hidden from assistive technology; the provider's name is the button's text.
+ */
+const PROVIDER_MARKS: Record<(typeof SIGN_IN_PROVIDERS)[number]['id'], string> = {
+  google: '<svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">'
+    + '<path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"/>'
+    + '<path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.81.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18z"/>'
+    + '<path fill="#FBBC05" d="M3.97 10.72a5.4 5.4 0 0 1 0-3.44V4.95H.96a9 9 0 0 0 0 8.1l3.01-2.33z"/>'
+    + '<path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58A9 9 0 0 0 .96 4.95L3.97 7.28C4.68 5.16 6.66 3.58 9 3.58z"/>'
+    + '</svg>',
+  azure: '<svg width="17" height="17" viewBox="0 0 21 21" aria-hidden="true">'
+    + '<rect x="1" y="1" width="9" height="9" fill="#f25022"/><rect x="11" y="1" width="9" height="9" fill="#7fba00"/>'
+    + '<rect x="1" y="11" width="9" height="9" fill="#00a4ef"/><rect x="11" y="11" width="9" height="9" fill="#ffb900"/>'
+    + '</svg>',
+  apple: '<svg width="16" height="18" viewBox="0 0 384 512" aria-hidden="true">'
+    + '<path fill="currentColor" d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zM262.1 104.5c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/>'
+    + '</svg>',
+  github: '<svg width="18" height="18" viewBox="0 0 496 512" aria-hidden="true">'
+    + '<path fill="currentColor" d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8z"/>'
+    + '</svg>',
+};
+
+/** The website, for the links the sign-in page offers (password recovery). */
+const SITE_URL = 'https://optionsanalysissuite.com';
 function isSignInProvider(p: string): boolean {
   return SIGN_IN_PROVIDERS.some((x) => x.id === p);
 }
@@ -572,8 +599,9 @@ function hasActiveSubscription(accessToken: string): Promise<boolean> {
  * X-Frame-Options rides along for anything that does not honour frame-ancestors.
  *
  * `style-src 'unsafe-inline'` is required by the inline <style> blocks and style
- * attributes these pages use. Nothing else loads: no scripts, no images, no
- * fonts, no network calls - hence `default-src 'none'`.
+ * attributes these pages use, and `img-src 'self'` by the brand lockup's logo,
+ * served by this server. Nothing else loads: no scripts, no fonts, no other
+ * images, no network calls - hence `default-src 'none'`.
  *
  * Referrer-Policy is not incidental here. Flow ids and consent ids ride in URLs
  * and form targets, and a leaked flow id is the premise of the attack this file
@@ -582,18 +610,21 @@ function hasActiveSubscription(accessToken: string): Promise<boolean> {
 /**
  * One stylesheet for every page this module renders (sign-in, MFA step-up,
  * connection consent, notices): the web app's sign-in card on the light site
- * palette - white card on the blue-tinted background, the Contact field kit,
- * the CTA gradient button, #3568a8 focus ring. Inlined into each page (CSP
- * allows inline style and nothing external). server/src/routes/oauthRoutes.ts
+ * palette - white card on the blue-tinted background, the brand lockup, the
+ * Contact field kit, the provider buttons with their marks, the CTA gradient
+ * button, #3568a8 focus ring. Inlined into each page
+ * (CSP allows inline style and nothing external). server/src/routes/oauthRoutes.ts
  * carries a lockstep copy for the /mcp/finish interstitial.
  */
 const PAGE_STYLE = `
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: radial-gradient(1200px 600px at 50% -10%, rgba(59, 130, 246, 0.07) 0%, transparent 60%), linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%); color: #111827; display: flex; justify-content: center; align-items: flex-start; min-height: 100vh; padding: 48px 16px; line-height: 1.5; }
-    .card { width: 100%; max-width: 440px; padding: 32px 32px 28px; background: linear-gradient(165deg, #ffffff 0%, #fbfcfd 100%); border: 1px solid rgba(59, 130, 246, 0.12); border-radius: 14px; box-shadow: 0 1px 2px -1px rgba(15, 23, 42, 0.04), 0 8px 24px -12px rgba(15, 23, 42, 0.08); }
-    .brand { font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #6b7280; margin-bottom: 12px; }
-    h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1.25; color: #111827; margin-bottom: 8px; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: radial-gradient(1200px 600px at 50% -10%, rgba(59, 130, 246, 0.07) 0%, transparent 60%), linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%); color: #111827; display: flex; justify-content: center; align-items: flex-start; min-height: 100vh; padding: 64px 24px 48px; line-height: 1.5; }
+    .card { width: 100%; max-width: 480px; padding: 32px 32px 28px; background: linear-gradient(165deg, #ffffff 0%, #fbfcfd 100%); border: 1px solid rgba(59, 130, 246, 0.12); border-radius: 14px; box-shadow: 0 1px 2px -1px rgba(15, 23, 42, 0.04), 0 8px 24px -12px rgba(15, 23, 42, 0.08); }
+    .lockup { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; font-size: 1.4rem; font-weight: 700; letter-spacing: -0.015em; line-height: 1.1; color: #111827; white-space: nowrap; }
+    .lockup img { height: 32px; width: auto; display: block; }
+    h1 { font-size: 1.6rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1.25; color: #111827; margin-bottom: 6px; }
     p, .subtitle { font-size: 0.95rem; color: #6b7280; line-height: 1.5; margin-bottom: 20px; }
+    .subtitle { margin-bottom: 24px; }
     p:last-child { margin-bottom: 0; }
     .dest { color: #111827; font-weight: 600; }
     label { display: block; font-size: 13px; font-weight: 500; color: #374151; margin-bottom: 6px; }
@@ -610,14 +641,23 @@ const PAGE_STYLE = `
     .error { padding: 10px 12px; margin-bottom: 14px; background: #fef2f2; border: 1px solid #fca5a5; border-radius: 8px; color: #991b1b; font-size: 0.85rem; line-height: 1.45; }
     .error-text { color: #b91c1c; font-size: 0.85rem; margin: -6px 0 12px; }
     .warn { padding: 10px 12px; margin-bottom: 18px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; color: #856404; font-size: 0.85rem; line-height: 1.5; }
-    .hint { padding: 10px 12px; margin-bottom: 14px; background: rgba(59, 130, 246, 0.04); border: 1px solid rgba(59, 130, 246, 0.18); border-radius: 8px; color: #4b5563; font-size: 0.85rem; line-height: 1.5; }
-    .provider-btn { display: block; min-height: 44px; padding: 11px 16px; margin-bottom: 10px; border: 1px solid #d1d5db; border-radius: 8px; background: #ffffff; color: #1f2937; font-size: 14px; font-weight: 600; text-align: center; text-decoration: none; }
+    .provider-btn { display: flex; align-items: center; justify-content: center; gap: 10px; min-height: 44px; padding: 11px 16px; margin-bottom: 10px; border: 1px solid #d1d5db; border-radius: 8px; background: #ffffff; color: #1f2937; font-size: 14px; font-weight: 600; text-decoration: none; }
     .provider-btn:hover { background: #f8fafc; border-color: #3568a8; }
-    .divider { display: flex; align-items: center; gap: 10px; margin: 16px 0; color: #6b7280; font-size: 0.8rem; }
-    .divider::before, .divider::after { content: ''; flex: 1; border-top: 1px solid #e5e7eb; }
+    .provider-btn svg { flex: none; }
+    .divider { display: flex; align-items: center; margin: 16px 0; color: #6b7280; font-size: 13px; }
+    .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: #e5e7eb; }
+    .divider span { padding: 0 12px; }
+    .aside { text-align: center; font-size: 0.85rem; color: #6b7280; line-height: 1.5; margin: 14px 0 0; }
+    .aside a { color: #3568a8; font-weight: 500; text-decoration: none; }
+    .aside a:hover { color: #1e3a8a; text-decoration: underline; }
     .mfa { margin-top: 20px; }
-    @media (max-width: 480px) { body { padding: 24px 12px; } .card { padding: 24px 20px 22px; border-radius: 12px; } h1 { font-size: 1.35rem; } }
+    @media (max-width: 640px) { body { padding: 32px 16px; } .card { padding: 24px 20px 22px; border-radius: 12px; } .lockup { font-size: 1.05rem; gap: 8px; } .lockup img { height: 28px; } h1 { font-size: 1.4rem; } }
 `;
+
+/** The brand lockup every connector page opens with: the website's logo and wordmark. */
+function lockupHtml(): string {
+  return `<div class="lockup"><img src="${LOGO_PATH}" alt="" width="40" height="28"><span>Options Analysis Suite</span></div>`;
+}
 
 /**
  * The page's CSP form-action: 'self', plus the origin of the client the page
@@ -640,7 +680,7 @@ function htmlPageHeaders(redirectUri?: string): Record<string, string> {
   return {
     'Content-Type': 'text/html',
     'Content-Security-Policy':
-      `default-src 'none'; style-src 'unsafe-inline'; form-action ${formActionSources(redirectUri)}; frame-ancestors 'none'; base-uri 'none'`,
+      `default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; form-action ${formActionSources(redirectUri)}; frame-ancestors 'none'; base-uri 'none'`,
     'X-Frame-Options': 'DENY',
     'Referrer-Policy': 'no-referrer',
     'Cache-Control': 'no-store',
@@ -667,7 +707,7 @@ interface AuthorizationGrant {
 // only by a truncated hash; grant and redirect collapse to a fixed category
 // label (see grantCategory / redirectCategory), never the request-controlled
 // string; the remaining fields are bounded too (hasState is a boolean, pkce is
-// the already-validated S256 constant, ttlSec is fixed). A `code_issued` with
+// the already-validated constant, ttlSec is fixed). A `code_issued` with
 // no later `token_exchange` for the same code fingerprint is the signal that a
 // client abandoned the exchange after we handed it the code.
 function oauthFingerprint(value: string): string {
@@ -973,12 +1013,12 @@ function consentPage(consentId: string, redirectUri: string): { status: number; 
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Options Analysis Suite - Confirm connection</title>
+  <title>Confirm connection - Options Analysis Suite</title>
   <style>${PAGE_STYLE}</style>
 </head>
 <body>
   <div class="card">
-    <p class="brand">Options Analysis Suite</p>
+    ${lockupHtml()}
     <h1>Confirm this connection</h1>
     <p>You are about to give <span class="dest">${escapeHtml(destinationHost)}</span> access to your Options Analysis Suite account.</p>
     <div class="warn">Only continue if you started this yourself from ${escapeHtml(destinationHost)}. If you arrived here from a link someone sent you, cancel.</div>
@@ -1055,25 +1095,31 @@ function providerStartUrl(provider: string, p: LoginPageParams): string {
  */
 function renderLoginPage(p: LoginPageParams, status = 200): { status: number; headers: Record<string, string>; body: string } {
   const errorHtml = p.errorMsg ? `<div class="error">${escapeHtml(p.errorMsg)}</div>\n    ` : '';
-  const providersHtml = isProviderSignInEnabled()
-    ? `<p class="hint">Use the button for the account you signed up with. The email and password form below works only if you created a password for your account.</p>
-      ${SIGN_IN_PROVIDERS.map((prov) =>
-      `<a class="provider-btn" href="${escapeHtml(providerStartUrl(prov.id, p))}">Continue with ${prov.label}</a>`).join('\n      ')}
-      <div class="divider"><span>or use your email and password</span></div>
-      `
+  const providers = isProviderSignInEnabled();
+  const providersHtml = providers
+    ? `${SIGN_IN_PROVIDERS.map((prov) =>
+      `<a class="provider-btn" href="${escapeHtml(providerStartUrl(prov.id, p))}">${PROVIDER_MARKS[prov.id]}Continue with ${prov.label}</a>`).join('\n    ')}
+    <div class="divider"><span>or</span></div>
+    `
+    : '';
+  // An account created with a provider has no password unless its owner added one (the account page offers
+  // that); the line says so where the form is, and only when the buttons it points at are on the page.
+  const providerNote = providers
+    ? `\n    <p class="aside">Signed up with a provider? Use its button above unless you added a password to your account.</p>`
     : '';
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Options Analysis Suite - Sign In</title>
+  <title>Log in - Options Analysis Suite</title>
   <style>${PAGE_STYLE}</style>
 </head>
 <body>
   <div class="card">
-    <h1>Options Analysis Suite</h1>
-    <p class="subtitle">Sign in to connect your account to your AI assistant</p>
+    ${lockupHtml()}
+    <h1>Connect your account</h1>
+    <p class="subtitle">Log in to give your AI assistant access to your Options Analysis Suite account.</p>
     ${errorHtml}${providersHtml}<form method="POST" action="/oauth/authorize">
       <input type="hidden" name="client_id" value="${escapeHtml(p.clientId)}">
       <input type="hidden" name="redirect_uri" value="${escapeHtml(p.redirectUri)}">
@@ -1082,11 +1128,12 @@ function renderLoginPage(p: LoginPageParams, status = 200): { status: number; he
       <input type="hidden" name="code_challenge_method" value="${escapeHtml(p.codeChallengeMethod)}">
       <input type="hidden" name="scope" value="${escapeHtml(p.scope)}">
       <label for="email">Email</label>
-      <input type="email" id="email" name="email" required placeholder="you@example.com"${p.email !== undefined ? ` value="${escapeHtml(p.email)}"` : ''}>
+      <input type="email" id="email" name="email" required autocomplete="email" placeholder="you@example.com"${p.email !== undefined ? ` value="${escapeHtml(p.email)}"` : ''}>
       <label for="password">Password</label>
-      <input type="password" id="password" name="password" required placeholder="Your password">
-      <button type="submit">Sign In & Authorize</button>
+      <input type="password" id="password" name="password" required autocomplete="current-password" placeholder="Enter your password">
+      <button type="submit">Log in and connect</button>
     </form>
+    <p class="aside"><a href="${SITE_URL}/forgot-password">Forgot your password?</a></p>${providerNote}
   </div>
 </body>
 </html>`;
@@ -1111,7 +1158,7 @@ export function handleAuthorizeGet(query: URLSearchParams): { status: number; he
     };
   }
 
-  // Reject non-S256 PKCE before showing login form
+  // Reject non-S256 PKCE before showing the login form.
   if (codeChallengeMethod !== 'S256') {
     return {
       status: 400,
@@ -1132,12 +1179,12 @@ function renderMfaForm(flowId: string, flow: MfaFlow, errorMsg = ''): { status: 
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Options Analysis Suite - Two-Factor Verification</title>
+  <title>Two-factor verification - Options Analysis Suite</title>
   <style>${PAGE_STYLE}</style>
 </head>
 <body>
   <div class="card">
-    <p class="brand">Options Analysis Suite</p>
+    ${lockupHtml()}
     <h1>Two-factor verification</h1>
     <p class="subtitle">Enter the code from your authenticator app to finish connecting Options Analysis Suite.</p>
     ${errorHtml}
@@ -1150,7 +1197,7 @@ function renderMfaForm(flowId: string, flow: MfaFlow, errorMsg = ''): { status: 
       <input type="hidden" name="mfa_flow_id" value="${escapeHtml(flowId)}">
       <label for="mfa_code">Authenticator code</label>
       <input type="text" id="mfa_code" name="mfa_code" inputmode="numeric" autocomplete="one-time-code" required placeholder="123456">
-      <button type="submit">Verify & Authorize</button>
+      <button type="submit">Verify and connect</button>
     </form>
   </div>
 </body>
@@ -1193,7 +1240,7 @@ export async function handleAuthorizePost(
     };
   }
 
-  // Only S256 is supported - reject early before credential validation
+  // Only S256 is supported; reject other methods before credential validation.
   if (codeChallengeMethod !== 'S256') {
     return {
       status: 400,
@@ -1336,12 +1383,12 @@ function noticePage(heading: string, message: string, status = 400): { status: n
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Options Analysis Suite - Sign In</title>
+  <title>Options Analysis Suite</title>
   <style>${PAGE_STYLE}</style>
 </head>
 <body>
   <div class="card">
-    <p class="brand">Options Analysis Suite</p>
+    ${lockupHtml()}
     <h1>${escapeHtml(heading)}</h1>
     <p>${escapeHtml(message)}</p>
   </div>
@@ -2140,7 +2187,6 @@ export function handleClientRegistration(body: string): { status: number; header
     // sends both its HTTPS callback AND a `cursor://` custom scheme in a single
     // DCR payload. Rejecting the registration on the custom scheme rejects the
     // whole client. The authorization-time allowlist check is the real gate.
-    // See closed mcp PR #9.
     if (req.redirect_uris !== undefined) {
       if (!Array.isArray(req.redirect_uris)) {
         return { status: 400, headers: { 'Content-Type': 'application/json' },

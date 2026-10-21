@@ -1,4 +1,9 @@
 import { describe, expect, it } from 'bun:test';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import type { LiveApiClient, LiveRateLimit } from '../../proxy/liveApiClient.js';
+import { register } from './dealerPositioning.js';
 import { inDeltaBand, significantDeep, summarizeDealerPositioning, withinPercent } from './dealerPositioningShaping.js';
 import { sanitizeMcpWireOutput, toolHandler } from '../helpers.js';
 
@@ -42,6 +47,64 @@ const live = (over: Record<string, unknown> = {}) => ({
   },
   byStrike: [strikeRow(100, 10), strikeRow(118, 50), strikeRow(120, 90), strikeRow(122, 40), strikeRow(140, 5)],
   ...over,
+});
+
+it('the no-crossing caveat retains the 136 complete rows that fitted at an earlier build', async () => {
+  const byStrike = Array.from({ length: 1600 }, (_, i) => ({
+    ...strikeRow(50 + i * 0.5, i * Math.PI * 1e10),
+    netGamma: 1234.5, netDelta: -2345.6, netVega: 34.5,
+    callOpenInterest: 123456, putOpenInterest: 654321, coverage: coverage(4, 4),
+  }));
+  for (const spotPrice of [120, 120.01, 120.02]) {
+    const shaped = summarizeDealerPositioning(live({ byStrike,
+      snapshot: { ...live().snapshot, spotPrice, gammaFlip: null },
+      coverage: { ...coverage(), gammaFlipSearchStatus: 'not-found' },
+    }), { strikeRange: 150, rateLimit: { provider: 'tastytrade', limit: 120, remaining: 100, resetSeconds: 30 } });
+    expect(shaped.strikes.returned).toBeGreaterThanOrEqual(136);
+    const result = await toolHandler(async () => shaped)({});
+    const wire = result.structuredContent as any;
+    expect(wire.strikes.returned).toBeGreaterThanOrEqual(136);
+    expect(wire.responseBudget).toBeUndefined();
+    expect(JSON.parse((result.content[0] as { text: string }).text)).toEqual(wire);
+    expect(Buffer.byteLength(JSON.stringify(wire))).toBeLessThanOrEqual(49_152);
+  }
+});
+
+it('the found-flip clause keeps the complete rows a found flip fitted at an earlier build', async () => {
+  const byStrike = Array.from({ length: 1600 }, (_, i) => ({
+    ...strikeRow(50 + i * 0.5, i * Math.PI * 1e10),
+    netGamma: 1234.5, netDelta: -2345.6, netVega: 34.5,
+    callOpenInterest: 123456, putOpenInterest: 654321, coverage: coverage(4, 4),
+  }));
+  for (const { gammaFlipMethod, minimumRows } of [
+    { gammaFlipMethod: undefined, minimumRows: 136 }, { gammaFlipMethod: 'mixed', minimumRows: 135 },
+  ]) for (const spotPrice of [120, 120.01, 120.02]) {
+    const shaped = summarizeDealerPositioning(live({ byStrike,
+      snapshot: { ...live().snapshot, spotPrice, gammaFlip: 118.5 },
+      coverage: { ...coverage(), gammaFlipMethod, gammaFlipSearchStatus: 'found', gammaFlipResolution: 0.0185 },
+    }), { strikeRange: 150, rateLimit: { provider: 'tastytrade', limit: 120, remaining: 100, resetSeconds: 30 } });
+    expect(shaped.guide.levelStatus).toContain('nearest to spot among crossings found by sampling');
+    expect(shaped.strikes.returned).toBeGreaterThanOrEqual(minimumRows);
+    const result = await toolHandler(async () => shaped)({});
+    const wire = result.structuredContent as any;
+    expect(wire.strikes.returned).toBe(shaped.strikes.returned);
+    expect(wire.responseBudget).toBeUndefined();
+    expect(Buffer.byteLength(JSON.stringify(wire))).toBeLessThanOrEqual(49_152);
+  }
+});
+
+it('a complete null flip does not invent an unreported search status', () => {
+  for (const status of [null, 'unrecognized']) {
+    const shaped = summarizeDealerPositioning(live({
+      snapshot: { ...live().snapshot, gammaFlip: null },
+      coverage: { ...coverage(), gammaFlipSearchStatus: status },
+    }));
+    expect(shaped.coverage.gammaFlip.status).toBe('complete');
+    expect(shaped.coverage.gammaFlipSearchStatus).toBeNull();
+    expect(shaped.guide.flipSearch).toContain('no recognized status');
+    expect(shaped.guide.levelStatus).not.toContain('coverage.gammaFlipSearchStatus: not-found or unresolved');
+    expect(shaped.guide.levelStatus).toContain('See coverage.gammaFlipSearchStatus.');
+  }
 });
 
 describe('summarizeDealerPositioning', () => {
@@ -467,6 +530,34 @@ describe('summarizeDealerPositioning', () => {
   });
 
   it('caps at 150 rows and drops the farthest to fit the row budget, saying so, on the worst-case rows', async () => {
+    const budget: LiveRateLimit = { provider: 'tastytrade', limit: 120, remaining: 100, resetSeconds: 30 };
+    async function throughTool(response: Record<string, unknown>) {
+      const server = new McpServer({ name: 'dealer-wide-test', version: '1' });
+      register(server, {
+        get: async (_path: string, _params?: Record<string, string>, onRateLimit?: (value: LiveRateLimit) => void) => {
+          onRateLimit?.(budget);
+          return response;
+        },
+      } as unknown as LiveApiClient);
+      const client = new Client({ name: 'dealer-wide-consumer', version: '1' });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      try {
+        const result = await client.callTool({ name: 'get_live_dealer_positioning', arguments: { symbol: 'MU', strikeRange: 150 } });
+        expect(result.isError).not.toBe(true);
+        const wire = result.structuredContent as any;
+        expect(JSON.parse((result.content as { type: string; text: string }[])[0].text)).toEqual(wire);
+        expect(wire.rateLimit).toEqual(budget);
+        expect(wire.guide.rateLimit).toMatch(/platform's own count/);
+        expect(wire.guide.rowsLimited).toMatch(/farthest from spot first/);
+        expect(wire.responseBudget).toBeUndefined();
+        expect(Buffer.byteLength(JSON.stringify(wire))).toBeLessThanOrEqual(49_152);
+        return wire;
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    }
     // Partial coverage keeps every row's counts, and long decimals: the
     // largest rows this shaper emits. 5,000 asks past the cap.
     const byStrike = Array.from({ length: 1_600 }, (_, i) => ({
@@ -475,7 +566,7 @@ describe('summarizeDealerPositioning', () => {
       callOpenInterest: 123_456, putOpenInterest: 654_321,
       coverage: coverage(824, 823),
     }));
-    const shaped = summarizeDealerPositioning(live({ byStrike }), { strikeRange: 5_000 });
+    const shaped = summarizeDealerPositioning(live({ byStrike }), { strikeRange: 5_000, rateLimit: budget });
     expect(shaped.strikes.limitedBySize).toBe(true);
     expect(shaped.strikes.nearSpot.length).toBeLessThan(150);
     expect(new TextEncoder().encode(JSON.stringify(shaped)).byteLength).toBeLessThanOrEqual(50 * 1024 - 2 * 1024);
@@ -484,16 +575,21 @@ describe('summarizeDealerPositioning', () => {
     const farthestKept = Math.max(...kept.map((k) => Math.abs(k - 120)));
     const nearerDropped = byStrike.filter((r) => Math.abs(r.strike - 120) < farthestKept && !kept.includes(r.strike));
     expect(nearerDropped).toEqual([]);
-    const result = await toolHandler(async () => shaped)({});
-    expect((result.structuredContent as any).responseBudget).toBeUndefined();
-    expect((result.structuredContent as any).strikes.nearSpot).toHaveLength(shaped.strikes.nearSpot.length);
+    const partialWire = await throughTool(live({ byStrike }));
+    expect(partialWire.strikes).toEqual(shaped.strikes);
+    expect(partialWire.guide).toEqual(shaped.guide);
 
-    // Complete rows drop their counts, so the full 150 fit.
     const complete = byStrike.map((r) => ({ ...r, strike: r.strike, netGamma: 1234.5, netDelta: -2345.6, netVega: 34.5, coverage: coverage(4, 4) }));
-    const wide = summarizeDealerPositioning(live({ byStrike: complete }), { strikeRange: 5_000 });
-    expect(wide.strikes.nearSpot).toHaveLength(150);
-    expect(wide.strikes.limitedBySize).toBe(false);
+    const wide = summarizeDealerPositioning(live({ byStrike: complete }), { strikeRange: 5_000, rateLimit: budget }) as any;
+    expect(wide.strikes.nearSpot.length).toBeGreaterThan(shaped.strikes.nearSpot.length);
+    expect(wide.strikes.nearSpot.length).toBeGreaterThan(130);
+    expect(wide.strikes.nearSpot.length).toBeLessThanOrEqual(150);
+    expect(wide.strikes.nearSpot.length < 150).toBe(wide.strikes.limitedBySize);
+    expect(wide.guide.rowsLimited !== undefined).toBe(wide.strikes.limitedBySize);
     expect(wide.strikes.nearSpot[0]).not.toHaveProperty('coverage');
+    const completeWire = await throughTool(live({ byStrike: complete }));
+    expect(completeWire.strikes).toEqual(wide.strikes);
+    expect(completeWire.guide).toEqual(wide.guide);
   });
 
   it('takes every strike within a percent of spot, up to the cap', () => {
@@ -846,6 +942,8 @@ describe('adjusted series left out of the window', () => {
   it('carries excludedRoots on the window and on each date that names them, and says so', () => {
     const shaped: any = summarizeDealerPositioning(live({
       excludedRoots: [{ root: 'AAPL1', contracts: 12 }],
+      snapshot: { ...live().snapshot, gammaFlip: null },
+      coverage: { ...coverage(), gammaFlipSearchStatus: 'not-found' },
       byExpiration: [
         { expiration: '2026-09-18', daysToExpiration: 8, netGamma: 1, netDelta: 1, coverage: { gamma: { total: 2, included: 2 }, delta: { total: 2, included: 2 } } },
         { expiration: '2026-09-25', daysToExpiration: 15, netGamma: 0, netDelta: 0, coverage: { gamma: null, delta: null }, excludedRoots: [{ root: 'AAPL1', contracts: 12 }] },
@@ -854,6 +952,9 @@ describe('adjusted series left out of the window', () => {
     expect(shaped.window.excludedRoots).toEqual([{ root: 'AAPL1', contracts: 12 }]);
     expect(shaped.byExpiration.map((entry: any) => entry.excludedRoots)).toEqual([undefined, [{ root: 'AAPL1', contracts: 12 }]]);
     expect(shaped.limitations).toContain('12 contracts under the AAPL1 root (an adjusted series, a different deliverable at the same strikes) are left out of the totals, the levels and their coverage, which measure the symbol\'s own contracts alone, so "complete" there does not include them; `byExpiration` names the dates.');
+    expect(shaped.coverage.gammaFlip).toEqual({ total: 824, included: 824, status: 'complete' });
+    expect(shaped.guide.flipMethod).toContain('complete means every counted leg entered it');
+    expect(shaped.guide.levelStatus).toContain('complete coverage (every counted leg entered the search)');
   });
 
   it('a window that left nothing out names nothing (control)', () => {
@@ -876,5 +977,428 @@ describe('the straddle\'s series on a date under several roots', () => {
     const shaped: any = summarizeDealerPositioning(live({ byExpiration: [entry({ root: 'SPXW' }), { ...entry({}), expiration: '2026-10-23' }] }));
     expect(shaped.byExpiration[0].expectedMove).toMatchObject({ straddle: 61, root: 'SPXW' });
     expect(shaped.byExpiration[1].expectedMove).not.toHaveProperty('root');
+  });
+});
+
+describe('summarizeDealerPositioning guide', () => {
+  const BUDGET = { limit: 120, remaining: 100, resetSeconds: 30, provider: 'tastytrade' };
+  const d = (over: Record<string, unknown> = {}, opts: Record<string, unknown> = {}) => summarizeDealerPositioning(live(over), opts as any) as any;
+  const g = (over: Record<string, unknown> = {}, opts: Record<string, unknown> = {}) => d(over, opts).guide as Record<string, string>;
+  const entry = (over: Record<string, unknown> = {}) => ({
+    expiration: '2026-09-18', daysToExpiration: 8, netGamma: 100, netDelta: -10, callGamma: 120, putGamma: -20, grossGamma: 140,
+    shareOfGrossGamma: 0.4, coverage: { gamma: { total: 10, included: 10 }, delta: { total: 10, included: 10 } },
+    expectedMove: { strike: 120, callMid: 2, putMid: 2.1, straddle: 4.1, pctOfSpot: 0.034, lower: 115.9, upper: 124.1, atmIv: 0.3, ivOneSigma: 5.1 },
+    expectedMoveUnavailable: null, events: { earningsOnOrBefore: null, exDividendOnOrBefore: null }, ...over,
+  });
+  const snap = (over: Record<string, unknown>) => ({ snapshot: { ...live().snapshot, ...over } });
+
+  it('exposure: the charm sign and the GEX sign convention with the squeeze caveat, always - netCharm null too', () => {
+    for (const x of [g(), g(snap({ netCharm: null }))]) {
+      expect(x.exposure).toMatch(/remaining-maturity sign/);
+      expect(x.exposure).toMatch(/call gamma positive and put gamma negative/);
+      expect(x.exposure).toMatch(/open interest does not say who holds/);
+    }
+  });
+
+  it('walls, always', () => {
+    expect(g().walls).toMatch(/largest positive call gamma/);
+    expect(g().walls).toMatch(/put wall can sit above the call wall/);
+  });
+
+  it('levelStatus, always; the null-over-complete clause only beside a null flip with complete coverage', () => {
+    expect(g().levelStatus).toMatch(/required coverage, not whether a level was found/);
+    expect(g().levelStatus).not.toMatch(/over complete coverage/);
+    const nullFlip = g({ ...snap({ gammaFlip: null }), coverage: { ...coverage(), gammaFlipSearchStatus: 'not-found' } });
+    expect(nullFlip.levelStatus).toMatch(/null over complete coverage/);
+  });
+
+  it('dealerRegime: always; neutral and null explained when they occur', () => {
+    expect(g().dealerRegime).toMatch(/interpolated at spot/);
+    expect(g().dealerRegime).toMatch(/not the sign of netGex nor which side of gammaFlip/);
+    expect(g().dealerRegime).not.toMatch(/"neutral"/);
+    expect(g(snap({ regime: 'neutral' })).dealerRegime).toMatch(/"neutral"/);
+    expect(g({ ...snap({ regime: null, netGamma: null }) }).dealerRegime).toMatch(/not established/);
+  });
+
+  it('magnet and concentration: what each is, always', () => {
+    expect(g().magnet).toMatch(/largest absolute net gamma/);
+    expect(g().concentration).toMatch(/Herfindahl/);
+  });
+
+  it('flipMethod: the method, the held-gamma caveat on frozen-gamma or mixed, an unreported method', () => {
+    const repriced = g({ coverage: { ...coverage(), gammaFlipMethod: 'repriced' } }).flipMethod;
+    expect(repriced).toMatch(/every leg recomputed from IV/);
+    expect(repriced).not.toMatch(/approximation/);
+    const mixed = g({ coverage: { ...coverage(), gammaFlipMethod: 'mixed' } }).flipMethod;
+    expect(mixed).toContain('some legs were repriced from their IV and the rest held their published gamma.');
+    expect(mixed).toMatch(/approximation/);
+    const frozen = g({ coverage: { ...coverage(), gammaFlipMethod: 'frozen-gamma' } }).flipMethod;
+    expect(frozen).toContain('no leg had a usable IV, so every published gamma was held constant.');
+    expect(frozen).toMatch(/approximation/);
+    expect(g().flipMethod).toMatch(/reported no method/);
+    expect(g().flipMethod).toMatch(/counts every leg that entered the sweep, repriced or held/);
+  });
+
+  it('flipSearch: only when the search status is null', () => {
+    expect(g().flipSearch).toBeUndefined();
+    expect(g({ coverage: { ...coverage(), gammaFlipSearchStatus: null } }).flipSearch).toMatch(/no leg entered the search/);
+  });
+
+  it('rows: on any returned row, the delta clause by the window\'s expiration count', () => {
+    expect(g().rows).toMatch(/complete or empty/);
+    expect(g().rows).toMatch(/over several expirations/i);
+    expect(g({ expirations: ['2026-09-18'] }).rows).toMatch(/broker's per-contract deltas/);
+    expect(g({ byStrike: [] }).rows).toBeUndefined();
+  });
+
+  it('rowsAtLevels: when a wall or the magnet is set', () => {
+    expect(g().rowsAtLevels).toMatch(/strikes.atLevels/);
+    expect(g(snap({ callWall: null, putWall: null, absGamma: null })).rowsAtLevels).toBeUndefined();
+  });
+
+  it('inWindow with a window, and: a percent window with no spot is not applied', () => {
+    expect(g().inWindow).toBeUndefined();
+    expect(g({}, { strikeWindowPct: 10 }).inWindow).toMatch(/exceeds strikes.returned/);
+    expect(g({}, { strikeWindowPct: 10 }).windowPctNoSpot).toBeUndefined();
+    expect(g(snap({ spotPrice: null }), { strikeWindowPct: 10 }).windowPctNoSpot).toMatch(/not applied/);
+  });
+
+  it('byExpiration and expectedMove: with entries; the reason codes beside a null move', () => {
+    expect(g().byExpiration).toBeUndefined();
+    const withEntries = g({ byExpiration: [entry()] });
+    expect(withEntries.byExpiration).toMatch(/computed alone/);
+    expect(withEntries.byExpiration).toContain("shareOfGrossGex is its share of the window's gross gamma (gamma only, not a share of netCharm), published");
+    expect(withEntries.byExpiration).not.toMatch(/0DTE concentration/);
+    expect(withEntries.expectedMove).toMatch(/not a forecast/);
+    expect(withEntries.expectedMove).toMatch(/about 0.8 of it/);
+    expect(withEntries.expectedMove).not.toMatch(/atm-quote-missing/);
+    const missing = g({ byExpiration: [entry({ expectedMove: null, expectedMoveUnavailable: 'atm-quote-missing' })] });
+    expect(missing.expectedMove).toMatch(/atm-quote-missing/);
+  });
+
+  it('events beside an events object; eventsUnread beside a null one', () => {
+    const read = g({ events: { from: '2026-09-10', through: '2026-11-20', earnings: [], exDividends: [] }, byExpiration: [entry()] });
+    expect(read.events).toMatch(/none on file, not none scheduled/);
+    expect(read.eventsUnread).toBeUndefined();
+    expect(g({ events: null }).eventsUnread).toMatch(/could not be read/);
+  });
+
+  it('roots: a straddle naming its root, or an entry with no straddle', () => {
+    expect(g({ byExpiration: [entry()] }).roots).toBeUndefined();
+    expect(g({ byExpiration: [entry({ expectedMove: { ...entry().expectedMove, root: 'SPXW' } })] }).roots).toMatch(/never merged/);
+  });
+
+  it('the window: the strike counts and the moving window always; the 4:15 roll on a default window', () => {
+    expect(g().strikeCounts).toMatch(/strikesUsed/);
+    expect(g().windowMoves).toMatch(/different books/);
+    expect(g({ expirationSelection: 'nearest' }).windowRoll).toMatch(/4:15 PM New York/);
+    expect(g({ expirationSelection: 'requested' }).windowRoll).toBeUndefined();
+  });
+
+  it('timing: the clock always, Tradier\'s hourly Greeks and moomoo\'s delay by provider', () => {
+    expect(g().clock).toMatch(/wall clock/);
+    expect(g().cache).toMatch(/per proxy instance/);
+    expect(g().tradierGreeks).toBeUndefined();
+    expect(g({ provider: 'tradier' }).tradierGreeks).toMatch(/hourly/);
+    expect(g().moomooDelay).toBeUndefined();
+    expect(g({ provider: 'moomoo' }).moomooDelay).toMatch(/15 minutes/);
+  });
+
+  it('sameDay on a same-day entry; sameDayNamed on a named same-day book', () => {
+    expect(g({ byExpiration: [entry()] }).sameDay).toBeUndefined();
+    expect(g({ byExpiration: [entry({ daysToExpiration: 0 })] }).sameDay).toMatch(/one minute before the engine's close/);
+    expect(g({ byExpiration: [entry({ daysToExpiration: 0 })] }).sameDayNamed).toBeUndefined();
+    expect(g({ expirationSelection: 'requested', byExpiration: [entry({ daysToExpiration: 0 })] }).sameDayNamed).toMatch(/expired legs are inside/);
+  });
+
+  it('the lines models misread say what they do not mean', () => {
+    const same = g({ byExpiration: [entry({ daysToExpiration: 0 })] }).sameDay!;
+    expect(same).toMatch(/netCharm is not split by expiration; over several expirations this answer does not show its same-day share; as general possibilities, not a reading of this answer:/);
+    expect(same).toMatch(/narrows onto their strikes until one minute before that close and holds that shape after it \(4:15 PM is the default-window cutoff, not a repricing boundary/);
+    expect(g().concentration).toMatch(/its inverse is the effective number of equally weighted strikes, so it reads about 1 over the number of strikes only when gamma is spread evenly/);
+    for (const m of ['repriced', 'frozen-gamma', 'mixed']) {
+      expect(g({ coverage: { ...coverage(), gammaFlipMethod: m } }).flipMethod).toContain(`The flip method (coverage.gammaFlipMethod, not a coverage status) is "${m}":`);
+    }
+    expect(g({ events: null }).eventsUnread).toMatch(/could not be read - unknown, not no events;/);
+    expect(g({ events: null }).eventsUnread).toMatch(/a separate dividends or earnings lookup lists only the dates on file, so finding none there does not show that none is scheduled/);
+  });
+
+  it('the same-day totals, empty event lists, held gamma over complete coverage', () => {
+    const same = g({ byExpiration: [entry({ daysToExpiration: 0 })] }).sameDay!;
+    expect(same).toMatch(/^On same-day legs, vanna, charm and vomma change sharply with small spot moves and time to expiry: one netCharm reading is not a steady rate into the close\. A same-day expiration's legs leave vanna, charm and vomma one minute before the engine's close for that date \(4:00 PM New York on a regular day\) and stay in gamma, delta and vega; the expiration itself stays in the default window until 4:15 PM New York, so from then until 4:15 those three totals neither include nor move with its legs\. netCharm is not split by expiration/);
+    expect(same).toMatch(/not a reading of this answer: charm near the money can be the largest term in the book, a same-day leg's vanna changes sign near its strike, and on an expiration afternoon netCharm can be mostly the same-day legs and the clock\./);
+    expect(same).not.toMatch(/1:00 PM|early close/);
+    const read = g({ events: { from: '2026-09-10', through: '2026-11-20', earnings: [], exDividends: [] }, byExpiration: [entry()] }).events!;
+    expect(read).toMatch(/the top-level events lists the dates on file from `from` through `through`\. An empty list or a null date means none on file, not none scheduled:/);
+    expect(read).toMatch(/so for a fund or ETF an empty or null events answer says little\.$/);
+    for (const m of ['frozen-gamma', 'mixed']) {
+      const line = g({ coverage: { ...coverage(), gammaFlipMethod: m } }).flipMethod!;
+      expect(line).toMatch(/can materially move the level or create one where there was none, even over complete coverage\./);
+      expect(line).not.toMatch(/whatever the coverage/);
+    }
+    expect(g({ coverage: { ...coverage(), gammaFlipMethod: 'repriced' } }).flipMethod).toMatch(/coverage\.gammaFlip counts every leg that entered the sweep, repriced or held: complete means every counted leg entered it, and it can read complete under "mixed" or "frozen-gamma"; the method, not the count, says whether legs were repriced or held\./);
+    const nullFlip = g({ ...snap({ gammaFlip: null }), coverage: { ...coverage(), gammaFlipSearchStatus: 'not-found' } });
+    expect(nullFlip.levelStatus).toMatch(/Here gammaFlip's null over complete coverage \(every counted leg entered the search\) is a search result, not withheld, /);
+    expect(nullFlip.levelStatus).toContain('and not proof of no flip: sampling within 20% of spot can miss two crossings in one interval or a crossing outside the range. See coverage.gammaFlipSearchStatus.');
+  });
+
+  it('the same-day lead carries its conclusion, and the null flip its caveat in the same sentence', () => {
+    const same = g({ byExpiration: [entry({ daysToExpiration: 0 })] }).sameDay!;
+    expect(same).toMatch(/^On same-day legs, vanna, charm and vomma change sharply with small spot moves and time to expiry: one netCharm reading is not a steady rate into the close\. A same-day expiration's legs leave/);
+    const nullFlip = g({ ...snap({ gammaFlip: null }), coverage: { ...coverage(), gammaFlipSearchStatus: 'not-found' } });
+    // lifted alone, "a search result, not withheld" dropped the caveat in the next sentence
+    expect(nullFlip.levelStatus).toContain("Here gammaFlip's null over complete coverage (every counted leg entered the search) is a search result, not withheld, and not proof of no flip: sampling within 20% of spot can miss two crossings in one interval or a crossing outside the range. See coverage.gammaFlipSearchStatus.");
+    expect(g().levelStatus).not.toMatch(/not proof of no flip/);
+  });
+
+  it('a found flip says it is the crossing nearest spot, in the guide', () => {
+    // Keep the nearest-crossing rule in the guide alongside the other flip caveats.
+    expect(g().levelStatus).toMatch(/gammaFlip is nearest to spot among crossings found by sampling; nearer or farther crossings may be missed\.$/);
+    const nullFlip = g({ ...snap({ gammaFlip: null }), coverage: { ...coverage(), gammaFlipSearchStatus: 'not-found' } });
+    expect(nullFlip.levelStatus).not.toMatch(/nearest to spot among crossings/);
+  });
+
+  it('legEligibility: on a partial or unmeasured metric', () => {
+    expect(g().legEligibility).toBeUndefined();
+    expect(g({ coverage: coverage(824, 800) }).legEligibility).toMatch(/which legs were summed/);
+  });
+
+  it('inputs: always the inputs line; the stored rate, the profile yield and the spot clock when they apply', () => {
+    expect(g().inputs).toMatch(/never defaulted/);
+    const resolved = { S: { value: 120, source: 'broker-moomoo', asOf: '2026-09-10T14:30:00Z', stale: false }, r: { value: 0.04, source: 'fred', asOf: '2026-09-09' }, q: { value: 0.01, source: 'profile_yield', asOf: '2026-08-01' } };
+    const x = g({ resolved, provider: 'moomoo' });
+    expect(x.rateSource).toMatch(/3-month Treasury/);
+    expect(x.profileYield).toMatch(/moves slightly with spot/);
+    expect(x.spotClock).toMatch(/moomoo[^.]*update time/);
+    const supplied = g({ resolved: { ...resolved, r: { value: 0.04, source: 'supplied', asOf: null }, q: { value: 0, source: 'supplied', asOf: null } } });
+    expect(supplied.rateSource).toBeUndefined();
+    expect(supplied.profileYield).toBeUndefined();
+  });
+
+  it('the budget line and rateLimit inside the answer; the proxy warnings surfaced', () => {
+    const shaped = d({ warnings: ['MU: the stored dividend yield could not be read; retry, or supply q explicitly'] }, { rateLimit: BUDGET });
+    expect(shaped.rateLimit).toEqual(BUDGET);
+    expect(shaped.guide.rateLimit).toMatch(/budget after this call/);
+    expect(shaped.guide.rateLimit).toMatch(/reserves the rest once its count is known/);
+    expect(shaped.warnings).toEqual(['MU: the stored dividend yield could not be read; retry, or supply q explicitly']);
+    expect(d().warnings).toBeUndefined();
+    expect(d().rateLimit).toBeUndefined();
+  });
+
+  it('rowsLimited: rows dropped for size say so, and the guide and the budget fit inside the shaper\'s own budget', () => {
+    const wide = Array.from({ length: 300 }, (_, i) => ({ ...strikeRow(60 + i * 0.5, 1 + Math.sqrt(i + 2) / 7), netVega: 15 + Math.sqrt(i) / 3 }));
+    const shaped = d({ byStrike: wide, byExpiration: [entry({ daysToExpiration: 0 })], expirationSelection: 'nearest' }, { strikeRange: 150, rateLimit: BUDGET });
+    expect(shaped.strikes.limitedBySize).toBe(true);
+    expect(shaped.guide.rowsLimited).toMatch(/farthest from spot first/);
+    expect(new TextEncoder().encode(JSON.stringify(shaped)).length).toBeLessThanOrEqual(49_152);
+  });
+});
+
+describe('dealer', () => {
+  const g = (over: Record<string, unknown> = {}) => (summarizeDealerPositioning(live(over)) as any).guide as Record<string, string>;
+  it('the spotSides legend beside a split, and one clause when the route sent none', () => {
+    const split = g({ spotSides: { atSpotStrike: 120, above: { netGex: 1 }, below: { netGex: -1 }, callOpenInterestShareAbove: 0.4 } }).spotSides;
+    expect(split).toMatch(/strictly above spot/);
+    expect(split).toMatch(/atSpotStrike/);
+    expect(split).toMatch(/callOpenInterestShareAbove/);
+    expect(split).toMatch(/every call leg's size is known/);
+    expect(g().spotSides).toMatch(/no split/);
+  });
+  it('the refresh scaling, the expiration-afternoon charm and the after-close shape', () => {
+    expect(g().clock).toMatch(/spot squared/);
+    const sameDay = g({ byExpiration: [{ expiration: '2026-09-10', daysToExpiration: 0, netGamma: 1, coverage: {} }] }).sameDay;
+    expect(sameDay).toMatch(/mostly the same-day legs and the clock/);
+    expect(sameDay).toMatch(/holds that shape after it/);
+  });
+  it('corrected: atmIv is the one usable leg\'s IV when only one has one; null when neither', () => {
+    const move = g({ byExpiration: [{ expiration: '2026-09-18', daysToExpiration: 8, netGamma: 1, coverage: {}, expectedMove: { strike: 120, callMid: 2, putMid: 2, straddle: 4, pctOfSpot: 0.03, lower: 116, upper: 124, atmIv: 0.3, ivOneSigma: 5 } }] }).expectedMove;
+    expect(move).toMatch(/the one usable leg's IV when only one has one/);
+    expect(move).toMatch(/null only when neither/);
+  });
+});
+
+describe('dealer guide obligation audit - emitted null and coverage rules', () => {
+  const budget = { provider: 'tastytrade', limit: 120, remaining: 100, resetSeconds: 30 };
+  async function wireFor(response: Record<string, unknown>, args: Record<string, unknown> = {}) {
+    const server = new McpServer({ name: 'dealer-obligation-test', version: '1' });
+    register(server, {
+      get: async (_path: string, _params?: Record<string, string>, onRateLimit?: (value: LiveRateLimit) => void) => {
+        onRateLimit?.(budget);
+        return response;
+      },
+    } as unknown as LiveApiClient);
+    const client = new Client({ name: 'dealer-obligation-consumer', version: '1' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({ name: 'get_live_dealer_positioning', arguments: { symbol: 'TEST', ...args } });
+      expect(result.isError).not.toBe(true);
+      const wire = result.structuredContent as any;
+      expect(JSON.parse((result.content as { type: string; text: string }[])[0].text)).toEqual(wire);
+      return wire;
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }
+
+  it('distinguishes an unavailable level from a null over complete coverage', async () => {
+    for (const rawFlip of [undefined, 'invalid', null]) {
+      const wire = await wireFor(live({ snapshot: { ...live().snapshot, gammaFlip: rawFlip } }));
+      expect(wire.levels.gammaFlip).toBeNull();
+      expect(wire.coverage.gammaFlip.status).toBe('complete');
+      expect(wire.levelStatus.gammaFlip).toBe(rawFlip === null ? 'complete' : 'unavailable');
+      expect(wire.guide.levelStatus).toMatch(/missing or invalid.*level.*unavailable/i);
+      expect(wire.guide.levelStatus).toMatch(/reported null.*coverage status/i);
+    }
+  });
+
+  it('defines usable IV beside a fully repriced flip too', async () => {
+    const wire = await wireFor(live({ coverage: { ...coverage(), gammaFlipMethod: 'repriced' } }));
+    expect(wire.coverage.gammaFlipMethod).toBe('repriced');
+    expect(wire.guide.flipMethod).toMatch(/finite, above 0 and at most 5/);
+    expect(wire.guide.flipMethod).not.toMatch(/held gamma is an approximation/);
+  });
+
+  it('retains a partial side netGex while withholding its call and put GEX', async () => {
+    const side = {
+      strikes: 1, netGamma: 5, callGamma: 5, putGamma: 0, gammaCoverage: { total: 2, included: 1 },
+      callOpenInterest: 10, putOpenInterest: 20,
+      callOpenInterestCoverage: { total: 1, included: 1 }, putOpenInterestCoverage: { total: 1, included: 1 },
+    };
+    const wire = await wireFor(live({ spotSides: { above: side, below: side, atSpotStrike: 120, callOpenInterestShareAbove: 0.4 } }));
+    expect(wire.spotSides.above).toMatchObject({ netGex: 5, callGex: null, putGex: null, status: { netGex: 'partial' } });
+    expect(wire.guide.spotSides).toMatch(/netGex[^.;]*partial sums/);
+    expect(wire.guide.spotSides).toMatch(/callGex and putGex.*only under complete or empty gamma coverage/);
+  });
+
+  it('coverage still explains eligible legs when a partial metric value is missing', async () => {
+    for (const [metric, field] of [['gamma', 'netGamma'], ['delta', 'netDelta'], ['vega', 'netVega'], ['vanna', 'netVanna'], ['charm', 'netCharm'], ['vomma', 'netVomma']]) {
+      const wire = await wireFor(live({
+        coverage: { ...coverage(), [metric!]: { total: 2, included: 1 } },
+        snapshot: { ...live().snapshot, [field!]: null },
+      }));
+      expect(wire.coverage[metric!].status).toBe('partial');
+      expect(wire.guide.legEligibility).toMatch(/which legs were summed/);
+    }
+    expect((await wireFor(live())).guide.legEligibility).toBeUndefined();
+    expect((await wireFor(live({ coverage: {} }))).guide.legEligibility).toBeUndefined();
+  });
+
+  it('successful batch-broker answers explain a call larger than the whole budget', async () => {
+    for (const provider of ['tastytrade', 'moomoo', null]) {
+      const wire = await wireFor(live({ provider }));
+      expect(wire.guide.rateLimit).toMatch(/bigger than the whole budget.*runs alone on an empty window/);
+      expect(wire.guide.rateLimit).toMatch(/charged in full.*reset only while something else is in it/);
+    }
+  });
+
+  it('hourly broker Greeks do not freeze the engine-computed charm between refreshes', async () => {
+    for (const provider of ['tradier', null]) {
+      const wire = await wireFor(live({ provider }));
+      expect(wire.guide.tradierGreeks).toMatch(/refreshes its Greeks about hourly/);
+      expect(wire.guide.tradierGreeks).toMatch(/engine computes vanna, charm and vomma from IV and time to expiry/);
+      expect(wire.guide.tradierGreeks).toMatch(/those totals can change with spot and the clock between refreshes/);
+    }
+    expect((await wireFor(live({ provider: 'tastytrade' }))).guide.tradierGreeks).toBeUndefined();
+  });
+
+  it('a single requested same-day expiration does not make its own reported charm share unknown', async () => {
+    const wire = await wireFor(live({
+      asOf: '2026-09-18T19:00:00.000Z',
+      expirations: ['2026-09-18'], expirationSelection: 'requested',
+      byExpiration: [{ expiration: '2026-09-18', daysToExpiration: 0, netGamma: 140_000, netDelta: -3_400_000, coverage: coverage() }],
+    }), { expiration: '2026-09-18' });
+    expect(wire.window.expirations).toEqual(['2026-09-18']);
+    expect(wire.exposure.netCharm).toBe(-450);
+    expect(wire.exposureStatus.netCharm).toBe('complete');
+    expect(wire.guide.sameDay).not.toMatch(/how much of it is same-day is unknown/);
+    expect(wire.guide.sameDay).toMatch(/over several expirations this answer does not show its same-day share/);
+  });
+
+  it('the 4:15 cutoff preserves a named expiration and the default window with no later listing', async () => {
+    for (const selection of ['requested', 'nearest']) {
+      const wire = await wireFor(live({
+        asOf: '2026-09-18T20:16:00.000Z',
+        expirations: ['2026-09-18'], expirationsAvailable: 1, expirationSelection: selection,
+        snapshot: { ...live().snapshot, netVanna: 0, netCharm: 0, netVomma: 0 },
+        coverage: { ...coverage(), vanna: { total: 824, included: 0 }, charm: { total: 824, included: 0 }, vomma: { total: 824, included: 0 } },
+        byExpiration: [{ expiration: '2026-09-18', daysToExpiration: 0, netGamma: 140_000, netDelta: -3_400_000, coverage: coverage() }],
+      }), selection === 'requested' ? { expiration: '2026-09-18' } : {});
+      expect(wire.window.expirations).toEqual(['2026-09-18']);
+      expect(wire.guide.sameDay).not.toMatch(/4:15 PM only drops the expiration/);
+      expect(wire.guide.sameDay).toMatch(/4:15 PM is the default-window cutoff, not a repricing boundary/);
+      expect(wire.guide.sameDay).toMatch(/named expirations and those with no later listing are kept/);
+    }
+  });
+
+  it('the engine clock can reach the one-minute floor at 12:59 on an early-close date', async () => {
+    // The shared engine's current clock: 2026-11-27 closes at 13:00 New York. A usable IV leg is counted for
+    // charm at 12:58 and excluded at 12:59; the flip remains repriced at the one-minute floor. The default
+    // window's separate selection cutoff stays at 16:15. These are received engine results, not a local clock.
+    for (const [asOf, included, netCharm] of [
+      ['2026-11-27T17:58:00.000Z', 1, -79_405],
+      ['2026-11-27T17:59:00.000Z', 0, 0],
+    ] as const) {
+      const wire = await wireFor(live({
+        asOf, expirations: ['2026-11-27'], expirationSelection: 'requested',
+        snapshot: { ...live().snapshot, netCharm },
+        coverage: { ...coverage(1), charm: { total: 1, included }, gammaFlipMethod: 'repriced' },
+        byExpiration: [{ expiration: '2026-11-27', daysToExpiration: 0, coverage: coverage(1), expectedMove: null }],
+      }), { expiration: '2026-11-27' });
+      expect(wire.exposure.netCharm).toBe(included === 1 ? -79_405 : null);
+      expect(wire.coverage.charm.status).toBe(included === 1 ? 'complete' : 'unmeasured');
+      expect(wire.coverage.gammaFlipMethod).toBe('repriced');
+      expect(wire.guide.roots).toMatch(/timed to the engine's close for that date \(4:00 PM New York on a regular day\)/);
+      expect(wire.guide.sameDay).toMatch(/one minute before the engine's close for that date \(4:00 PM New York on a regular day\)/);
+      expect(wire.guide.sameDay).toMatch(/repriced gamma narrows onto their strikes until one minute before that close and holds that shape after it/);
+      for (const line of [wire.guide.roots, wire.guide.sameDay, wire.guide.legEligibility ?? '']) expect(line).not.toMatch(/1:00 PM|early close/);
+      expect(wire.guide.sameDay).toMatch(/4:15 PM is the default-window cutoff, not a repricing boundary/);
+      if (included === 0) {
+        expect(wire.guide.legEligibility).toMatch(/more than a minute remains before the engine's close for its expiration day \(4:00 PM New York on a regular day\)/);
+      }
+    }
+  });
+
+  it('fits simultaneous guide rules and partial rows together without losing level rows or either channel', async () => {
+    const rows = Array.from({ length: 1_600 }, (_, i) => ({
+      ...strikeRow(40 + i * 0.5, 1 + Math.sqrt(i + 2) / 7),
+      callOpenInterest: 123456, putOpenInterest: 654321,
+      coverage: { ...coverage(2), vega: { total: 2, included: 1 } },
+    }));
+    const expiration = {
+      expiration: '2026-09-18', daysToExpiration: 0,
+      netGamma: 100, netDelta: 10, callGamma: 120, putGamma: -20, grossGamma: 140, shareOfGrossGamma: 0.5,
+      coverage: { gamma: { total: 2, included: 2 }, delta: { total: 2, included: 2 } },
+      expectedMove: { strike: 120, callMid: 2, putMid: 2.1, straddle: 4.1, pctOfSpot: 0.034, lower: 115.9, upper: 124.1, atmIv: 0.3, ivOneSigma: 5.1, root: 'SPXW' },
+      expectedMoveUnavailable: null, events: { earningsOnOrBefore: null, exDividendOnOrBefore: null },
+    };
+    const response = live({
+      provider: null, expirationSelection: 'nearest', expirations: ['2026-09-18', '2026-09-25'],
+      byStrike: rows,
+      snapshot: { ...live().snapshot, gammaFlip: null, regime: 'neutral', callWall: 250, putWall: 50, absGamma: 260 },
+      coverage: { ...coverage(3200), vega: { total: 3200, included: 1600 }, gammaFlipMethod: 'mixed', gammaFlipSearchStatus: null },
+      byExpiration: [expiration, { ...expiration, expiration: '2026-09-25', daysToExpiration: null, expectedMove: null, events: null }],
+      events: { from: '2026-09-18', through: '2026-09-25', earnings: [], exDividends: [] },
+      resolved: { S: { value: 120, asOf: null, stale: null }, r: { value: 0.04, source: 'fred-DGS3MO', asOf: null }, q: { value: 0.01, source: 'profile_yield', asOf: '2026-09-17' } },
+      warnings: ['A stored yield could not be used; the profile fallback was used.'],
+    });
+    const wire = await wireFor(response, { strikeWindowPct: 50 });
+    expect(Buffer.byteLength(JSON.stringify(wire))).toBeLessThanOrEqual(49_152);
+    expect(wire.responseBudget).toBeUndefined();
+    expect(wire.rateLimit).toEqual(budget);
+    expect(wire.warnings).toEqual(['A stored yield could not be used; the profile fallback was used.']);
+    expect(wire.strikes.limitedBySize).toBe(true);
+    expect(wire.strikes.returned).toBeGreaterThan(1);
+    expect(wire.strikes.returned).toBeLessThan(150);
+    expect(wire.strikes.atLevels.map((r: { strike: number }) => r.strike)).toEqual([50, 250, 260]);
+    for (const key of ['exposure', 'walls', 'levelStatus', 'dealerRegime', 'magnet', 'concentration', 'flipMethod', 'flipSearch', 'rows', 'spotSides', 'rowsAtLevels', 'rowsLimited', 'inWindow', 'byExpiration', 'expectedMove', 'events', 'eventsUnread', 'roots', 'strikeCounts', 'windowRoll', 'windowMoves', 'clock', 'tradierGreeks', 'cache', 'moomooDelay', 'sameDay', 'legEligibility', 'inputs', 'rateSource', 'profileYield', 'spotClock', 'rateLimit']) {
+      expect(wire.guide[key], key).toBeString();
+    }
+    expect(wire.guide.levelStatus).toMatch(/null over complete coverage/);
+    expect(wire.guide.dealerRegime).toMatch(/"neutral"/);
+    const kept = wire.strikes.nearSpot.map((r: { strike: number }) => r.strike);
+    const distance = Math.max(...kept.map((strike: number) => Math.abs(strike - 120)));
+    expect(rows.filter((r) => r.strike >= 60 && r.strike <= 180 && Math.abs(r.strike - 120) < distance && !kept.includes(r.strike))).toEqual([]);
   });
 });

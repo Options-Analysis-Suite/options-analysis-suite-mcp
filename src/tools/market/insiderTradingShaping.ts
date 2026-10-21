@@ -265,7 +265,9 @@ export function groupInsiderTrades(rawTrades: unknown): GroupedInsiderTrade[] {
     // A line without a share count is unknown, never 0 shares: it is left out of the event's shares and value and
     // counted beside them.
     const sharesTransacted = toFiniteNumber(trade.securitiesTransacted);
-    const price = toFiniteNumber(trade.price);
+    // A price of 0 or below is no price, as the market scope and the quarterly statistics read it
+    const filedPrice = toFiniteNumber(trade.price);
+    const price = filedPrice != null && filedPrice > 0 ? filedPrice : null;
     const priced = price != null && sharesTransacted != null && sharesTransacted > 0;
     const totalValueContribution = priced ? price * sharesTransacted : 0;
     const sharesOwned = toFiniteNumber(trade.securitiesOwned);

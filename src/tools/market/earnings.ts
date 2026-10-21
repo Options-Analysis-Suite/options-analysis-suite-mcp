@@ -3,7 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ProxyClient } from '../../proxy/proxyClient.js';
 import { LiveApiError, type LiveApiClient } from '../../proxy/liveApiClient.js';
 import { ApiError } from '../../types.js';
-import { MAX_RESPONSE_BYTES, sanitizeMcpWireOutput, toolHandler, utf8ByteLength } from '../helpers.js';
+import { MAX_RESPONSE_BYTES, sanitizeMcpWireOutput, toolHandler, utf8ByteLength, WIRE_CEILING_BYTES } from '../helpers.js';
 import { marketDataOutputSchema } from '../outputSchemas.js';
 import { RESPONSE_MARGIN_BYTES } from './dealerPositioningShaping.js';
 import { summarizeEarnings, summarizeEarningsMoves } from './earningsShaping.js';
@@ -85,10 +85,12 @@ export function register(server: McpServer, client: ProxyClient, liveClient: Liv
           if (!(error instanceof ApiError)) throw error;
           block = error instanceof LiveApiError ? transcriptRefusal(error) : transcriptUnreadable();
         }
-        // The last word on size, for a refusal too: the whole answer measured exactly as the guard measures it, so a
-        // block whose fixed fields alone do not fit gives way to a notice rather than costing the history and moves.
+        // The last word on size, for a refusal too: the whole answer measured exactly as the guard measures it, against
+        // the guard's own line (WIRE_CEILING_BYTES, not the full 51,200: an answer between the two would pass here and
+        // then lose list items to the guard), so a block whose fixed fields alone do not fit gives way to a notice
+        // rather than costing the history and moves.
         const fits = (candidate: Record<string, unknown>) =>
-          utf8ByteLength(JSON.stringify(sanitizeMcpWireOutput({ ...out, transcript: candidate }))) <= MAX_RESPONSE_BYTES;
+          utf8ByteLength(JSON.stringify(sanitizeMcpWireOutput({ ...out, transcript: candidate }))) <= WIRE_CEILING_BYTES;
         const fitted = fitTranscriptBlock(block, fits);
         if (fitted !== undefined) out.transcript = fitted;
       }

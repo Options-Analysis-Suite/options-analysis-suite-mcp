@@ -12,9 +12,12 @@ import { TokenManager } from './auth/tokenManager.js';
 import { ProxyClient } from './proxy/proxyClient.js';
 import { createMcpServer } from './server.js';
 import {
+  LOGO_CONTENT_TYPE,
+  LOGO_PATH,
   MCP_ICON_CONTENT_TYPE,
   MCP_ICON_PATH,
   getBrandingHomeHtml,
+  getLogoBytes,
   getMcpIconBytes,
 } from './branding.js';
 import { AuthError, SubscriptionError } from './types.js';
@@ -148,7 +151,7 @@ function decodeApiKey(apiKey: string): { email: string; password: string } | nul
 /** Deduplicate concurrent auth initialization for the same API key */
 const pendingAuth = new Map<string, Promise<AuthEntry>>();
 
-/** Get or create an authenticated client for an API key (cached by stable owner identity) */
+/** Get or create an authenticated client for an API key */
 async function getAuth(apiKey: string): Promise<AuthEntry> {
   const ownerKey = ownerKeyFor(apiKey);
   const cached = authCache.get(ownerKey);
@@ -334,6 +337,26 @@ export const handleHttpRequest = async (
       'Content-Length': icon.byteLength,
     });
     res.end(req.method === 'HEAD' ? undefined : icon);
+    return;
+  }
+
+  // The sign-in pages' logo (their CSP admits images from this origin only). A copy that did not reach the image
+  // answers 404 here and nothing else; the pages render without it.
+  if (pathname === LOGO_PATH && (req.method === 'GET' || req.method === 'HEAD')) {
+    let logo: Buffer;
+    try {
+      logo = getLogoBytes();
+    } catch {
+      res.writeHead(404);
+      res.end('Not Found');
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': LOGO_CONTENT_TYPE,
+      'Cache-Control': 'public, max-age=86400',
+      'Content-Length': logo.byteLength,
+    });
+    res.end(req.method === 'HEAD' ? undefined : logo);
     return;
   }
 

@@ -98,7 +98,7 @@ type SectorHistoryResponse = { series?: Array<{ date?: string; pe?: number | nul
 export const SECTOR_EXCHANGES = ['NYSE', 'NASDAQ', 'AMEX'] as const;
 
 export const SECTORS_NOTE = 'Each group\'s `pe` is its price-to-earnings ratio among its companies listed on that exchange, and `changePct` the average daily price change of those companies that day, in percent (0.5 is half a percent); '
-  + 'groups are kept for the NYSE, NASDAQ and AMEX only, and a null is a value not on record for the day. `date` is the newest day on file for every exchange with recent data (else the newest day on file for the most exchanges).';
+  + 'groups are kept for the NYSE, NASDAQ and AMEX only, and a null is a value not on record for the day. `date` is the newest day on file for every exchange with recent data (else the newest day on file for the most exchanges), so it can trail one exchange\'s newest day.';
 
 function sectorCell(row: SectorRow): { pe: number | null; changePct: number | null } {
   return { pe: roundPe(finite(row.pe)), changePct: round(finite(row.changePct), 3) };

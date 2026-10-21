@@ -33,9 +33,10 @@ if (isRemote) {
   }
 
   await copyFile('./mcp-icon.png', `${DIST}/mcp-icon.png`);
+  await copyFile('./logo.webp', `${DIST}/logo.webp`);
 
   console.log('✓ Bundle: dist-remote/remote.js');
-  console.log('✓ Copied mcp-icon.png to dist-remote/');
+  console.log('✓ Copied mcp-icon.png and logo.webp to dist-remote/');
   console.log('\nRemote build complete. Deploy dist-remote/ to Railway.');
 } else {
   // --- Stdio (Claude Desktop) build ---

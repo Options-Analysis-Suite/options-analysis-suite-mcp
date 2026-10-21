@@ -29,7 +29,7 @@ export function register(server: McpServer, client: LiveApiClient): void {
   server.registerTool(
     'get_regime_fits',
     {
-      title: 'Model Calibration Fits (Pro)',
+      title: 'Model Calibration Fits',
       description:
         'Get the calibrated parameters and fit quality for the eight pricing models (Black-Scholes, Heston, SABR, Variance Gamma, Merton, Kou, Bates, eSSVI) for one symbol. '
         + 'Answers "what parameters were fitted, and how well did each model fit" - use get_regime instead for which market regime a symbol is in, which is a different question and a different dataset. '
@@ -37,8 +37,7 @@ export function register(server: McpServer, client: LiveApiClient): void {
         + 'failedQualityCheck true means the fit was REJECTED: it did not converge, or fewer than three options could be repriced, or its error exceeded the threshold. Only the first substitutes the parameters; the other two leave a real fitted set that was then rejected. Either way the fit was not accepted, so do not present those parameters as a good fit for this symbol. '
         + '`daysFailingQualityCheck` counts a model\'s fits in the window that failed the check and `daysQualityCheckUnreported` the ones that did not report it (`failedQualityCheck` null), which are unknown, not passing: only the rest of `fitDays` passed. '
         + 'Each model\'s `paramsAtBounds` names the parameters its latest fit finished exactly on an optimizer bound: such a parameter may be held there by the bound rather than set by the market, so treat it with caution even when `failedQualityCheck` is false (SPY\'s Kou p at 0.05 and eta1 at 30 on 2026-09-30). It records where the fit finished, not how it got there: a parameter can also finish on a bound it started at. An empty list means none, and null means the fit did not report it: only Merton, Kou and Bates fits report bounds, so it is always null for the other five models, and for Merton, Kou and Bates fits recorded before their calibration did. '
-        + 'Coverage is the regime universe of about 124 symbols; a symbol outside it returns an empty history rather than an error. '
-        + 'Requires a Pro subscription or above.',
+        + 'Coverage is the regime universe of about 124 symbols; a symbol outside it returns an empty history rather than an error.',
       inputSchema: {
         symbol: z.string().describe('Ticker symbol (e.g., AAPL, SPY)'),
         days: z.number().int().min(1).max(365).optional()

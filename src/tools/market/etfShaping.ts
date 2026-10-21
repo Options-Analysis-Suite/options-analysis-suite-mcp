@@ -1,5 +1,5 @@
 /**
- * The `etf` block of get_company_profile (phase C): fund facts, the latest holdings file as reported, weights, with
+ * The `etf` block of get_company_profile: fund facts, the latest holdings file as reported, weights, with
  * the server's notes. A withheld group (its stored identity no longer the fund's) omits its fields and says why. Key
  * names are camelCase; values carry no vendor name. The paged `holdings` list trims ITSELF to the byte budget and
  * sets its meta from what it keeps, so the response guard never cuts a list behind a meta that still says 100.

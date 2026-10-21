@@ -1,5 +1,7 @@
-import { MAX_RESPONSE_BYTES, sanitizeMcpWireOutput, utf8ByteLength } from '../helpers.js';
+import { sanitizeMcpWireOutput, utf8ByteLength, WIRE_CEILING_BYTES } from '../helpers.js';
 import { omittedRowsSentence, readOmittedRows } from './omittedRows.js';
+import type { LiveRateLimit } from '../../proxy/liveApiClient.js';
+import { INDEX_UNDERLYINGS, newYorkSession, rateLimitGuide, type Guide } from '../liveGuide.js';
 
 /**
  * Shape a LIVE single-expiration chain for a model.
@@ -67,6 +69,13 @@ export interface LiveChainResponse {
 export interface ShapeOptions {
   /** Strikes to keep either side of spot. */
   strikeRange?: number;
+  /**
+   * The live-broker budget after this call: given, it rides INSIDE the fit with the rows and
+   * the guide, so the answer the guard measures is the answer that was fitted. Absent: no rateLimit field.
+   */
+  rateLimit?: LiveRateLimit | null;
+  /** True when the caller named no expiration, so the book is the nearest one that may still trade. */
+  expirationOmitted?: boolean;
 }
 
 const DEFAULT_STRIKE_RANGE = 8;
@@ -285,7 +294,7 @@ export function summarizeLiveChain(response: LiveChainResponse, options: ShapeOp
         .map((entry) => ({ root: entry.root, contracts: entry.contracts }))
     : null;
 
-  const shape = (effective: number) => ({
+  const body = (effective: number) => ({
     symbol: response.symbol ?? null,
     expiration: response.expiration ?? null,
     // PROVENANCE TRAVELS WITH THE SUMMARY. A model relaying a quote has to be
@@ -312,7 +321,8 @@ export function summarizeLiveChain(response: LiveChainResponse, options: ShapeOp
       narrowedForSize: effective < range,
       note: `Near-the-money strikes plus 25-delta wings. ${callTotals.contracts + putTotals.contracts} contracts in the full chain.`
         + (response.spotStale === true ? ' The spot printed before the last session\'s open (spotTime), so the at-the-money pair and the strike window are read against a stale price.' : '')
-        + (response.openInterestUnpublished === true ? ' Open interest withheld: every contract read zero at the broker, an unpublished figure, not an empty book.' : '')
+        + (response.openInterestUnpublished === true ? ' Open interest withheld: every contract read zero at the broker, an unpublished figure, not an empty book; the nonempty sides\' openInterest and putCallOpenInterestRatio are null (unknown, not zero), and the withholding applies only to a chain of at least 20 contracts.'
+          + (callTotals.contracts === 0 || putTotals.contracts === 0 ? ' An empty side still has openInterest 0 over 0 contracts.' : '') : '')
         + (severalRoots ? ` The date is listed under the ${roots!.join(' and ')} roots, different series (their settlement and the day their trading stops differ): each row is one contract under its own \`root\`, so a strike shows a row per root, never merged; the at-the-money pair and the 25-delta wings are the ${primaryRoot ?? 'primary'} root's (the most open interest), and the totals count every root's contracts.` : '')
         + (singleForeignRoot !== null
           ? (rootedContracts === calls.length + puts.length
@@ -320,7 +330,9 @@ export function summarizeLiveChain(response: LiveChainResponse, options: ShapeOp
             : ` ${rootedContracts} of ${calls.length + puts.length} contracts are under the ${singleForeignRoot} root, not ${ownSpelling}; the rest name root null, none from the broker.`)
           : '')
         + (excluded !== null ? ' ' + excluded.map((entry) => `${entry.contracts} contracts under the ${entry.root} root`).join(' and ') + ' (an adjusted series, a different deliverable at the same strikes) are left out of the rows and the totals.' : '')
-        + (omitted !== null ? ' ' + omittedRowsSentence(omitted, 'the rows and the totals') : ''),
+        + (omitted !== null ? ' ' + omittedRowsSentence(omitted, 'the rows and the totals') : '')
+        // Why the window is narrower than asked.
+        + (effective < range ? ' The rows at the requested range would exceed the response budget, so the window was narrowed evenly on both sides: view.strikeRange is the range returned.' : ''),
     },
     totals: {
       calls: callTotals,
@@ -343,6 +355,12 @@ export function summarizeLiveChain(response: LiveChainResponse, options: ShapeOp
       puts: aroundSpot(puts, spot, effective, primaryRoot, roots),
     },
   });
+  // The budget and the guide are part of the answer the fit measures.
+  const shape = (effective: number) => {
+    const b = body(effective);
+    const guide = chainGuide(b, { response, severalRoots, singleForeignRoot, excluded, options });
+    return { ...b, ...('rateLimit' in options ? { rateLimit: options.rateLimit ?? null } : {}), guide };
+  };
 
   // review: with gamma, theta, vega and last on every row, 81
   // rows a side of full-precision decimals on a dense grid (475 to 525 in
@@ -350,9 +368,11 @@ export function summarizeLiveChain(response: LiveChainResponse, options: ShapeOp
   // FIRST rows of each array, 480 to 504.5 of a requested 480 to 520. So the
   // window is narrowed here, evenly, to the widest range whose payload the
   // guard will pass whole (it measures the same sanitized compact JSON), and
-  // `view` says so. A single row that cannot fit is left to the guard.
+  // `view` says so. A single row that cannot fit is left to the guard. The line is the guard's own,
+  // WIRE_CEILING_BYTES: fitted to the full 51,200, an answer between the two would pass
+  // here and then lose its last rows to the guard - the lopsided window this narrowing exists to prevent.
   const fits = (payload: unknown) =>
-    utf8ByteLength(JSON.stringify(sanitizeMcpWireOutput(payload))) <= MAX_RESPONSE_BYTES;
+    utf8ByteLength(JSON.stringify(sanitizeMcpWireOutput(payload))) <= WIRE_CEILING_BYTES;
   let effective = range;
   let payload = shape(effective);
   while (effective > 0 && !fits(payload)) {
@@ -361,3 +381,195 @@ export function summarizeLiveChain(response: LiveChainResponse, options: ShapeOp
   }
   return payload;
 }
+
+type ShapedRow = Record<string, unknown> & { strike: number | null };
+
+/**
+ * The chain's guide emits each applicable reading rule under a stable key. Rows "shown"
+ * are every contract row anywhere in it: the at-the-money pair, the wings (chosen without a spot) and the window.
+ */
+function chainGuide(
+  b: Record<string, any>,
+  ctx: { response: LiveChainResponse; severalRoots: boolean; singleForeignRoot: string | null; excluded: Array<{ root: string; contracts: number }> | null; options: ShapeOptions },
+): Guide {
+  const { response, severalRoots, singleForeignRoot, excluded, options } = ctx;
+  const provider = response.provider ?? null;
+  const symbol = typeof response.symbol === 'string' ? response.symbol.toUpperCase() : null;
+  const spot: number | null = b.spotPrice;
+  const callRows: ShapedRow[] = [b.atm?.call, b.wings.call25Delta, ...b.nearTheMoney.calls].filter(Boolean);
+  const putRows: ShapedRow[] = [b.atm?.put, b.wings.put25Delta, ...b.nearTheMoney.puts].filter(Boolean);
+  const shown = [...callRows, ...putRows];
+  const any = (test: (row: ShapedRow) => boolean) => shown.some(test);
+  const g: Guide = {};
+
+  // The root rules.
+  const roots: string[] | null = Array.isArray(b.roots) ? b.roots : null;
+  const rootNull = any((row) => row.root === null);
+  const rootLines: string[] = [];
+  if (severalRoots) {
+    rootLines.push('Under several roots every row names its root; the primary root (root) is the one with the most open '
+      + 'interest over the date, the symbol\'s own root on a tie, as when the broker publishes no open interest.');
+  }
+  if (rootNull) rootLines.push('A row with root null is one the broker named no root for; it is not the primary root\'s.');
+  if (roots !== null && roots.length === 1 && singleForeignRoot === null && rootNull) {
+    rootLines.push('Under one root a row names root only where it differs: absent means the chain\'s root, null means '
+      + 'the broker named none.');
+  }
+  if (rootLines.length) g.root = rootLines.join(' ');
+  if (severalRoots || singleForeignRoot !== null || (symbol !== null && INDEX_UNDERLYINGS.has(symbol))) {
+    g.settlement = 'The root is the series, and series settle differently (SPX monthly AM, SPXW at the close; VIX '
+      + 'weeklies AM, XSP monthlies at the close): read the exchange\'s specification for the root, not a pattern.';
+  }
+  if (provider === 'public' && ((roots ?? []).includes('SPXW') || symbol === 'SPX')) {
+    g.publicSpx = 'Public lists SPX\'s options under SPXW only, even on a third Friday, so an SPX monthly there is the '
+      + 'PM-settled series.';
+  }
+  if (excluded !== null) {
+    const empty = b.totals.calls.contracts + b.totals.puts.contracts === 0;
+    g.excludedRoots = 'The rows keep the symbol\'s own root and the symbol plus one letter (SPXW, NDXP, RUTW, VIXW); an '
+      + 'adjusted series (a digit root, a different deliverable) is left out.'
+      + (empty ? ' Here the standard book is empty by listing, not an outage: the totals\' zeros over 0 contracts describe that empty book.' : '');
+  }
+  // Stated here, not by pointer to get_live_quote.
+  const spotTimeNull = b.spotTime === null;
+  const spotStaleNull = b.spotStale === null;
+  if (spotTimeNull || spotStaleNull || provider === 'moomoo') {
+    const lines = ['spotTime is the spot\'s print time where the spot is a last trade the broker timed, null for a close '
+      + 'or a mark standing in for the last or when no time was given; spotStale is true when that predates the 09:30 '
+      + 'New York open of the last session that has started, null when unknown - unknown, never fresh.'];
+    if (provider === 'moomoo') lines.push('On moomoo spotTime is the underlying snapshot\'s update time, not a print.');
+    g.spotClock = lines.join(' ');
+  }
+  const sides = [b.totals.calls, b.totals.puts];
+  if (sides.some((t) => t.contractsMissingVolume > 0 || t.contractsMissingOpenInterest > 0 || t.volume === null || t.openInterest === null)
+    || b.totals.putCallVolumeRatio === null || b.totals.putCallOpenInterestRatio === null) {
+    g.totals = 'The volume and open-interest totals add up only what the broker reported; contractsMissingVolume and '
+      + 'contractsMissingOpenInterest count the contracts it left out. A total is null (unknown, never 0) only when no '
+      + 'contract on that side reported one, and a reported 0 is a genuine 0; the put/call ratios are null when either '
+      + 'total is unknown or the call total is not above 0.';
+  }
+  if (shown.length) {
+    g.last = 'last is the broker\'s last traded price: it can be hours old and never stands in for mid.'
+      + (any((row) => row.last === null) ? ' A null last is no trade printed (a broker\'s 0 is no print and goes out null).' : '');
+  }
+  if (any((row) => row.mid === null)) {
+    g.mid = 'mid is the exact (bid + ask) / 2 only where both sides are quoted above zero; a zero bid (nobody bidding) '
+      + 'or a missing side leaves it null beside the ask and the broker\'s mark.';
+  }
+  const totalsNull = sides.some((t) => Object.values(t).some((v) => v === null))
+    || b.totals.putCallVolumeRatio === null || b.totals.putCallOpenInterestRatio === null;
+  if (totalsNull || any((row) => Object.values(row).some((v) => v === null))) {
+    g.nullIsUnknown = 'A null field means the broker published nothing for it, which is different from zero, except '
+      + 'where this tool withholds and says so: a mid without a two-sided market, the Greeks beside an IV this tool '
+      + 'found unusable (greeksReason, set by this tool), an IV this tool nulled because the broker published a solver '
+      + 'sentinel, a broker\'s last of 0, a blanket-zero open '
+      + 'interest (openInterestUnpublished), and the unknown totals and ratios.';
+  }
+  if (any((row) => row.mark !== null && row.mark !== undefined)) {
+    g.mark = 'mark is the broker\'s own valuation (Public\'s is its published mid), not an executable quote.';
+  }
+  if (provider === 'tradier' || provider === 'moomoo') {
+    g.markUnpublished = 'Tradier and moomoo publish no mark, so mark is always null there: not zero, not missing data.';
+  }
+  if (sides.some((t) => t.contractsWithoutUsableIv > 0) || any((row) => row.iv === null)) {
+    g.iv = 'iv is the broker\'s published IV where usable (finite, above 0, at most 5 = 500%). Published 0 or above-5 '
+      + 'solver sentinels (deep in the money near expiration, after close) go out null; a shown iv passed this filter. '
+      + 'totals.<side>.contractsWithoutUsableIv counts IVs never published together with rejected sentinels: null cannot say which.';
+  }
+  if (any((row) => row.greeksReason !== undefined)) {
+    // A shown iv's row was read as withheld; the line says which rows are and which are not.
+    // The zero-vol remark is tied to the withheld values (standalone it fits a shown row);
+    // And only as a possibility - a missing IV establishes no solver failure.
+    g.greeksWithheld = 'greeksReason "iv-unusable": this tool withholds Greeks for unusable or missing IV; a withheld '
+      + 'delta 1 beside gamma/vega 0 can be a failed solve\'s zero-vol limit; the broker quote stays. A shown iv keeps '
+      + 'available Greeks; broker no-data values can still be null.';
+  }
+  const wingNull = b.wings.call25Delta === null || b.wings.put25Delta === null;
+  const wingShown = b.wings.call25Delta !== null || b.wings.put25Delta !== null;
+  if (wingShown || wingNull) {
+    const selection = severalRoots ? ' in the primary root' : '';
+    g.wings = (wingShown ? `A 25-delta wing is the contract${selection} with the nearest |delta| to 0.25 among those with usable IV and a delta, with no tolerance cutoff; its delta is one the row shows.` : '')
+      + (wingNull ? `${wingShown ? ' ' : ''}A null wing means no contract${selection} with a usable IV has a delta on that side; it is not "no options".` : '');
+  }
+  if (any((row) => ['delta', 'gamma', 'theta', 'vega'].some((k) => typeof row[k] === 'number'))) {
+    g.greeks = 'Available Greeks beside usable IV are as published by the broker, not checked against the quote or the IV '
+      + 'beside them; delta, gamma, theta and vega are in the broker\'s own units, not rescaled and not comparable '
+      + 'across brokers; a broker\'s Greeks can be a snapshot refreshed about hourly, and can carry one theta for the '
+      + 'call and the put at a strike.';
+  }
+  if (any((row) => row.delta === 0 || (typeof row.delta === 'number' && Math.abs(row.delta) === 1))) {
+    g.deltaLimit = 'Delta exactly 0 or |delta| 1 may be a genuine limit or solver output; neither is established. Treat '
+      + 'it as suspect beside the quote and IV: no check tells them apart.';
+  }
+  if (provider === 'moomoo') {
+    g.moomooDelay = 'moomoo serves US option quotes in real time only once the moomoo account holds assets or a US '
+      + 'position; until then they may be delayed (about 15 minutes) with nothing in the data saying so: read them as '
+      + 'possibly delayed.';
+  }
+  // The outside-hours clause, always on, was applied to an in-session fetch. It is added only on a
+  // fetch known to be outside regular hours (weekday clock or weekend; a holiday is not known here, so it reads as in
+  // session and the clause is left out rather than asserted), and as a condition when the fetch time is unknown.
+  const fetched = newYorkSession(b.asOf);
+  g.asOf = 'asOf is the fetch time, not a quote time; quotes are not individually dated.'
+    + (fetched === null
+      ? ' Outside regular hours the quotes are the last the broker holds.'
+        + (b.asOf === null ? ' asOf is null: the fetch time is unknown.' : '')
+      : fetched.outsideRegularSession ? ' This fetch was outside regular hours: quotes are the last the broker holds.' : '');
+  g.cache = 'A repeat for the same symbol and expiration on the same broker, by the same account, within 15 seconds can '
+    + 'be answered from a short cache with the same asOf: no broker request, not charged, answered even on a spent '
+    + 'budget; per proxy instance, account and broker, so a repeat can also be fetched afresh.';
+  const belowIntrinsic = (rows: ShapedRow[], intrinsic: (strike: number) => number) => spot !== null
+    && rows.some((row) => typeof row.bid === 'number' && row.strike !== null && row.bid < intrinsic(row.strike));
+  if (belowIntrinsic(callRows, (k) => spot! - k) || belowIntrinsic(putRows, (k) => k - spot!)) {
+    g.intrinsic = 'A bid can sit below intrinsic value against spotPrice during trading hours too; it is not a data error.';
+  }
+  // What a null spot leaves out, which no text covered.
+  if (spot === null) {
+    g.noSpot = 'spotPrice is null: the broker gave no usable spot, so no at-the-money pair or strike window can be read '
+      + '(atm null, nearTheMoney empty); the 25-delta wings and the totals still come from the available contracts '
+      + '(wings use only the primary root when several roots are listed; totals cover every root).';
+  }
+  if (spot !== null) {
+    const source: Record<string, string> = {
+      tradier: 'Tradier: last, else close', tastytrade: 'tastytrade: last, else close', public: 'Public: last',
+      schwab: 'Schwab: underlying price, else last or mark', moomoo: 'moomoo: last, the regular session\'s',
+    };
+    g.spotPrice = `spotPrice is this broker's own underlying price (${provider !== null && source[provider] ? source[provider] : 'each broker\'s own source'}); `
+      + 'outside regular hours a last can include extended-hours trades, so brokers can report different spots for one '
+      + 'moment; moneyness and the Greeks follow this broker\'s spot, and open interest can also differ by broker.';
+  }
+  // At or after 16:00 New York or outside the regular session, keyed on the book's own fetch time; unknown: emit.
+  const ny = newYorkSession(response.asOf);
+  if (ny === null || ny.outsideRegularSession) {
+    g.afterClose = 'Some ETF options, SPY\'s included, quote until 4:15 PM New York time, so between 4:00 and 4:15 and '
+      + 'on the quotes held after, put-call parity can imply an underlying away from spotPrice.';
+  }
+  const expirationLines: string[] = [];
+  if (options.expirationOmitted === true) {
+    expirationLines.push('No expiration was named: the default selects the nearest listed one that may still trade, '
+      + 'retaining the nearest listing if none remain open.');
+  }
+  if ((ny !== null && b.expiration === ny.date) || (ny === null && options.expirationOmitted === true)) {
+    expirationLines.push('Default selection passes over the expiring day from 4:15 PM New York time when a later listed '
+      + 'expiration remains open; if the broker lists nothing else, the expiring day is retained. A named expiration is '
+      + 'never filtered. Early closes are not known, so the default cutoff remains 4:15 on those days. Expiring stock '
+      + 'options stop at 4:00 in regular hours and at 4:15 for a class Cboe '
+      + 'trades in its curb session, some expiring ETF options (SPY\'s included) trade until 4:15, and PM-settled index '
+      + 'options stop at 4:00.');
+  }
+  if (expirationLines.length) g.expiration = expirationLines.join(' ');
+  // The budget line, with the reservation mechanics where they apply.
+  if ('rateLimit' in options) {
+    const budget = rateLimitGuide(options.rateLimit ?? null);
+    if (budget) {
+      g.rateLimit = budget + (provider === 'tastytrade' || provider === 'moomoo'
+        ? ' A tastytrade or moomoo chain longer than its reservation (12 requests on tastytrade, 2 on moomoo) reserves '
+          + 'the rest once its count is known, before its quote batches, and is refused RATE_LIMITED when the budget '
+          + 'cannot hold them; a call bigger than the whole budget runs alone on a window holding nothing else, charged '
+          + 'in full, and waits for the reset only while something else is in the window.'
+        : '');
+    }
+  }
+  return g;
+}
+

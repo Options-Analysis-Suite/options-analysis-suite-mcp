@@ -111,9 +111,9 @@ export function register(server: McpServer, client: ProxyClient): void {
         symbol: z.string().describe('Ticker symbol'),
         full: z.boolean().optional().describe('Return the less-summarized recent news feed without relevance filtering (raw shape, still subject to the MCP response budget).'),
       },
-      // OpenAI app review treats openWorldHint as public-state mutation. This
-      // MCP call reads synced platform data and cannot publish, message, trade,
-      // submit, or otherwise change public or third-party systems.
+      // This call reads the platform's stored news and company-profile catalog.
+      // It does not fetch article URLs or contact a public feed on a cache miss.
+      // That bounded read, not the absence of mutation, supports openWorldHint false.
       outputSchema: marketDataOutputSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },

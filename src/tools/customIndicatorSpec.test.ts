@@ -44,7 +44,7 @@ describe('get_custom_indicator_spec', () => {
     expect(values).not.toContain('all');
   });
 
-  test("the enum is EXACTLY 'index' plus the index's ids (a direct handler call bypasses the SDK's input validation, so an id missing from the enum would still answer here - the review's round-1 survivor)", async () => {
+  test("the enum is EXACTLY 'index' plus the index's ids (a direct handler call bypasses the SDK's input validation, so an id missing from the enum would still answer here)", async () => {
     const { tool, call } = capture();
     const values: string[] = tool.config.inputSchema.section.unwrap().options ?? tool.config.inputSchema.section.options;
     const { body } = await call({});
@@ -56,7 +56,7 @@ describe('get_custom_indicator_spec', () => {
     expect(body.text).not.toMatch(/ONE complete script/);
   });
 
-  test('the format and examples parts rebuilt from the HANDLER responses equal the generated copy byte for byte (the splitter pin alone let a same-length edit of the returned text through - review\'s round-1 survivor)', async () => {
+  test('the format and examples parts rebuilt from the HANDLER responses equal the generated copy byte for byte (the splitter pin alone let a same-length edit of the returned text through)', async () => {
     const { call } = capture();
     const { body } = await call({});
     for (const part of ['format', 'examples'] as const) {
@@ -67,7 +67,7 @@ describe('get_custom_indicator_spec', () => {
     }
   });
 
-  test("every quoted section reference in the usage text - either quote style, any part, with or without a subsection slug - is an id of the index (the reading list builds its sentence; a stray reference elsewhere in the text fails here too - the review's rounds 2 and 3)", async () => {
+  test("every quoted section reference in the usage text - either quote style, any part, with or without a subsection slug - is an id of the index (the reading list builds its sentence; a stray reference elsewhere in the text fails here too)", async () => {
     const { call } = capture();
     const { body } = await call({});
     const ids = new Set(body.sections.map((s: any) => s.id));
@@ -146,7 +146,7 @@ describe('get_custom_indicator_spec', () => {
     expect(sectionSlug('---').length).toBeGreaterThan(0);
   });
 
-  test('duplicate headings get numbered ids, in order, and a numbered id is RESERVED: Same, Same, Same-2 never collide (review\'s round-1 P3)', () => {
+  test('duplicate headings get numbered ids, in order, and a numbered id is RESERVED: Same, Same, Same-2 never collide', () => {
     const chunks = splitSubsections('examples', '# X\n\n## Same (a)\n\nbody a\n\n## Same (b)\n\nbody b\n');
     expect(chunks.map((c) => c.id)).toEqual(['examples.intro', 'examples.same', 'examples.same-2']);
     expect(chunks.map((c) => c.title)).toEqual(['X', 'Same (a)', 'Same (b)']);
