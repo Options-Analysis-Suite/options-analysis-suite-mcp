@@ -641,3 +641,49 @@ describe('the sign-in page on the website card', () => {
     expect(body).toContain('>Log in and connect</button>');
   });
 });
+
+// The connector pages on the auth card: one stylesheet, the website's auth card rules written
+// into the pages - paper on the tint, hairlines, the serif lockup and title, one filled button, outlined provider
+// buttons, no fills on the notices; no gradient, shadow, transition or radius above 3px; only the register's colours.
+describe('the connector pages on the auth card', () => {
+  const REDIRECT = 'https://chatgpt.com/connector/oauth/cb_abc123';
+  const style = (): string => {
+    const body = handleAuthorizeGet(new URLSearchParams({ client_id: 'test', redirect_uri: REDIRECT, state: 'xyz', code_challenge: 'a'.repeat(43), code_challenge_method: 'S256' })).body;
+    const m = body.match(/<style>([\s\S]*?)<\/style>/);
+    expect(m).not.toBeNull();
+    return m![1];
+  };
+  const rule = (css: string, selector: string): string => {
+    const line = css.split('\n').find((l) => l.trim().startsWith(`${selector} {`));
+    expect(line, selector).toBeDefined();
+    return line!.trim();
+  };
+  const REGISTER = new Set(['#FFFFFF', '#F6F6F4', '#D8D8D4', '#ECECE9', '#1A1A1A', '#5B5B57', '#1F3A60', '#1E40AF', '#991B1B']);
+
+  test('no gradient, shadow, transition, uppercase or !important; radii at most 3px; only the register colours; the 480 breakpoint', () => {
+    const css = style();
+    expect(css).not.toMatch(/gradient|box-shadow|transition|text-transform|!important/);
+    for (const m of css.matchAll(/border-radius:\s*(\d+(?:\.\d+)?)px/g)) expect(Number(m[1])).toBeLessThanOrEqual(3);
+    const hexes = [...css.matchAll(/#[0-9a-fA-F]{3,8}\b/g)].map((m) => m[0]);
+    expect(hexes.length).toBeGreaterThan(10);
+    expect(hexes.filter((h) => !REGISTER.has(h))).toEqual([]);
+    expect(css).toContain('@media (max-width: 480px)');
+    expect(css).not.toContain('640px');
+  });
+
+  test('the card, the lockup, the title, the buttons, the notices and the divider take the auth card values', () => {
+    const css = style();
+    expect(rule(css, '.card')).toBe('.card { width: 100%; max-width: 440px; padding: 24px 28px 22px; background: #FFFFFF; border: 1px solid #D8D8D4; border-radius: 2px; }');
+    expect(rule(css, '.lockup')).toMatch(/border-bottom: 1px solid #D8D8D4;.*font-family: Georgia, 'Times New Roman', serif;.*font-size: 20px/);
+    expect(rule(css, 'h1')).toMatch(/font-family: Georgia, 'Times New Roman', serif; font-size: 26px; font-weight: 500/);
+    expect(rule(css, 'button')).toMatch(/border: 1px solid #1F3A60; border-radius: 3px; background: #1F3A60; color: #FFFFFF/);
+    expect(rule(css, '.provider-btn')).toMatch(/height: 38px;.*border: 1px solid #1A1A1A; border-radius: 3px; background: #FFFFFF/);
+    expect(rule(css, '.provider-btn')).not.toContain('justify-content');
+    expect(rule(css, '.error')).not.toContain('background');
+    expect(rule(css, '.warn')).toContain('border-top: 2px solid #1A1A1A');
+    expect(rule(css, '.warn')).not.toContain('background');
+    expect(rule(css, '.divider::before, .divider::after')).toContain('border-top: 1px solid #ECECE9');
+    expect(rule(css, '.aside a')).toContain('text-decoration: underline');
+    expect(rule(css, '.cancel')).toMatch(/background: #FFFFFF; color: #1A1A1A; border-color: #1A1A1A/);
+  });
+});

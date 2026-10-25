@@ -609,49 +609,49 @@ function hasActiveSubscription(accessToken: string): Promise<boolean> {
  */
 /**
  * One stylesheet for every page this module renders (sign-in, MFA step-up,
- * connection consent, notices): the web app's sign-in card on the light site
- * palette - white card on the blue-tinted background, the brand lockup, the
- * Contact field kit, the provider buttons with their marks, the CTA gradient
- * button, #3568a8 focus ring. Inlined into each page
- * (CSP allows inline style and nothing external). server/src/routes/oauthRoutes.ts
- * carries a lockstep copy for the /mcp/finish interstitial.
+ * connection consent, notices): the website's auth card
+ * - a paper card on the tint with a hairline border and a 2px radius, the brand
+ * lockup and the title in the serif, the kit's hairline controls with the accent
+ * focus outline, one filled navy button, the provider buttons outlined in ink,
+ * the error as a plain red line and the warning as a ruled note with no fill.
+ * No gradient, shadow or transition; the pages load no fonts (the policy allows
+ * inline style and the logo and nothing else), so the serif is the system's
+ * Georgia. Inlined into each page. server/src/routes/mcpFinishPage.ts carries a
+ * lockstep copy for the /mcp/finish interstitial, pinned verbatim by its test.
  */
 const PAGE_STYLE = `
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: radial-gradient(1200px 600px at 50% -10%, rgba(59, 130, 246, 0.07) 0%, transparent 60%), linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%); color: #111827; display: flex; justify-content: center; align-items: flex-start; min-height: 100vh; padding: 64px 24px 48px; line-height: 1.5; }
-    .card { width: 100%; max-width: 480px; padding: 32px 32px 28px; background: linear-gradient(165deg, #ffffff 0%, #fbfcfd 100%); border: 1px solid rgba(59, 130, 246, 0.12); border-radius: 14px; box-shadow: 0 1px 2px -1px rgba(15, 23, 42, 0.04), 0 8px 24px -12px rgba(15, 23, 42, 0.08); }
-    .lockup { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; font-size: 1.4rem; font-weight: 700; letter-spacing: -0.015em; line-height: 1.1; color: #111827; white-space: nowrap; }
-    .lockup img { height: 32px; width: auto; display: block; }
-    h1 { font-size: 1.6rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1.25; color: #111827; margin-bottom: 6px; }
-    p, .subtitle { font-size: 0.95rem; color: #6b7280; line-height: 1.5; margin-bottom: 20px; }
-    .subtitle { margin-bottom: 24px; }
+    body { min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 48px 24px; background: #F6F6F4; color: #1A1A1A; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; font-size: 13.5px; line-height: 1.5; }
+    .card { width: 100%; max-width: 440px; padding: 24px 28px 22px; background: #FFFFFF; border: 1px solid #D8D8D4; border-radius: 2px; }
+    .lockup { display: flex; align-items: center; gap: 10px; padding-bottom: 14px; margin-bottom: 18px; border-bottom: 1px solid #D8D8D4; font-family: Georgia, 'Times New Roman', serif; font-size: 20px; font-weight: 500; line-height: 1.2; color: #1F3A60; white-space: nowrap; }
+    .lockup img { display: block; width: 40px; height: 28px; }
+    h1 { margin: 0 0 6px; font-family: Georgia, 'Times New Roman', serif; font-size: 26px; font-weight: 500; line-height: 1.2; color: #1A1A1A; }
+    p, .subtitle { margin: 0 0 18px; font-size: 14px; line-height: 1.55; color: #5B5B57; }
     p:last-child { margin-bottom: 0; }
-    .dest { color: #111827; font-weight: 600; }
-    label { display: block; font-size: 13px; font-weight: 500; color: #374151; margin-bottom: 6px; }
-    input[type="email"], input[type="password"], input[type="text"], select { width: 100%; padding: 11px 14px; border: 1px solid #d1d5db; border-radius: 8px; background: #ffffff; color: #1f2937; font-size: 14px; line-height: 1.4; margin-bottom: 14px; }
-    input::placeholder { color: #9ca3af; }
-    input:focus, select:focus { outline: none; border-color: #3568a8; box-shadow: 0 0 0 3px rgba(53, 104, 168, 0.15); }
-    #mfa_code, #mfacode { text-align: center; font-size: 1.5rem; letter-spacing: 0.35em; font-variant-numeric: tabular-nums; padding: 12px 14px; }
-    button { width: 100%; min-height: 44px; padding: 12px 18px; border: 0; border-radius: 8px; background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); color: #ffffff; font-size: 14px; font-weight: 600; cursor: pointer; }
-    button:hover { opacity: 0.9; }
-    .row { display: flex; gap: 10px; }
+    .dest { color: #1A1A1A; font-weight: 600; }
+    label { display: block; margin: 0 0 5px; font-size: 13px; font-weight: 500; line-height: 1.4; color: #1A1A1A; }
+    input[type="email"], input[type="password"], input[type="text"], select { width: 100%; margin: 0 0 14px; padding: 9px 10px; border: 1px solid #D8D8D4; border-radius: 3px; background: #FFFFFF; color: #1A1A1A; font-family: inherit; font-size: 14px; line-height: 1.4; }
+    input::placeholder { color: #5B5B57; }
+    input:focus-visible, select:focus-visible { outline: 2px solid #1E40AF; outline-offset: 1px; }
+    #mfa_code, #mfacode { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 22px; letter-spacing: 0.25em; padding: 10px 12px; }
+    button { width: 100%; margin: 0; padding: 10px 12px; border: 1px solid #1F3A60; border-radius: 3px; background: #1F3A60; color: #FFFFFF; font-family: inherit; font-size: 13.5px; font-weight: 500; line-height: 1.3; cursor: pointer; }
+    button:focus-visible { outline: 2px solid #1E40AF; outline-offset: 2px; }
+    .row { display: flex; gap: 8px; }
     .row button { flex: 1; }
-    .cancel { background: #ffffff; color: #1f2937; border: 1px solid #d1d5db; }
-    .cancel:hover { opacity: 1; background: #f8fafc; border-color: #3568a8; }
-    .error { padding: 10px 12px; margin-bottom: 14px; background: #fef2f2; border: 1px solid #fca5a5; border-radius: 8px; color: #991b1b; font-size: 0.85rem; line-height: 1.45; }
-    .error-text { color: #b91c1c; font-size: 0.85rem; margin: -6px 0 12px; }
-    .warn { padding: 10px 12px; margin-bottom: 18px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; color: #856404; font-size: 0.85rem; line-height: 1.5; }
-    .provider-btn { display: flex; align-items: center; justify-content: center; gap: 10px; min-height: 44px; padding: 11px 16px; margin-bottom: 10px; border: 1px solid #d1d5db; border-radius: 8px; background: #ffffff; color: #1f2937; font-size: 14px; font-weight: 600; text-decoration: none; }
-    .provider-btn:hover { background: #f8fafc; border-color: #3568a8; }
+    .cancel { background: #FFFFFF; color: #1A1A1A; border-color: #1A1A1A; }
+    .cancel:hover { background: #F6F6F4; }
+    .error { margin: 0 0 14px; font-size: 13.5px; line-height: 1.55; color: #991B1B; }
+    .error-text { margin: -6px 0 12px; font-size: 12.5px; line-height: 1.5; color: #991B1B; }
+    .warn { margin: 0 0 14px; padding: 12px 0 2px; border-top: 2px solid #1A1A1A; font-size: 13.5px; line-height: 1.55; color: #1A1A1A; }
+    .provider-btn { display: flex; align-items: center; gap: 10px; height: 38px; margin: 0 0 8px; padding: 0 12px; border: 1px solid #1A1A1A; border-radius: 3px; background: #FFFFFF; color: #1A1A1A; font-size: 13.5px; font-weight: 500; line-height: 1.3; text-decoration: none; }
+    .provider-btn:hover { background: #F6F6F4; }
     .provider-btn svg { flex: none; }
-    .divider { display: flex; align-items: center; margin: 16px 0; color: #6b7280; font-size: 13px; }
-    .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: #e5e7eb; }
-    .divider span { padding: 0 12px; }
-    .aside { text-align: center; font-size: 0.85rem; color: #6b7280; line-height: 1.5; margin: 14px 0 0; }
-    .aside a { color: #3568a8; font-weight: 500; text-decoration: none; }
-    .aside a:hover { color: #1e3a8a; text-decoration: underline; }
-    .mfa { margin-top: 20px; }
-    @media (max-width: 640px) { body { padding: 32px 16px; } .card { padding: 24px 20px 22px; border-radius: 12px; } .lockup { font-size: 1.05rem; gap: 8px; } .lockup img { height: 28px; } h1 { font-size: 1.4rem; } }
+    .divider { display: flex; align-items: center; gap: 12px; margin: 8px 0 16px; font-size: 12.5px; color: #5B5B57; }
+    .divider::before, .divider::after { content: ''; flex: 1; border-top: 1px solid #ECECE9; }
+    .aside { margin: 10px 0 0; text-align: center; font-size: 12.5px; line-height: 1.5; color: #5B5B57; }
+    .aside a { color: #1E40AF; text-decoration: underline; }
+    .mfa { margin-top: 18px; }
+    @media (max-width: 480px) { body { padding: 32px 16px; } .card { padding: 20px 18px 18px; } }
 `;
 
 /** The brand lockup every connector page opens with: the website's logo and wordmark. */
