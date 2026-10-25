@@ -6,8 +6,10 @@ MCP server that gives Claude, ChatGPT, Perplexity, and Grok direct access to you
 
 | Platform | Transport | Auth | Setup |
 | --- | --- | --- | --- |
-| Claude Desktop (`.mcpb` extension) | Local stdio | Credentials stored in OS keychain | Download extension from your account page |
-| Claude Desktop / Claude Web / ChatGPT / Grok | Remote HTTP MCP | OAuth login flow | Add the remote connector URL |
+| Claude (web, Desktop and mobile) | Remote HTTP MCP | OAuth login flow | Connect from Claude's connector directory: [claude.ai/directory/options-analysis-suite](https://claude.ai/directory/options-analysis-suite) (or add a custom connector with `https://mcp.optionsanalysissuite.com/mcp`) |
+| ChatGPT | Remote HTTP MCP | OAuth login flow | Open the [Options Analysis Suite app](https://chatgpt.com/apps/options-analysis-suite/asdk_app_69eddf27f0f08191a1ccec9dc425df03) in ChatGPT |
+| Grok | Remote HTTP MCP | OAuth login flow | Add a custom connector with `https://mcp.optionsanalysissuite.com/mcp` |
+| Claude Desktop (`.mcpb` extension) | Local stdio | Credentials stored in OS keychain | Build it from this repository with `bun build.ts --pack` and open the `.mcpb` in Claude Desktop |
 | Perplexity | Remote HTTP MCP | API key (`base64(email:password)`) | Add MCP connector in settings |
 
 ## Current Tool Surface
@@ -125,7 +127,7 @@ Without sync enabled, the assistant can still use the market and research tools.
 
 - An active Options Analysis Suite subscription (every plan is Pro or above)
 - A broker credential stored under Account -> Broker -> Stored broker credentials, for the six live tools only
-- Claude Desktop, ChatGPT, Claude Web, Perplexity, or Grok
+- Claude (web, Desktop or mobile), ChatGPT, Perplexity, or Grok
 - Sync enabled if you want personal analysis data in addition to market data
 
 ## Support
