@@ -28,7 +28,7 @@ function capture() {
 }
 
 const notFound = (message: string) => ({
-  get: async () => { throw new LiveApiError(message, 404, 'NOT_FOUND', false, undefined, undefined); },
+  get: async (path: string) => { if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false }; throw new LiveApiError(message, 404, 'NOT_FOUND', false, undefined, undefined); },
 } as any);
 
 const NOT_ON_FILE_YET = 'API error (NOT_FOUND): No exposure data found for KBE on 2026-09-18. That session is not on file. If 2026-09-18 is a trading session, its equity import is scheduled for 01:00 US Eastern the next day and usually lands about 02:30, so ask again after that; this tool treats the answer as not final until 09:30 US Eastern that day. A market holiday has no session, and a symbol with no exposure summary (a futures contract, or one with no near-term options) stays not-found. This may be retried.';
@@ -157,7 +157,7 @@ describe('get_dealer_positioning - a session not on file yet is retryable, a ses
     // 1) and moves with it, so the rejection of a future date is not
     // final, and the not-found rule never gets to run on it.
     const { tools, server } = capture();
-    const rejected = { get: async () => { throw new LiveApiError('date must fall inside the available data window 1990-01-01..2026-09-19', 400, 'INVALID_REQUEST', false, undefined, undefined); } } as any;
+    const rejected = { get: async (path: string) => { if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false }; throw new LiveApiError('date must fall inside the available data window 1990-01-01..2026-09-19', 400, 'INVALID_REQUEST', false, undefined, undefined); } } as any;
     register(server as any, rejected, at('2026-09-18T20:46:30Z'));
     const result: any = await tools[0].handler({ symbol: 'KBE', date: '2026-09-21' });
     expect(result.isError).toBe(true);
@@ -178,7 +178,7 @@ describe('get_dealer_positioning - a session not on file yet is retryable, a ses
     // subtraction. The proxy rejected at 23:59:59Z (max 2026-09-19); this
     // server handled it at midnight: the answer is still 2026-09-20.
     const { tools, server } = capture();
-    const rejected = { get: async () => { throw new LiveApiError('date must fall inside the available data window 1990-01-01..2026-09-19', 400, 'INVALID_REQUEST', false, undefined, undefined); } } as any;
+    const rejected = { get: async (path: string) => { if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false }; throw new LiveApiError('date must fall inside the available data window 1990-01-01..2026-09-19', 400, 'INVALID_REQUEST', false, undefined, undefined); } } as any;
     register(server as any, rejected, at('2026-09-19T00:00:00Z'));
     const late: any = await tools[0].handler({ symbol: 'KBE', date: '2026-09-21' });
     expect(late.content[0].text).toContain('so 2026-09-21 can be asked for from 2026-09-20 UTC');
@@ -186,14 +186,14 @@ describe('get_dealer_positioning - a session not on file yet is retryable, a ses
     // this server just before it. Still the 20th, not the 19th, which the
     // proxy would still reject.
     const early = capture();
-    register(early.server as any, { get: async () => { throw new LiveApiError('date must fall inside the available data window 1990-01-01..2026-09-20', 400, 'INVALID_REQUEST', false, undefined, undefined); } } as any, at('2026-09-18T23:59:59Z'));
+    register(early.server as any, { get: async (path: string) => { if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false }; throw new LiveApiError('date must fall inside the available data window 1990-01-01..2026-09-20', 400, 'INVALID_REQUEST', false, undefined, undefined); } } as any, at('2026-09-18T23:59:59Z'));
     const result: any = await early.tools[0].handler({ symbol: 'KBE', date: '2026-09-21' });
     expect(result.content[0].text).toContain('so 2026-09-21 can be asked for from 2026-09-20 UTC');
   });
 
   test('a future weekend date, a date before the window and a rejection in another form keep the proxy\'s answer', async () => {
     const { tools, server } = capture();
-    const rejected = { get: async () => { throw new LiveApiError('date must fall inside the available data window 1990-01-01..2026-09-19', 400, 'INVALID_REQUEST', false, undefined, undefined); } } as any;
+    const rejected = { get: async (path: string) => { if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false }; throw new LiveApiError('date must fall inside the available data window 1990-01-01..2026-09-19', 400, 'INVALID_REQUEST', false, undefined, undefined); } } as any;
     register(server as any, rejected, at('2026-09-18T20:46:30Z'));
     for (const date of ['2026-09-20', '2026-09-26', '1989-12-31']) {
       const result: any = await tools[0].handler({ symbol: 'KBE', date });
@@ -209,7 +209,7 @@ describe('get_dealer_positioning - a session not on file yet is retryable, a ses
     // The proxy's other INVALID_REQUEST for a date (2026-13-45 passes the
     // regex) carries no window and is left alone.
     const unreal = capture();
-    register(unreal.server as any, { get: async () => { throw new LiveApiError('date must be a real calendar date (YYYY-MM-DD)', 400, 'INVALID_REQUEST', false, undefined, undefined); } } as any, at('2026-09-18T20:46:30Z'));
+    register(unreal.server as any, { get: async (path: string) => { if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false }; throw new LiveApiError('date must be a real calendar date (YYYY-MM-DD)', 400, 'INVALID_REQUEST', false, undefined, undefined); } } as any, at('2026-09-18T20:46:30Z'));
     const result: any = await unreal.tools[0].handler({ symbol: 'KBE', date: '2026-13-45' });
     expect(result.structuredContent).toMatchObject({ code: 'INVALID_REQUEST', retryable: false });
     expect(result.content[0].text).toBe('API error (INVALID_REQUEST): date must be a real calendar date (YYYY-MM-DD). Retrying the same request will not succeed.');
@@ -217,7 +217,7 @@ describe('get_dealer_positioning - a session not on file yet is retryable, a ses
 
   test('another code with today\'s date is untouched', async () => {
     const { tools, server } = capture();
-    const failing = { get: async () => { throw new LiveApiError('Pro required', 403, 'PRO_TIER_REQUIRED', false, 'https://x/pricing', undefined); } } as any;
+    const failing = { get: async (path: string) => { if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false }; throw new LiveApiError('Pro required', 403, 'PRO_TIER_REQUIRED', false, 'https://x/pricing', undefined); } } as any;
     register(server as any, failing, at('2026-09-18T20:10:00Z'));
     const result: any = await tools[0].handler({ symbol: 'KBE', date: '2026-09-18' });
     expect(result.structuredContent).toMatchObject({ code: 'PRO_TIER_REQUIRED', retryable: false, actionUrl: 'https://x/pricing' });

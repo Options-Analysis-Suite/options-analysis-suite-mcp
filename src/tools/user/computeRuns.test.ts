@@ -2022,3 +2022,17 @@ describe('get_compute_runs time convention', () => {
   });
 });
 
+
+describe('a compute run\'s exposure sweep is methodology 1', () => {
+  test('the default view labels each sweep entry, the full view the summary; the default never read', async () => {
+    const { handler, calls } = createHarness({ data: [makeRun(0)], count: 1 });
+    const summary = JSON.parse((await handler({ limit: 1 })).content[0].text);
+    const sweep = summary.data[0].exposureSweep;
+    expect(Array.isArray(sweep) && sweep.length > 0).toBe(true);
+    expect(sweep.every((entry: any) => entry.methodology === 1)).toBe(true);
+    const full = JSON.parse((await handler({ limit: 1, full: true })).content[0].text);
+    expect(full.data[0].data.summary.exposureSweepMethodology).toBe(1);
+    // the platform default is never read: the sweep is methodology 1 whatever it is
+    expect(calls.map((c) => c.path)).not.toContain('/exposure/methodology');
+  });
+});

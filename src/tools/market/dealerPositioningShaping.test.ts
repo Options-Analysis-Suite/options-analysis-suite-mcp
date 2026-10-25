@@ -534,7 +534,9 @@ describe('summarizeDealerPositioning', () => {
     async function throughTool(response: Record<string, unknown>) {
       const server = new McpServer({ name: 'dealer-wide-test', version: '1' });
       register(server, {
-        get: async (_path: string, _params?: Record<string, string>, onRateLimit?: (value: LiveRateLimit) => void) => {
+        get: async (path: string, _params?: Record<string, string>, onRateLimit?: (value: LiveRateLimit) => void) => {
+          // the platform default answers methodology 1
+          if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false };
           onRateLimit?.(budget);
           return response;
         },
@@ -1222,7 +1224,9 @@ describe('dealer guide obligation audit - emitted null and coverage rules', () =
   async function wireFor(response: Record<string, unknown>, args: Record<string, unknown> = {}) {
     const server = new McpServer({ name: 'dealer-obligation-test', version: '1' });
     register(server, {
-      get: async (_path: string, _params?: Record<string, string>, onRateLimit?: (value: LiveRateLimit) => void) => {
+      get: async (path: string, _params?: Record<string, string>, onRateLimit?: (value: LiveRateLimit) => void) => {
+        // the platform default answers methodology 1
+        if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false };
         onRateLimit?.(budget);
         return response;
       },

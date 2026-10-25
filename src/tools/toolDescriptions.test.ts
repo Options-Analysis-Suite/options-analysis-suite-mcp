@@ -169,14 +169,14 @@ describe('get_live_dealer_positioning description', () => {
   });
 
   test('the default window and the one-expiration book', () => {
-    expect(desc('get_live_dealer_positioning')).toContain('Without `expiration` it covers the first four listed expirations that may still trade (on a monthly-listed name that can span months; get_dealer_positioning covers 0-60 days from the most recent session on file; its window and session can differ from this live answer, so comparing them does not isolate today\'s longer-dated book); with `expiration` every total (netCharm included), level and row is computed over that one listed date alone, the way to see a same-day (0DTE) or single-week book.');
+    expect(desc('get_live_dealer_positioning')).toContain('Without `expiration` it covers the first four listed expirations that may still trade (on a monthly-listed name that can span months; get_dealer_positioning covers 0-60 days from the most recent session on file; its window and session can differ from this live answer, so comparing them does not isolate today\'s longer-dated book); with `expiration` every total (charm included), level and row is computed over that one listed date alone, the way to see a same-day (0DTE) or single-week book.');
   });
 
   test('the cost on every broker, the no-loop rule and the 15-second cache', () => {
     const d = desc('get_live_dealer_positioning');
     expect(d).toContain('EXPENSIVE: broker requests spend your broker\'s own quota (120 requests a minute on Tradier and Schwab, 600 on Public, 120 on tastytrade, 30 on moomoo), shared with the other live tools. Cold-call estimates, not actual spend or upper bounds: a default call reads the expirations list and four chains: 9 requests on Tradier and Public, 5 on Schwab, 49 reserved on tastytrade and settled to the real count, and 9 reserved on moomoo and settled to what it spent (about three fully cold calls a minute on its 30, more once its contract lists are cached for the day); with `expiration` it reads the list and one chain: 3 on Tradier and Public, 2 on Schwab, 13 reserved on tastytrade, and 3 reserved on moomoo and settled to what it spent. Counts vary with the broker\'s caches, and a long tastytrade or moomoo chain reserves more once its count is known and is refused RATE_LIMITED when the budget cannot hold it.');
     for (const broker of ['Tradier', 'Public', 'Schwab', 'tastytrade', 'moomoo']) expect(d.slice(d.indexOf('Cold-call estimates, not actual spend or upper bounds: a default call')), broker).toContain(broker);
-    expect(d).toContain('Do not call it in a loop or for a list of symbols. A repeat within 15 seconds for the same symbol, broker, `expiration`, `r` and `q` can be answered from a short cache, uncharged, with the same `asOf`; `strikeRange`, `strikeWindowPct` and `strikeWindowDelta` only choose which computed rows are returned, so widening a cached window spends no broker requests.');
+    expect(d).toContain('Do not call it in a loop or for a list of symbols. A repeat within 15 seconds for the same symbol, broker, `expiration`, `r`, `q` and methodology can be answered from a short cache, uncharged, with the same `asOf`; `strikeRange`, `strikeWindowPct` and `strikeWindowDelta` only choose which computed rows are returned, so widening a cached window spends no broker requests.');
     expect(d).not.toMatch(/weighted unit|10-unit|10 units/);
   });
 
@@ -424,5 +424,30 @@ describe('scenario parameters retain their complete rules on the wire', () => {
     expect((t.inputSchema as { required?: string[] }).required ?? []).not.toContain('legs');
     expect(desc(t.name)).toContain('the `legs` parameter gives them');
     expect(param(t.name, 'legs')).toContain('vol bumped one point, or a quarter of the vol when that is less; time a day, or a twentieth of the time left');
+  });
+});
+
+describe('each exposure tool says what methodology 2 changes', () => {
+  test('get_regime: the scopes\' exposures by methodology, after the first part\'s pointers', () => {
+    const d = desc('get_regime');
+    const line = 'The market, symbol and intraday scopes\' exposures follow `methodology`: 1 is the figures named above; 2 is the assumed dealer book\'s GEX, delta balance, vega exposure, vanna, charm flow and vomma, the walls, flip, magnet and top strikes staying methodology 1\'s, labeled.';
+    expect(d).toContain(line);
+    expect(d.indexOf(line)).toBeGreaterThan(d.indexOf('get_dealer_positioning (end of day'));
+  });
+
+  test('get_options_analytics_history and get_options_snapshot: the book they share with get_dealer_positioning under 2', () => {
+    expect(desc('get_options_analytics_history')).toContain('the exposures by `methodology` (1: GEX/DEX/VEX and net vanna/charm/vomma; 2: the assumed dealer book\'s GEX, delta balance, vega exposure, vanna, charm flow and vomma)');
+    expect(desc('get_options_analytics_history')).toContain('Under methodology 2 (`methodology`) this, get_options_snapshot and get_dealer_positioning report one stored book, the assumed dealer book, over the scope each answer states; only get_dealer_positioning\'s levels keep the 0-60 day window.');
+    expect(desc('get_options_snapshot')).toContain('Under methodology 2 (`methodology`) one symbol\'s net GEX and DEX give way to `exposures`, and several symbols\' netGex and netDex are the assumed dealer book\'s GEX and delta balance: the one stored book get_options_analytics_history and get_dealer_positioning report under 2, over the scope each answer states.');
+  });
+
+  test('get_dealer_positioning and get_live_dealer_positioning: the book in place of the totals, the levels labeled', () => {
+    expect(desc('get_dealer_positioning')).toContain('Under methodology 2 (`methodology`) netGex and netDex give way to `exposures`, the stored assumed dealer book get_options_snapshot and get_options_analytics_history report under 2, over its stated scope; these levels sit in `levels`, labeled methodology 1, each with its own prior in sincePriorSession.');
+    const live = desc('get_live_dealer_positioning');
+    const line = 'Under methodology 2 (`methodology`) every total, row, per-expiration and spot-side figure is the assumed dealer book\'s (GEX, delta balance, vega exposure, vanna, charm flow, vomma; an expiration\'s share is of Long OI GEX), and the levels with their statuses and coverage sit in `levels`, labeled methodology 1.';
+    expect(live).toContain(line);
+    // after the first part's sibling and prerequisite, which keep their places
+    expect(live.indexOf(line)).toBeGreaterThan(live.indexOf(BROKER_PREREQUISITE));
+    expect(live).not.toContain('netCharm');
   });
 });

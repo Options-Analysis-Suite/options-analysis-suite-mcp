@@ -3,8 +3,9 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { LiveApiError, type LiveApiClient, type LiveRateLimit } from '../../proxy/liveApiClient.js';
 import { toolHandler } from '../helpers.js';
 import { marketDataOutputSchema } from '../outputSchemas.js';
-import { summarizeDealerPositioning } from './dealerPositioningShaping.js';
+import { LIVE_V2_NOTE, summarizeDealerPositioning, summarizeDealerPositioningV2 } from './dealerPositioningShaping.js';
 import { plainDecimal } from './strategyScan.js';
+import { METHODOLOGY_2_NOTE, methodologyInput, methodologyLabel, requireMethodology } from '../exposureMethodology.js';
 
 /**
  * Dealer positioning, computed live from the caller's own broker chain.
@@ -29,15 +30,16 @@ export function register(server: McpServer, client: LiveApiClient): void {
         'Get LIVE dealer positioning (GEX, gamma exposure) for one symbol, computed in real time from the broker credential stored on your Options Analysis Suite account: net GEX and DEX, net vega, vanna, charm and vomma, the repriced gamma flip, the call wall and put wall, a gamma magnet, gamma concentration, a dealer regime (normally the sign of net gamma at spot; net GEX is the fallback with fewer than two gamma-bearing strikes or no recognized regime, and the flip side does not determine it) and per-strike rows near spot. '
         + 'For the most recent session on file (0-60 days), free and without a broker, use get_dealer_positioning; its coarse-grid gamma flip is a different claim from the repriced one here. '
         + 'Requires a broker credential saved to the account under Account -> Broker -> Stored broker credentials; a broker connected only in the browser on the website is not visible to this tool. '
+        + 'Under methodology 2 (`methodology`) every total, row, per-expiration and spot-side figure is the assumed dealer book\'s (GEX, delta balance, vega exposure, vanna, charm flow, vomma; an expiration\'s share is of Long OI GEX), and the levels with their statuses and coverage sit in `levels`, labeled methodology 1. '
         + 'Per expiration it adds its own GEX, DEX and gross-gamma share (0DTE concentration), its at-the-money straddle expected move and the earnings and ex-dividend dates on file, also in the top-level `events` (none on file, here or in a separate earnings or dividends lookup, is not none scheduled: a fund rarely has earnings on file, and its ex-dividend date often appears only on or after the day, so for a fund neither rules one out); `spotSides` splits open interest above and below spot (a squeeze argument\'s inputs). '
         + 'The gamma flip is the crossing nearest spot that a sampled search found (a fine step, 0.0005% of spot growing to at most 0.02% farther out), not necessarily the only one; a null flip beside a complete `levelStatus.gammaFlip` is the result of a search over every counted leg (read `coverage.gammaFlipSearchStatus` when reported), not withheld and not proof of no flip. '
         + 'It reflects the current session, not the most recent session on file; on moomoo, option quotes are real time only once the account holds assets or a US position, and until then may be about 15 minutes delayed, unmarked. '
-        + 'Without `expiration` it covers the first four listed expirations that may still trade (on a monthly-listed name that can span months; get_dealer_positioning covers 0-60 days from the most recent session on file; its window and session can differ from this live answer, so comparing them does not isolate today\'s longer-dated book); with `expiration` every total (netCharm included), level and row is computed over that one listed date alone, the way to see a same-day (0DTE) or single-week book. '
+        + 'Without `expiration` it covers the first four listed expirations that may still trade (on a monthly-listed name that can span months; get_dealer_positioning covers 0-60 days from the most recent session on file; its window and session can differ from this live answer, so comparing them does not isolate today\'s longer-dated book); with `expiration` every total (charm included), level and row is computed over that one listed date alone, the way to see a same-day (0DTE) or single-week book. '
         + 'EXPENSIVE: broker requests spend your broker\'s own quota (120 requests a minute on Tradier and Schwab, 600 on Public, 120 on tastytrade, 30 on moomoo), shared with the other live tools. '
         + 'Cold-call estimates, not actual spend or upper bounds: a default call reads the expirations list and four chains: 9 requests on Tradier and Public, 5 on Schwab, 49 reserved on tastytrade and settled to the real count, and 9 reserved on moomoo and settled to what it spent (about three fully cold calls a minute on its 30, more once its contract lists are cached for the day); with `expiration` it reads the list and one chain: 3 on Tradier and Public, 2 on Schwab, 13 reserved on tastytrade, and 3 reserved on moomoo and settled to what it spent. '
         + 'Counts vary with the broker\'s caches, and a long tastytrade or moomoo chain reserves more once its count is known and is refused RATE_LIMITED when the budget cannot hold it. '
         + 'Do not call it in a loop or for a list of symbols. '
-        + 'A repeat within 15 seconds for the same symbol, broker, `expiration`, `r` and `q` can be answered from a short cache, uncharged, with the same `asOf`; `strikeRange`, `strikeWindowPct` and `strikeWindowDelta` only choose which computed rows are returned, so widening a cached window spends no broker requests.',
+        + 'A repeat within 15 seconds for the same symbol, broker, `expiration`, `r`, `q` and methodology can be answered from a short cache, uncharged, with the same `asOf`; `strikeRange`, `strikeWindowPct` and `strikeWindowDelta` only choose which computed rows are returned, so widening a cached window spends no broker requests.',
       inputSchema: {
         symbol: z.string().describe('Ticker symbol (e.g., AAPL, SPY, MU)'),
         // Every provider a stored credential may name. It must match the
@@ -70,13 +72,14 @@ export function register(server: McpServer, client: LiveApiClient): void {
           + 'Over several expirations a strike qualifies when at least one of them prices it inside the band, so the farthest expiration, whose deltas sit nearest 0.5, usually sets how far out the band reaches. '
           + 'Strictly between 0 and 0.5. '
           + 'It takes the place of `strikeWindowPct`, and passing both is refused before any request.'),
+        methodology: methodologyInput(),
       },
       outputSchema: marketDataOutputSchema,
       // Unlike every other tool here except the live chain, this reaches a
       // third party: the user's own broker.
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     },
-    toolHandler(async ({ symbol, expiration, provider, r, q, strikeRange, strikeWindowPct, strikeWindowDelta }) => {
+    toolHandler(async ({ symbol, expiration, provider, r, q, strikeRange, strikeWindowPct, strikeWindowDelta, methodology }) => {
       // Both choose the rows returned, and there is no one answer for both;
       // refused here, before anything is requested or charged.
       if (strikeWindowPct !== undefined && strikeWindowDelta !== undefined) {
@@ -85,8 +88,11 @@ export function register(server: McpServer, client: LiveApiClient): void {
           400, 'INVALID_REQUEST', false, undefined, undefined,
         );
       }
+      // The answer IS exposure: named, else the platform default, resolved before any broker request is spent
+      const resolved = await requireMethodology(client, methodology);
       const params: Record<string, string> = {};
       if (expiration) params.expiration = expiration;
+      if (resolved.methodology === 2) params.exposure = 'v2';
       if (provider) params.provider = provider;
       // Plain decimals: the route refuses an exponent (1e-2) by design.
       if (r !== undefined) params.r = plainDecimal(r);
@@ -99,8 +105,20 @@ export function register(server: McpServer, client: LiveApiClient): void {
         (rateLimit) => { budget.rateLimit = rateLimit; },
       ) as Record<string, unknown>;
 
-      // The budget rides inside the fit with the rows and the guide, no longer added after it.
-      return summarizeDealerPositioning(res, { strikeRange, strikeWindowPct, strikeWindowDelta, rateLimit: budget.rateLimit });
+      // The budget rides inside the fit with the rows and the guide, no longer added after it; so do the label and the note.
+      const label = methodologyLabel(resolved);
+      if (resolved.methodology === 1) {
+        return summarizeDealerPositioning(res, { strikeRange, strikeWindowPct, strikeWindowDelta, rateLimit: budget.rateLimit, label });
+      }
+      // methodology 2 is the route's opt-in: an answer without its book did not answer what was asked
+      const v2 = res && typeof res === 'object' ? (res as { exposureV2?: { available?: unknown; methodology?: unknown } }).exposureV2 : undefined;
+      if (!v2 || typeof v2 !== 'object' || (v2.available === true && v2.methodology !== 2)) {
+        throw new LiveApiError('The answer asked for methodology 2 did not carry it, so it was not used.', 502, 'UPSTREAM_INVALID', false, undefined, undefined);
+      }
+      return summarizeDealerPositioningV2(res, {
+        strikeRange, strikeWindowPct, strikeWindowDelta, rateLimit: budget.rateLimit, label,
+        note: `${METHODOLOGY_2_NOTE} ${LIVE_V2_NOTE}`,
+      });
       // The two echoes are the values the rows were chosen with, so they go
       // out as asked: rounded, 0.10000000000000002 would read 0.1, a band
       // that keeps a strike at 0.1 which this one did not.

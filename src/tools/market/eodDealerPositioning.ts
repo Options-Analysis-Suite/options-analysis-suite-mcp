@@ -3,7 +3,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { LiveApiError, type LiveApiClient } from '../../proxy/liveApiClient.js';
 import { toolHandler } from '../helpers.js';
 import { marketDataOutputSchema } from '../outputSchemas.js';
-import { summarizeEodDealerPositioning } from './eodDealerPositioningShaping.js';
+import { EOD_V2_NOTE, summarizeEodDealerPositioning, summarizeEodDealerPositioningV2 } from './eodDealerPositioningShaping.js';
+import { METHODOLOGY_2_NOTE, methodologyInput, methodologyLabel, requireMethodology } from '../exposureMethodology.js';
 import { significantDeep } from './dealerPositioningShaping.js';
 
 /**
@@ -115,7 +116,7 @@ export function register(server: McpServer, client: LiveApiClient, now: () => Da
     {
       title: 'EOD Dealer Positioning / GEX',
       description:
-        'Get END-OF-DAY dealer positioning for a symbol from the most recent session on file, over the 0-60 day expiration window: net GEX and DEX, the dealer regime, the gamma flip, the call wall and put wall, the gamma magnet, the 30-day expected move, and the top contributing strikes. No broker credential is required. The gamma flip here is a coarse-grid level from the stored snapshot with no search status or resolution; for the flip as of NOW, repriced from a live chain with its search status, use get_live_dealer_positioning, which is a different claim and is never substituted here. get_options_snapshot and get_options_analytics_history report net GEX and DEX over ALL expirations, so they differ from these for the same session and neither is wrong. Long-dated contracts carry large delta, so the two can differ even in sign (SPY 2026-09-29: net DEX -16,795,316,756 over all expirations against +16,246,461,968 over 0-60 days). '
+        'Get END-OF-DAY dealer positioning for a symbol from the most recent session on file, over the 0-60 day expiration window: net GEX and DEX, the dealer regime, the gamma flip, the call wall and put wall, the gamma magnet, the 30-day expected move, and the top contributing strikes. No broker credential is required. The gamma flip here is a coarse-grid level from the stored snapshot with no search status or resolution; for the flip as of NOW, repriced from a live chain with its search status, use get_live_dealer_positioning, which is a different claim and is never substituted here. get_options_snapshot and get_options_analytics_history report net GEX and DEX over ALL expirations, so they differ from these for the same session and neither is wrong. Long-dated contracts carry large delta, so the two can differ even in sign (SPY 2026-09-29: net DEX -16,795,316,756 over all expirations against +16,246,461,968 over 0-60 days). Under methodology 2 (`methodology`) netGex and netDex give way to `exposures`, the stored assumed dealer book get_options_snapshot and get_options_analytics_history report under 2, over its stated scope; these levels sit in `levels`, labeled methodology 1, each with its own prior in sincePriorSession. '
         + 'Here the call wall is the strike with the largest positive call gamma and the put wall the strike with the most negative put gamma; ties go to the lower strike, a side with no such strike leaves that wall null, and nothing orders them, so the put wall can sit above the call wall. The gamma magnet is the largest absolute gamma strike; the 30-day expected move is a decimal fraction of spot and in dollars. '
         + 'Covers roughly 5,500 listed equities and ETFs. '
         + 'Positive net gamma means dealers hedge against moves and dampen them; negative means they hedge with moves and amplify them. '
@@ -129,7 +130,7 @@ export function register(server: McpServer, client: LiveApiClient, now: () => Da
         + '`status` is "none-on-file" when no earlier session has a summary and "unavailable" when it could not be read; this session\'s values are unaffected either way. '
         + 'It is a close-to-close change on file, not a change to now: the live book comes from get_live_dealer_positioning, over a different window and computation, and differencing the two is not a change. '
         + 'Numbers go out at 15 significant digits at most, each change computed as the exact difference of the two stored values before that rounding. '
-        + 'Distinct from get_regime with scope="symbol", which reports the daily regime classification and its authoritative Greek exposures.',
+        + 'Distinct from get_regime with scope="symbol" (the daily regime classification and its exposures).',
       inputSchema: {
         symbol: z.string().describe('Ticker symbol (e.g., AAPL, SPY)'),
         date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()
@@ -141,13 +142,17 @@ export function register(server: McpServer, client: LiveApiClient, now: () => Da
             + 'After the cutoff the answer says retrying will not succeed: that is the proxy\'s flag for a row absent on the normal schedule, not a promise that the file can never arrive, since a session whose import or exposure computation failed can appear after a later successful import or repair, and nothing here says whether one is coming.'),
         strikeLimit: z.number().int().min(1).max(10).optional()
           .describe('Contributing strikes to return, in stored order. Default 10, which is all the snapshot keeps.'),
+        methodology: methodologyInput(),
       },
       outputSchema: marketDataOutputSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
-    toolHandler(async ({ symbol, date, strikeLimit }) => {
+    toolHandler(async ({ symbol, date, strikeLimit, methodology }) => {
+      // The answer IS exposure: named, else the platform default; never a guess when it cannot be read
+      const resolved = await requireMethodology(client, methodology);
       const params: Record<string, string> = {};
       if (date) params.date = date;
+      if (resolved.methodology === 2) params.exposure = 'v2';
 
       let res: Record<string, unknown>;
       try {
@@ -171,7 +176,16 @@ export function register(server: McpServer, client: LiveApiClient, now: () => Da
 
       // The live tools' one rounding: a value derived in binary, such as the
       // 30-day expected move (29.666368063999997), goes out at 15 digits.
-      return significantDeep(summarizeEodDealerPositioning(res, { strikeLimit }));
+      if (resolved.methodology === 1) return significantDeep({ ...methodologyLabel(resolved), ...summarizeEodDealerPositioning(res, { strikeLimit }) });
+      // methodology 2 is the route's opt-in: an answer without its methodology-2 day did not answer what was asked
+      if (!res || typeof res !== 'object' || !('exposureV2' in res)) {
+        throw new LiveApiError('The answer asked for methodology 2 did not carry it, so it was not used.', 502, 'UPSTREAM_INVALID', false, undefined, undefined);
+      }
+      return significantDeep({
+        ...methodologyLabel(resolved),
+        ...summarizeEodDealerPositioningV2(res, { strikeLimit }),
+        methodologyNote: `${METHODOLOGY_2_NOTE} ${EOD_V2_NOTE}`,
+      });
     }),
   );
 }

@@ -38,6 +38,22 @@ function normalizeGexLevelKeys(target: unknown): void {
   }
 }
 
+// Greek exposure methodology v2: a saved GEX record's methodology is the one the GEX page
+// saved it under (apps/web/src/services/db.ts GEXSnapshotRecord: absent = 1, the page's dealer-hedging record;
+// 2 carries savedBook, the assumed dealer share its totals stand at). Stated on every record; the default never applies.
+function stateSavedMethodology(data: unknown): void {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+  const obj = data as Record<string, unknown>;
+  if (obj.methodology === undefined) obj.methodology = 1;
+}
+
+export const GEX_SNAPSHOT_METHODOLOGY = 'Each record\'s data.methodology is the exposure methodology the GEX page saved it under '
+  + '(1 for a record saved before the page recorded one: its legacy dealer-hedging totals). A methodology-2 record\'s totalGammaExposure '
+  + 'is the assumed dealer book\'s GEX - dealers long the calls and short the puts - at the share of open interest in '
+  + 'data.savedBook.p (the page\'s setting), so it scales with that share; its totalDeltaExposure is the put-minus-call delta balance, '
+  + 'the same at every share. Its walls, magnet and regime are the page\'s, their gamma coverage in data.gammaCoverage where saved. '
+  + 'A saved record keeps its methodology: the platform\'s default does not change it.';
+
 function readNumericKey(target: unknown, keys: string[]): number | null {
   if (!target || typeof target !== 'object' || Array.isArray(target)) return null;
   const obj = target as Record<string, unknown>;
@@ -180,8 +196,10 @@ export function register(server: McpServer, client: ProxyClient): void {
             normalizeGexLevelKeys(record);
             if (record && typeof record === 'object' && record.data && typeof record.data === 'object') {
               normalizeGexLevelKeys(record.data);
+              stateSavedMethodology(record.data);
             }
           }
+          res.methodologyNote = GEX_SNAPSHOT_METHODOLOGY;
         }
         if (full && res != null) {
           replaceDuplicatedDetailsInSnapshotRows(res);

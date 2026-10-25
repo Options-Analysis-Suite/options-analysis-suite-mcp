@@ -319,3 +319,22 @@ describe('get_snapshot - strategy definitions', () => {
     expect(wire.note).toContain('Send to assistant');
   });
 });
+
+describe('a saved GEX record states the methodology it was saved under', () => {
+  const records = [
+    { symbol: 'SPY', timestamp: 2, data: { symbol: 'SPY', totalGammaExposure: 5, methodology: 2, savedBook: { view: 'assumedDealerBook', p: 0.85 } } },
+    { symbol: 'SPY', timestamp: 1, data: { symbol: 'SPY', totalGammaExposure: 7 } },
+  ];
+  test.each([[false], [true]])('full=%p: 2 kept with its book, absent stated 1, the rule once; the default never read', async (full) => {
+    const { calls, handler } = createHarness({ data: structuredClone(records) });
+    const out = JSON.parse((await handler({ type: 'gex', symbol: 'SPY', ...(full ? { full: true } : {}) })).content[0].text);
+    expect(out.data[0].data).toMatchObject({ methodology: 2, savedBook: { view: 'assumedDealerBook', p: 0.85 } });
+    expect(out.data[1].data.methodology).toBe(1);
+    expect(out.methodologyNote).toMatch(/^Each record's data\.methodology is the exposure methodology the GEX page saved it under \(1 for a record saved before the page recorded one/);
+    expect(out.methodologyNote).toMatch(/the platform's default does not change it/);
+    // The GEX total scales with the share; the delta balance does not
+    expect(out.methodologyNote).toMatch(/totalGammaExposure is the assumed dealer book's GEX .* so it scales with that share; its totalDeltaExposure is the put-minus-call delta balance, the same at every share/);
+    expect(out.methodologyNote).not.toMatch(/totals are the assumed|scale with it\)/);
+    expect(calls.map((c) => c.path)).not.toContain('/exposure/methodology');
+  });
+});

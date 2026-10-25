@@ -3,7 +3,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { ProxyClient } from '../../proxy/proxyClient.js';
-import { register } from './regime.js';
+import { existsSync, readFileSync } from 'node:fs';
+import { isDailyChainSource, isIntradayChainSource, register } from './regime.js';
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<{ isError?: boolean; content: Array<{ type: 'text'; text: string }> }>;
 
@@ -11,6 +12,8 @@ function createHarness(stubResponse: any = {}) {
   const calls: Array<{ path: string; params?: Record<string, string> }> = [];
   const fakeClient: ProxyClient = {
     get: async (path: string, params?: Record<string, string>) => {
+      // the platform default, methodology 1 as today; not a regime read
+      if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false };
       calls.push({ path, params });
       return stubResponse;
     },
@@ -882,7 +885,7 @@ describe('regime', () => {
 
 async function callRegimeClient(stub: unknown, args: Record<string, unknown>) {
   const server = new McpServer({ name: 'regime-guidance-test', version: '1' });
-  register(server, { get: async () => structuredClone(stub) } as unknown as ProxyClient);
+  register(server, { get: async (path: string) => (path === '/exposure/methodology' ? { defaultMethodology: 1, stale: false } : structuredClone(stub)) } as unknown as ProxyClient);
   const client = new Client({ name: 'regime-guidance-reader', version: '1' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -929,5 +932,307 @@ describe('confidence and empty-window guidance matches the returned rows', () =>
     expect(out.scansMeta.emptyWindow).toMatch(/interval morning/);
     expect(out.scansMeta.emptyWindow).not.toMatch(/No scan is stored for date/);
     expect(out.scansMeta.emptyWindow).toMatch(/date overrides days/);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Greek exposure methodology v2:
+// one methodology per answer, labeled; methodology 2 from the stored block, methodology 1's levels in `levels`.
+
+/** A registered get_regime whose default route answers as given (an Error rejects it); every other path the stub */
+async function callV2(stub: unknown, args: Record<string, unknown>, defaultAnswer: unknown = { defaultMethodology: 1, stale: false }) {
+  const paths: string[] = [];
+  const server = new McpServer({ name: 'regime-u10-test', version: '1' });
+  register(server, {
+    get: async (path: string) => {
+      paths.push(path);
+      if (path === '/exposure/methodology') {
+        if (defaultAnswer instanceof Error) throw defaultAnswer;
+        return defaultAnswer;
+      }
+      return structuredClone(stub);
+    },
+  } as unknown as ProxyClient);
+  const client = new Client({ name: 'regime-u10-reader', version: '1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const result = await client.callTool({ name: 'get_regime', arguments: args });
+    expect(result.isError).not.toBe(true);
+    const text = (result.content as Array<{ type: string; text: string }>)[0].text;
+    return { out: JSON.parse(text) as Record<string, any>, text, paths };
+  } finally {
+    await client.close();
+    await server.close();
+  }
+}
+
+const V1_GEX = {
+  spotPrice: 671.2, netGamma: 1234567890.5, netDelta: -2345678901.25, netVega: -34567890.125, netVanna: 4567890.75,
+  netCharm: -567890.5, netVomma: 67890.25, callWall: 680, putWall: 660, gammaFlip: 668.5, absGamma: 670, regime: 'positive',
+  topStrikes: Array.from({ length: 12 }, (_, j) => ({ strike: 665 + j, netGamma: 1000 + j, callGamma: 5, putGamma: -3 })),
+};
+
+// SPY's daily block of 2026-10-23 as regime_daily stores it (read-only, 10-24), bases left out
+function v2Block(overrides: Record<string, unknown> = {}) {
+  return {
+    asOf: '2026-10-23', carry: null, scope: { expirations: 'all' },
+    units: { gex: 'USD of delta per 1% move', vegaExposure: 'USD per vol point' },
+    longOi: { gex: 39578835690.025, vanna: 55865540.668741226, vomma: 41869924.254895926, charmFlow: -708314645.3629999, vegaExposure: 993900840.5978477 },
+    source: 'scan_strikes', carryFit: null,
+    coverage: Object.fromEntries(['vega', 'charm', 'delta', 'gamma', 'vanna', 'vomma'].map((m) => [m, { total: 9393, status: 'complete', included: 9393 }])),
+    rollModel: 'log-forward-theil-sen-v1', rollStatus: 'notApplicable', expiryScope: 'eod-session-1', methodology: 2, referenceKind: 'spot', charmTimeBasis: 'calendar-day',
+    assumedDealerBook: { gex: -13845258254.490454, vanna: 5991747552.922032, vomma: 6920285.69417274, charmFlow: 2146427916.062272, vegaExposure: -176041469.23922223 },
+    putMinusCallDeltaBalance: 24197532839.69932,
+    ...overrides,
+  };
+}
+
+const dailyEntry = (date: string, meta: Record<string, unknown>) => ({
+  date, label: 'NORMAL', stress_score: 0.2, confidence: 0.8, drivers: [{ feature: 'vol_level', z: -0.6, contribution: 0.07 }],
+  vector: { _meta: { models_succeeded: 8, models_attempted: 8, ...meta } },
+});
+const symbolStubOf = (...history: unknown[]) => ({ symbol: 'SPY', scope: 'market', history });
+const V1_KEY = /"net(Gamma|Delta|Vega|Vanna|Charm|Vomma)"/;
+/** The answer with every `levels` object removed: what must carry no methodology-1 total */
+function withoutLevels(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutLevels);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([key]) => key !== 'levels').map(([key, v]) => [key, withoutLevels(v)]));
+}
+
+describe('get_regime by methodology', () => {
+  test('methodology 2: the stored block\'s numbers, methodology 1\'s levels labeled, no methodology-1 total outside them, no storage word', async () => {
+    const { out, text } = await callV2(symbolStubOf(dailyEntry('2026-10-23', { gex: V1_GEX, gexV2: v2Block() })), { scope: 'symbol', symbol: 'SPY', methodology: 2 });
+    expect(out).toMatchObject({ methodology: 2, methodologySource: 'requested' });
+    expect(out).not.toHaveProperty('methodologyStale');
+    expect(out.exposures).toEqual({
+      scope: 'every expiration after the session; the end-of-day options chain',
+      gex: -13845258254.4905, vegaExposure: -176041469.239222, vanna: 5991747552.92203, charmFlow: 2146427916.06227, vomma: 6920285.69417274,
+      longOi: { gex: 39578835690.025, vegaExposure: 993900840.597848, vanna: 55865540.6687412, charmFlow: -708314645.363, vomma: 41869924.2548959 },
+      putMinusCallDeltaBalance: 24197532839.6993,
+      referenceKind: 'spot', charmBasis: 'cash',
+    });
+    expect(out.levels).toEqual({
+      methodology: 1, spotPrice: 671.2, callWall: 680, putWall: 660, gammaFlip: 668.5, gammaMagnet: 670, regime: 'positive',
+      topStrikes: V1_GEX.topStrikes.slice(0, 10).map(({ strike, netGamma }) => ({ strike, netGamma })),
+    });
+    expect(JSON.stringify(withoutLevels(out))).not.toMatch(V1_KEY);
+    expect(text).not.toMatch(/scan_strikes|_zip|intraday_chain|_meta|gexV2/);
+    // the note keys survive the wire: the v2 exposures note and the plain methodologyNote
+    expect(out.methodologyNote).toMatch(/^Methodology 2: `exposures` is the assumed dealer book/);
+    expect(out.exposuresNote).toMatch(/^`levels` are methodology 1's gamma-derived levels, labeled so/);
+    expect(out.exposuresNote).toMatch(/topStrikes are methodology 1's strikes .* over its whole input, the first 10/);
+    // The blocks share the chain, spot and rates, not their rows - each methodology has its own expiry scope
+    expect(out.exposuresNote).toMatch(/from the same chain, spot, rate and dividend inputs as the levels but under methodology 2's own expiry scope: for the daily scan every stored row whose expiration is after the session, while methodology 1's levels and topStrikes keep the contracts expiring that session/);
+    expect(out.exposuresNote).not.toMatch(/same rows|every stored row for the daily scan\./);
+    expect(out.guide).not.toHaveProperty('exposuresUnavailable');
+  });
+
+  test('methodology 1 by default: today\'s exposures, labeled, no levels and no methodology-2 note', async () => {
+    const { out } = await callV2(symbolStubOf(dailyEntry('2026-10-23', { gex: V1_GEX, gexV2: v2Block() })), { scope: 'symbol', symbol: 'SPY' });
+    expect(out).toMatchObject({ methodology: 1, methodologySource: 'default' });
+    expect(out.exposures.netGamma).toBe(1234567890.5);
+    expect(out.exposures.netVega).toBe(-34567890.125);
+    expect(out).not.toHaveProperty('levels');
+    expect(out).not.toHaveProperty('methodologyNote');
+    expect(out.exposuresNote.startsWith('callWall, putWall, gammaFlip and gammaMagnet are over the 0-60 day window')).toBe(true);
+  });
+
+  test('a default of 2 is methodology 2 from the default, and a stale one says so', async () => {
+    const stub = symbolStubOf(dailyEntry('2026-10-23', { gex: V1_GEX, gexV2: v2Block() }));
+    const fromDefault = (await callV2(stub, { scope: 'symbol', symbol: 'SPY' }, { defaultMethodology: 2, stale: false })).out;
+    expect(fromDefault).toMatchObject({ methodology: 2, methodologySource: 'default' });
+    expect(fromDefault.exposures.gex).toBe(-13845258254.4905);
+    const stale = (await callV2(stub, { scope: 'symbol', symbol: 'SPY' }, { defaultMethodology: 2, stale: true })).out;
+    expect(stale).toMatchObject({ methodology: 2, methodologySource: 'default', methodologyStale: true });
+  });
+
+  test('an unreadable default withholds the exposures, never the classification; a named methodology never reads it', async () => {
+    const stub = symbolStubOf(dailyEntry('2026-10-23', { gex: V1_GEX, gexV2: v2Block() }));
+    const { out } = await callV2(stub, { scope: 'symbol', symbol: 'SPY' }, new Error('HTTP 503'));
+    expect(out.exposuresWithheld).toBe('The platform\'s default exposure methodology could not be read. Retry, or name methodology 1 or 2.');
+    expect(out).toMatchObject({ label: 'Normal', stressScore: 0.2 });
+    for (const key of ['exposures', 'levels', 'methodology', 'methodologySource', 'exposuresNote', 'methodologyNote']) expect(out).not.toHaveProperty(key);
+    const named = await callV2(stub, { scope: 'symbol', symbol: 'SPY', methodology: 1 }, new Error('HTTP 503'));
+    expect(named.out).toMatchObject({ methodology: 1, methodologySource: 'requested' });
+    expect(named.out.exposures.netGamma).toBe(1234567890.5);
+    expect(named.paths).not.toContain('/exposure/methodology');
+  });
+
+  test('each entry says why its methodology-2 exposures are null, and only the levels it stores', async () => {
+    const stub = symbolStubOf(
+      dailyEntry('2026-10-09', { gex: V1_GEX }),
+      dailyEntry('2026-10-12', { gex: V1_GEX, gexV2: null }),
+      dailyEntry('2026-10-13', { gex: V1_GEX, gexV2: { ...v2Block(), methodology: 1 } }),
+      dailyEntry('2024-10-02', {}),
+      dailyEntry('2026-10-23', { gex: V1_GEX, gexV2: v2Block() }),
+    );
+    const { out } = await callV2(stub, { scope: 'symbol', symbol: 'SPY', days: 5, methodology: 2 });
+    const [v1Only, notComputed, unreadable, noneStored, sent] = out.history;
+    expect([v1Only, notComputed, unreadable, noneStored].map((e: any) => [e.exposures, e.exposuresUnavailable]))
+      .toEqual([[null, 'methodology 1 only'], [null, 'not computed'], [null, 'unreadable'], [null, 'none stored']]);
+    expect(v1Only.levels.methodology).toBe(1);
+    expect(notComputed.levels.callWall).toBe(680);
+    expect(noneStored).not.toHaveProperty('levels');
+    expect(sent.exposures.gex).toBe(-13845258254.4905);
+    expect(out.guide.exposuresUnavailable).toMatch(/"methodology 1 only" - the row stores methodology-1 exposures only \(methodology-2 blocks are stored from 2026-10-12/);
+    expect(out.guide.exposuresUnavailable).toMatch(/"not computed" - no methodology-2 block was computed for the row;/);
+    expect(JSON.stringify(withoutLevels(out))).not.toMatch(V1_KEY);
+  });
+
+  test('a history of several sends its shared exposure fields once', async () => {
+    const stub = symbolStubOf(dailyEntry('2026-10-22', { gex: V1_GEX, gexV2: v2Block() }), dailyEntry('2026-10-23', { gex: V1_GEX, gexV2: v2Block() }));
+    const { out } = await callV2(stub, { scope: 'symbol', symbol: 'SPY', days: 2, methodology: 2 });
+    expect(out.exposuresCommon).toEqual({ scope: 'every expiration after the session; the end-of-day options chain', referenceKind: 'spot', charmBasis: 'cash' });
+    for (const entry of out.history) {
+      expect(entry.exposures).not.toHaveProperty('scope');
+      expect(entry.exposures).not.toHaveProperty('referenceKind');
+    }
+    // a field that differs stays on each entry
+    const mixed = symbolStubOf(dailyEntry('2026-10-15', { gex: V1_GEX, gexV2: v2Block({ expiryScope: undefined }) }), dailyEntry('2026-10-23', { gex: V1_GEX, gexV2: v2Block() }));
+    const two = (await callV2(mixed, { scope: 'symbol', symbol: 'SPY', days: 2, methodology: 2 })).out;
+    expect(two.exposuresCommon).toEqual({ referenceKind: 'spot', charmBasis: 'cash' });
+    expect(two.history[0].exposures.scope).toMatch(/its own expiring contracts included \(a block stored before the expiry rule was recorded on 2026-10-16\)/);
+    expect(two.history[1].exposures.scope).toBe('every expiration after the session; the end-of-day options chain');
+  });
+
+  test('the scope says what is known: an unknown chain word drops only the chain, an unknown rule only the rule', async () => {
+    const scopeOf = async (block: Record<string, unknown>) => (await callV2(symbolStubOf(dailyEntry('2026-10-23', { gex: V1_GEX, gexV2: block })), { scope: 'symbol', symbol: 'SPY', methodology: 2 })).out.exposures.scope;
+    // the end-of-day archive's replay, known by its form
+    expect(await scopeOf(v2Block({ source: 'archive_zip' }))).toBe('every expiration after the session; the end-of-day options chain');
+    expect(await scopeOf(v2Block({ source: 'archive_zip_v2' }))).toBe('every expiration after the session');
+    expect(await scopeOf(v2Block({ source: 'some_new_store' }))).toBe('every expiration after the session');
+    expect(await scopeOf(v2Block({ expiryScope: 'eod-session-2' }))).toBe('the end-of-day options chain');
+    expect(await scopeOf(v2Block({ source: 'some_new_store', expiryScope: 'eod-session-2' }))).toBeUndefined();
+    // an intraday chain word on a daily row is not a daily chain
+    expect(await scopeOf(v2Block({ source: 'intraday_chain' }))).toBe('every expiration after the session');
+  });
+
+  test('nothing stored and nothing named: no default read and no label; volatility, sectors and cot never read it', async () => {
+    const bare = await callV2(symbolStubOf(dailyEntry('2026-10-23', {})), { scope: 'symbol', symbol: 'SPY' });
+    expect(bare.paths).not.toContain('/exposure/methodology');
+    expect(bare.out).not.toHaveProperty('methodology');
+    for (const args of [{ scope: 'volatility' }, { scope: 'sectors' }, { scope: 'cot' }, { scope: 'cot', symbol: 'ES' }]) {
+      const paths: string[] = [];
+      let handler: ToolHandler | null = null;
+      const fakeServer = { registerTool: (_name: string, _config: unknown, h: ToolHandler) => { handler = h; } } as unknown as McpServer;
+      register(fakeServer, { get: async (path: string) => { paths.push(path); return {}; } } as unknown as ProxyClient);
+      await handler!({ ...args, methodology: undefined });
+      expect(paths.length).toBeGreaterThan(0);
+      expect(paths).not.toContain('/exposure/methodology');
+    }
+  });
+
+  const intradayScan = (date: string, time: string, meta: Record<string, unknown>) => ({
+    date, scan_time: `${date}T${time}:00.000Z`, interval: 'midday', scope: 'market', label: 'ELEVATED', stress_score: 0.4, confidence: 0.9,
+    drivers: [], vector: { _meta: { calibration: { succeeded: 8, total: 8 }, ...meta } },
+  });
+  const intradayBlock = (overrides: Record<string, unknown> = {}) => v2Block({ source: 'intraday_chain', expiryScope: 'intraday-clock-1', ...overrides });
+
+  test('intraday: same-day expirations excluded with or without the clock rule, the assumed book only, shared fields once', async () => {
+    const stub = { symbol: 'SPY', count: 2, scans: [
+      intradayScan('2026-10-23', '17:00', { gex: V1_GEX, gexV2: intradayBlock() }),
+      intradayScan('2026-10-16', '17:00', { gex: V1_GEX, gexV2: intradayBlock({ expiryScope: undefined }) }),
+    ] };
+    const { out } = await callV2(stub, { scope: 'intraday', symbol: 'SPY', methodology: 2 });
+    expect(out.exposuresCommon).toEqual({ scope: 'same-day expirations excluded; the intraday broker chain\'s rows the scan\'s normalizer keeps', referenceKind: 'spot', charmBasis: 'cash' });
+    for (const scan of out.scans) {
+      expect(scan.exposures).not.toHaveProperty('longOi');
+      expect(scan.exposures.gex).toBe(-13845258254.4905);
+      expect(scan.levels.topStrikes).toHaveLength(5);
+    }
+    expect(out.exposuresNote).toMatch(/^`levels` are methodology 1's gamma-derived levels/);
+    expect(out.exposuresNote).toMatch(/the first 5 on an intraday scan/);
+    expect(out.exposuresNote).toMatch(/normalizer keeps from the broker chain/);
+    expect(out.exposuresNote).toMatch(/under methodology 2's own expiry scope: .*, less an expiration already past its close when the scan read it, and an expiration whose chain fetch failed is absent altogether/);
+    expect(out.methodologyNote).toMatch(/^Methodology 2/);
+  });
+
+  test('intraday migration under 2: the levels from `levels`, gex in place of netGamma, a scan without a block still a basis for the levels', async () => {
+    const stub = { symbol: 'SPY', count: 3, scans: [
+      intradayScan('2026-10-23', '14:00', { gex: { ...V1_GEX, gammaFlip: 668 }, gexV2: intradayBlock() }),
+      intradayScan('2026-10-23', '16:00', { gex: { ...V1_GEX, gammaFlip: 669 } }),
+      intradayScan('2026-10-23', '18:00', { gex: { ...V1_GEX, gammaFlip: 671 }, gexV2: intradayBlock({ assumedDealerBook: { ...v2Block().assumedDealerBook, gex: -1e10 } }) }),
+    ] };
+    const { out } = await callV2(stub, { scope: 'intraday', symbol: 'SPY', migration: true, methodology: 2 });
+    const [first, second, third] = out.scans;
+    expect(first.migration).toBeNull();
+    expect(second.exposuresUnavailable).toBe('methodology 1 only');
+    expect(second.migration.basis).toBe('previous-scan');
+    expect(second.migration.gammaFlip).toMatchObject({ from: 668, to: 669, change: 1 });
+    expect(second.migration.gex).toEqual({ from: -13845258254.4905, to: null, change: null, changePct: null, perHour: null, direction: null });
+    expect(second.migration).not.toHaveProperty('netGamma');
+    // the scan without a block was the third's basis for the levels; its gex had none
+    expect(third.migration.gammaFlip).toMatchObject({ from: 669, to: 671, change: 2 });
+    expect(third.migration.gex).toMatchObject({ from: null, to: -10000000000, change: null });
+    expect(out.migrationNote).toMatch(/`gex` is the methodology-2 assumed book's, from `exposures`/);
+  });
+
+  test('a methodology-2 intraday window of 40 scans keeps every scan inside the wire ceiling', async () => {
+    const scans = Array.from({ length: 40 }, (_, i) => {
+      const date = new Date(Date.UTC(2026, 9, 23 - Math.floor(i / 5))).toISOString().slice(0, 10);
+      return intradayScan(date, ['13:45', '15:00', '17:00', '18:30', '19:45'][i % 5], { prevLabel: 'ELEVATED', prevLabelSource: 'earlier-scan', gex: V1_GEX, gexV2: intradayBlock() });
+    });
+    const { out, text } = await callV2({ symbol: 'SPY', count: scans.length, scans }, { scope: 'intraday', symbol: 'SPY', days: 90, methodology: 2 });
+    expect(out.scans).toHaveLength(40);
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(49_920);
+  });
+
+  test('market with include_symbols under 2: each row\'s block and levels without topStrikes; the composite says none stored', async () => {
+    const stub = {
+      market: { date: '2026-10-23', label: 'NORMAL', stress_score: 0.2, confidence: 0.8, vector: { _meta: {} } },
+      symbols: { market: [{ symbol: 'SPY', scope: 'market', label: 'NORMAL', stress_score: 0.3, vector: { _meta: { gex: V1_GEX, gexV2: v2Block() } } },
+        { symbol: 'QQQ', scope: 'market', label: 'NORMAL', stress_score: 0.1, vector: { _meta: { gex: V1_GEX, gexV2: v2Block() } } }] },
+    };
+    const { out } = await callV2(stub, { scope: 'market', include_symbols: true, methodology: 2 });
+    expect(out.market).toMatchObject({ exposures: null, exposuresUnavailable: 'none stored' });
+    for (const row of out.symbols.market) {
+      expect(row.exposures.gex).toBe(-13845258254.4905);
+      expect(row.levels).not.toHaveProperty('topStrikes');
+      expect(row.levels.methodology).toBe(1);
+    }
+    expect(out.exposuresCommon).toMatchObject({ referenceKind: 'spot' });
+    expect(out.exposuresNote).toMatch(/the breakdown's rows carry no topStrikes/);
+    expect(JSON.stringify(withoutLevels(out))).not.toMatch(V1_KEY);
+  });
+
+  test('the composite alone, nothing named: no default read, the answer as today', async () => {
+    const { out, paths } = await callV2({ market: { date: '2026-10-23', label: 'NORMAL', stress_score: 0.2 } }, { scope: 'market' });
+    expect(paths).not.toContain('/exposure/methodology');
+    expect(out).not.toHaveProperty('methodology');
+    expect(out).not.toHaveProperty('exposuresNote');
+  });
+
+  // The public mirror ships the MCP server alone, without the regime worker: there these two have nothing to read.
+  const workerSource = new URL('../../../../proxy/scripts/regime-worker/gex-compute.ts', import.meta.url);
+  const csvReader = new URL('../../../../proxy/scripts/recompute-forward-priced-history.ts', import.meta.url);
+  const workerChain = new URL('../../../../proxy/tests/fixtures/forward-encoding/aapl-20240401.csv', import.meta.url);
+  test.skipIf(!existsSync(workerSource) || !existsSync(workerChain))('the worker\'s own blocks: a session\'s expiring legs in methodology 1\'s levels, not in methodology 2\'s book, and the note says so', async () => {
+    const { computeRegimeExposureBlocks } = await import(workerSource.href);
+    const { keptRowsFromCsv } = await import(csvReader.href);
+    const rows = keptRowsFromCsv(readFileSync(workerChain, 'utf8'), new Set(['AAPL']), '2024-04-01').get('AAPL') as any[];
+    const spot = Number(rows[0].stk_px_cents) / 100;
+    // the worker test's case (proxy/tests/regime-exposure-v2.test.ts): a same-day expiration with outsized gamma
+    const sameDay = rows.slice(0, 3).map((row) => ({ ...row, expir_date: '2024-04-01', yte: 0, gamma: Number(row.gamma) * 40 }));
+    const ctx = { source: 'scan_strikes', asOf: '2024-04-01' };
+    const withSameDay = computeRegimeExposureBlocks('AAPL', [...sameDay, ...rows], spot, 0.0525, 0.0055, 60, ctx);
+    const without = computeRegimeExposureBlocks('AAPL', rows, spot, 0.0525, 0.0055, 60, ctx);
+    // the expiring legs move methodology 1's numbers and leave methodology 2's book as it was
+    expect(withSameDay.gex.netGamma).not.toBe(without.gex.netGamma);
+    expect(withSameDay.gexV2.assumedDealerBook).toEqual(without.gexV2.assumedDealerBook);
+    const { out } = await callV2(symbolStubOf(dailyEntry('2024-04-01', { gex: withSameDay.gex, gexV2: withSameDay.gexV2 })), { scope: 'symbol', symbol: 'AAPL', methodology: 2 });
+    expect(out.exposures.gex).toBe(Number(without.gexV2.assumedDealerBook.gex.toPrecision(15)));
+    expect(out.levels.topStrikes).toEqual(withSameDay.gex.topStrikes.slice(0, 10).map(({ strike, netGamma }: any) => ({ strike, netGamma: Number(netGamma.toPrecision(15)) })));
+    expect(out.exposures.scope).toBe('every expiration after the session; the end-of-day options chain');
+    expect(out.exposuresNote).toMatch(/methodology 1's levels and topStrikes keep the contracts expiring that session/);
+  });
+  test.skipIf(!existsSync(workerSource))('every chain word the regime worker writes (RegimeChainSource) is classified, as daily or intraday but never both', () => {
+    const union = /export type RegimeChainSource = ([^;]+);/.exec(readFileSync(workerSource, 'utf8'));
+    expect(union).not.toBeNull();
+    const words = [...union![1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+    expect(words.length).toBeGreaterThanOrEqual(3);
+    for (const word of words) expect([isDailyChainSource(word), isIntradayChainSource(word)].filter(Boolean)).toHaveLength(1);
+    expect(words.filter(isIntradayChainSource)).toHaveLength(1);
   });
 });

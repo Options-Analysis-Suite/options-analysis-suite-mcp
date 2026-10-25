@@ -3,7 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { LiveApiClient, LiveRateLimit } from '../../proxy/liveApiClient.js';
 import { toolHandler } from '../helpers.js';
 import { marketDataOutputSchema } from '../outputSchemas.js';
-import { summarizeStrategyScan } from './strategyScanShaping.js';
+import { STRATEGY_LEVELS_METHODOLOGY, summarizeStrategyScan } from './strategyScanShaping.js';
 import { significantDeep } from './dealerPositioningShaping.js';
 
 /**
@@ -59,7 +59,8 @@ export function register(server: McpServer, client: LiveApiClient): void {
         + 'The budget is your broker\'s own quota (120 requests a minute on Tradier and Schwab, 600 on Public, 120 on tastytrade, 30 on moomoo), shared with the other live tools. '
         + 'Another scan of the same expiration within 15 seconds (same account, broker, `levels` and supplied `r` and `q`), with any other strategy or filters, can be answered from the cached chain with the same `asOf`, quotes and expected move, uncharged and even on a spent budget (the cache is per proxy instance, so a repeat can also be read afresh). '
         + 'Do not call it in a loop or for a list of symbols. '
-        + 'For dealer levels alone use get_live_dealer_positioning (live) or get_dealer_positioning (the most recent session on file, 0-60 days, free, no broker).',
+        + 'For dealer levels alone use get_live_dealer_positioning (live) or get_dealer_positioning (the most recent session on file, 0-60 days, free, no broker). '
+        + STRATEGY_LEVELS_METHODOLOGY,
       inputSchema: {
         symbol: z.string().describe('Ticker symbol (e.g., AAPL, SPY, MU)'),
         expiration: z.string().regex(/^\d{4}-\d{2}-\d{2}$/)

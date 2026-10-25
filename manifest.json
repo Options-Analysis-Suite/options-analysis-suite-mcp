@@ -80,7 +80,7 @@
     },
     {
       "name": "get_regime",
-      "description": "Get regime data at one of six scopes: market (composite stress regime across SPY/QQQ/IWM/DIA), symbol (per-symbol daily regime + authoritative Greek exposures — net gamma/delta/vega/vanna/charm/vomma, call wall, put wall, gamma flip, gamma magnet, top 10 gamma strikes), intraday (5 scans/day with stress scoring + Greek snapshots), volatility (the VIX term structure at the close: VIX1D to VIX6M, its shape, VIX/VIX3M and VVIX), sectors (sector and industry P/E and daily change by exchange, with one group's history), or cot (CFTC Commitments of Traders positioning: a futures contract's family market with every trader group and its 3-year range, or every market's speculative line). Pick via the scope enum; symbol and intraday require `symbol`"
+      "description": "Get regime data at one of six scopes: market (composite stress regime across SPY/QQQ/IWM/DIA), symbol (per-symbol daily regime + authoritative Greek exposures by methodology - net gamma/delta/vega/vanna/charm/vomma under 1, the assumed dealer book under 2 - with methodology 1's call wall, put wall, gamma flip, gamma magnet, top 10 gamma strikes), intraday (5 scans/day with stress scoring + Greek snapshots), volatility (the VIX term structure at the close: VIX1D to VIX6M, its shape, VIX/VIX3M and VVIX), sectors (sector and industry P/E and daily change by exchange, with one group's history), or cot (CFTC Commitments of Traders positioning: a futures contract's family market with every trader group and its 3-year range, or every market's speculative line). Pick via the scope enum; symbol and intraday require `symbol`"
     },
     {
       "name": "get_earnings",
@@ -120,7 +120,7 @@
     },
     {
       "name": "get_options_analytics_history",
-      "description": "Get historical daily analytics snapshots (IV, skew, expected move, risk-free rate, GEX/DEX/VEX, net vanna/charm/vomma); for walls and current Greek exposures use get_regime with scope='symbol'"
+      "description": "Get historical daily analytics snapshots (IV, skew, expected move, risk-free rate, and the exposures by methodology: GEX/DEX/VEX and net vanna/charm/vomma under 1, the assumed dealer book under 2); for walls and current Greek exposures use get_regime with scope='symbol'"
     },
     {
       "name": "get_iv_surface",
@@ -176,7 +176,7 @@
     },
     {
       "name": "get_live_dealer_positioning",
-      "description": "Get LIVE dealer positioning from your connected broker's chain: net GEX/DEX, vega, vanna, charm and vomma, the gamma flip, call and put walls, and the gamma regime over the nearest four expirations"
+      "description": "Get LIVE dealer positioning from your connected broker's chain: the exposures by methodology (net GEX/DEX, vega, vanna, charm and vomma under 1; the assumed dealer book under 2), the gamma flip, call and put walls, and the gamma regime over the nearest four expirations"
     },
     {
       "name": "scan_option_strategies",
@@ -196,7 +196,7 @@
     },
     {
       "name": "get_options_snapshot",
-      "description": "Get the end-of-day options snapshot for a symbol (spot, max pain, net GEX/DEX, ATM IV term structure, IV rank and percentile, historical vol, volume and open interest), with optional per-strike curve summaries; pass several symbols to compare headline metrics in one request"
+      "description": "Get the end-of-day options snapshot for a symbol (spot, max pain, net GEX/DEX by methodology, ATM IV term structure, IV rank and percentile, historical vol, volume and open interest), with optional per-strike curve summaries; pass several symbols to compare headline metrics in one request"
     },
     {
       "name": "get_regime_fits",
@@ -204,7 +204,7 @@
     },
     {
       "name": "get_dealer_positioning",
-      "description": "Get end-of-day dealer positioning from the most recent session on file over 0-60 days: net GEX/DEX, dealer regime, gamma flip, call and put walls, gamma magnet, 30-day expected move and top contributing strikes, for roughly 5,500 listed equities and ETFs"
+      "description": "Get end-of-day dealer positioning from the most recent session on file: net GEX/DEX over 0-60 days (under methodology 2 the stored assumed dealer book, over the scope the answer states) and the 0-60 day dealer regime, gamma flip, call and put walls, gamma magnet, 30-day expected move and top contributing strikes, for roughly 5,500 listed equities and ETFs"
     },
     {
       "name": "compute_black_scholes",

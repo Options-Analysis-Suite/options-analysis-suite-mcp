@@ -38,6 +38,14 @@ const BY_SIZE: ReadonlySet<LiveSkewGexRankBy> = new Set(['skewChange', 'gexChang
 
 export const MAX_LIVE_SKEW_GEX_SYMBOLS = 50;
 
+/**
+ * Greek exposure methodology v2: this tool's GEX is its own engine's, never labeled platform
+ * methodology 1, and the platform's default methodology does not control it.
+ */
+export const LIVE_SKEW_GEX_METHODOLOGY = 'GEX here is this tool\'s own model (`method`: implied volatility solved from the live mids), '
+  + 'neither platform exposure methodology 1 nor 2, and the platform\'s default exposure methodology does not change it; its sign '
+  + '(calls positive, puts negative) is the assumed dealer book\'s in both.';
+
 /** Room under the response ceiling for the wire sanitizer's renames and the envelope. */
 export const LIVE_SKEW_GEX_MARGIN_BYTES = 2 * 1024;
 const MAX_WARNINGS = 3;
@@ -354,6 +362,7 @@ export function shapeLiveSkewGex(response: unknown, options: LiveSkewGexShapeOpt
     rates: [...rates.values()].sort((a, b) => (a.expiration < b.expiration ? -1 : a.expiration > b.expiration ? 1 : 0)),
     units: LIVE_SKEW_GEX_UNITS,
     method: record(body.method),
+    methodologyNote: LIVE_SKEW_GEX_METHODOLOGY,
     notes: record(body.notes),
     ...('rateLimit' in options ? { rateLimit: options.rateLimit ?? null } : {}),
     guide: {} as Guide,

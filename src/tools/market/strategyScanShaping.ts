@@ -14,6 +14,10 @@ import { readOmittedRows } from './omittedRows.js';
 import type { LiveRateLimit } from '../../proxy/liveApiClient.js';
 import { rateLimitGuide, spotClockGuide, type Guide } from '../liveGuide.js';
 
+/** The scan's levels are methodology 1's; stated once on every answer */
+export const STRATEGY_LEVELS_METHODOLOGY = '`levels` are methodology 1\'s gamma-derived levels (gammaFlip, callWall, putWall, gammaMagnet, dealerRegime): '
+  + 'methodology 2 keeps their definitions and computes none, so the platform\'s default exposure methodology does not change them.';
+
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
 const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
@@ -83,6 +87,9 @@ export function summarizeStrategyScan(response: Record<string, unknown>, options
   const searchStatus = cov.gammaFlipSearchStatus;
   const resolution = num(cov.gammaFlipResolution);
   const levels = {
+    // Greek exposure methodology v2: the legacy engine's gamma-derived levels, labeled; the
+    // platform's default methodology does not apply (methodology 2 keeps their definitions and computes none)
+    methodology: 1,
     scope: rawLevels.scope === 'expiration' || rawLevels.scope === 'window' ? rawLevels.scope : null,
     expirations: arr(rawLevels.expirations).filter((e): e is string => typeof e === 'string'),
     gammaFlip: flip.value,

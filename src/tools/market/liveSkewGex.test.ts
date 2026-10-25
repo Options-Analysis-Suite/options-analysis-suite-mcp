@@ -265,3 +265,17 @@ describe('ranking guidance through both MCP channels', () => {
     }
   });
 });
+
+describe('rank_live_skew_gex and the exposure methodology', () => {
+  it('its GEX is its own model\'s, never labeled platform methodology 1, and the default is never read', async () => {
+    const { client, calls, close } = await harness(async () => payload);
+    try {
+      const out = JSON.parse(text(await client.callTool({ name: 'rank_live_skew_gex', arguments: { symbols: 'AAA,BBB' } })));
+      expect(out.methodologyNote).toMatch(/^GEX here is this tool's own model .* neither platform exposure methodology 1 nor 2, and the platform's default exposure methodology does not change it/);
+      expect(out).not.toHaveProperty('methodology');
+      expect(calls.map((c) => c.path)).not.toContain('/exposure/methodology');
+    } finally {
+      await close();
+    }
+  });
+});

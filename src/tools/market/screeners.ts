@@ -5,6 +5,15 @@ import { toolHandler } from '../helpers.js';
 import { marketDataOutputSchema } from '../outputSchemas.js';
 import { modelDisplayName } from '../modelLabels.js';
 import { humanizeFeature, displayRegimeLabels } from './marketRegimeShaping.js';
+import { LiveApiError } from '../../proxy/liveApiClient.js';
+import {
+  DEFAULT_UNREADABLE,
+  methodologyInput,
+  methodologyLabel,
+  requireMethodology2Envelope,
+  resolveMethodology,
+  type ResolvedMethodology,
+} from '../exposureMethodology.js';
 
 /**
  * One unified tool for every options-market screener the platform
@@ -110,6 +119,53 @@ function humanizeScreenerOutput(value: unknown, depth = 0): unknown {
 
   return value;
 }
+
+// Greek exposure methodology v2: the screens whose
+// rows carry exposure figures, by what the figure is to them. U8's routes take `exposure=v2` (proxy/routes/scanner.ts):
+// a ranking by the figure ('ranked') answers methodology 2 or refuses; a shown column ('column') is the book's under 2;
+// contract views have no methodology-2 figure (the routes refuse them under 2), so a ranked contract view is refused and
+// a shown contract column is withheld. Every other screen carries no exposure figure and takes no methodology.
+type ExposureRole = 'ranked' | 'column' | 'ranked-contract' | 'contract-column';
+function exposureRole(screener: typeof SCREENER_IDS[number], sub: Sub): ExposureRole | null {
+  const contract = (sub.view ?? 'ticker') === 'contract';
+  switch (screener) {
+    case 'gex': return contract ? 'ranked-contract' : 'ranked';
+    case 'most-active': case 'highest-oi': case 'highest-iv': case 'unusual': return contract ? 'contract-column' : 'column';
+    case 'dod-change': return sub.metric === 'gex' ? 'ranked' : null;
+    case 'delta-exposure': case 'vega-exposure': return 'ranked';
+    case 'max-pain': return sub.mode === 'pinning' ? 'ranked' : null;
+    default: return null;
+  }
+}
+
+/** Every exposure figure a row of these screens can carry, under either methodology's row names */
+const ROW_EXPOSURE_KEYS = ['netGex', 'netDex', 'netVex', 'netVanna', 'netCharm', 'netVomma', 'normalizedDex', 'gammaConcentration', 'exposureStatus', 'charmBasis'] as const;
+function withoutExposureFields(res: any): void {
+  if (!res || !Array.isArray(res.data)) return;
+  for (const row of res.data) {
+    if (row && typeof row === 'object') for (const key of ROW_EXPOSURE_KEYS) delete row[key];
+  }
+}
+
+/** The proxy's charm basis word as prose (its other values pass as they came) */
+function proseCharmBasis(res: any): void {
+  if (!res || !Array.isArray(res.data)) return;
+  for (const row of res.data) if (row && typeof row === 'object' && row.charmBasis === 'fixedReference') row.charmBasis = 'fixed reference';
+}
+
+const SCREENER_V2_NOTE = 'Methodology 2: every exposure figure is the assumed dealer book - dealers long the calls and short the puts, '
+  + 'every contract of open interest (share 1) - over every expiration after the session where the expiry rule is proven (a figure '
+  + 'whose exposureStatus says qualified may count contracts expiring that session). The row names stay and follow the book: '
+  + 'netGex its GEX (USD of delta per 1% move), netDex the put-minus-call delta balance (USD, underlying-equivalent), netVex its vega '
+  + 'exposure (USD per vol point), netVanna its vanna (USD of delta per vol point), netCharm its charm flow (USD of the underlying '
+  + 'traded per calendar day, + is buying), netVomma its vomma (USD per (vol point)^2), gammaConcentration the concentration of its '
+  + 'per-strike GEX, and current, previous and delta its GEX on each date. exposureStatus says how complete a shown figure is '
+  + '(partial: the sum of the legs included; qualified: its expiry scope is not proven; null: unavailable). A ranking BY an exposure figure (the gex screen, the GEX change, '
+  + 'the delta and vega leaders, max-pain pinning) takes only complete books whose expiry scope is proven, and `excluded` counts '
+  + 'the rows it left out by reason; the volume, open-interest, IV and unusual tabs keep their own rankings and show each row\'s GEX '
+  + 'as it stands. charmBasis "cash" is charm on the cash price, "fixed reference" on the forward or future held fixed. transient: '
+  + 'part of the answer may still change (it was not cached), so a later call can differ.';
+const CONTRACT_V2_NOTE = 'Contract-level GEX is not published under methodology 2, so the contract rows carry no netGex.';
 
 function routeForScreener(screener: typeof SCREENER_IDS[number], sub: Sub, limit: number): ScreenerRoute {
   const limitStr = String(limit);
@@ -259,6 +315,7 @@ export function register(server: McpServer, client: ProxyClient): void {
         threshold: z.number().min(0).optional().describe('Only for unusual: min volume-to-open-interest ratio. Default 1.0.'),
         days: z.number().int().min(1).max(730).optional().describe('For market-trends: history length in days (1..730). For earnings-calendar: forward window size in days (1..90, default 14). Earnings-calendar enforces the 90-day cap at runtime.'),
         symbol: z.string().optional().describe('Only for earnings-calendar: filter to a single ticker.'),
+        methodology: methodologyInput('For the screens with exposure figures (gex, the main tabs\' net GEX, dod-change gex, delta-exposure, vega-exposure, max-pain pinning). '),
       },
       outputSchema: marketDataOutputSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
@@ -279,12 +336,43 @@ export function register(server: McpServer, client: ProxyClient): void {
       const limit = (args.limit as number) ?? 15;
 
       const route = routeForScreener(screener, sub, limit);
-      const res = await client.get(route.path, route.query) as any;
+      // The methodology, for a screen whose rows carry exposure figures: named, else the platform default. A
+      // ranking by the figure cannot be answered without one; a shown column is withheld instead.
+      const role = exposureRole(screener, sub);
+      let resolved: ResolvedMethodology | null = null;
+      if (role !== null) {
+        resolved = await resolveMethodology(client, args.methodology);
+        if (resolved === null && (role === 'ranked' || role === 'ranked-contract')) {
+          throw new LiveApiError(DEFAULT_UNREADABLE, 503, 'DEFAULT_METHODOLOGY_UNAVAILABLE', true, undefined, undefined);
+        }
+      }
+      const v2 = resolved?.methodology === 2;
+      if (v2 && role === 'ranked-contract') {
+        throw new LiveApiError('Contract-level GEX is not published under methodology 2, so the gex screen\'s contract view has no ranking there: use view=ticker, or methodology 1.', 400, 'INVALID_REQUEST', false, undefined, undefined);
+      }
+      const asksV2 = v2 && (role === 'ranked' || role === 'column');
+      const res = await client.get(route.path, asksV2 ? { ...route.query, exposure: 'v2' } : route.query) as any;
+      if (asksV2) {
+        requireMethodology2Envelope(res);
+        // checked, so the definition is the note's; the route's own words (the expiry rule's id) stay off the wire
+        delete res.exposure;
+        proseCharmBasis(res);
+      }
+      // no figure is sent that the answer's methodology cannot stand behind
+      const withheld = role !== null && resolved === null;
+      if (withheld || (v2 && role === 'contract-column')) withoutExposureFields(res);
 
       // Proxy responses standardize on { data: [...], ... }. Normalize the
       // few enum-like labels LLMs tend to quote verbatim, then let the shared
       // size guard handle any unusually large payload.
-      return withPartialNote(displayRegimeLabels(humanizeScreenerOutput(res)));   // a regime state reads as its word, the stored key beside it (2026-10-11)
+      const shaped = withPartialNote(displayRegimeLabels(humanizeScreenerOutput(res)));   // a regime state reads as its word, the stored key beside it (2026-10-11)
+      if (role === null || !shaped || typeof shaped !== 'object' || Array.isArray(shaped)) return shaped;
+      if (withheld) return { exposuresWithheld: DEFAULT_UNREADABLE, ...shaped };
+      return {
+        ...methodologyLabel(resolved!),
+        ...shaped,
+        ...(asksV2 ? { methodologyNote: SCREENER_V2_NOTE } : v2 ? { methodologyNote: CONTRACT_V2_NOTE } : {}),
+      };
     }),
   );
 }

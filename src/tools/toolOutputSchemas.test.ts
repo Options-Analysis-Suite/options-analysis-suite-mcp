@@ -285,7 +285,12 @@ describe('MCP tool output schemas', () => {
     // routes proxy/routes/live-broker.ts, regime.ts and scanner.ts mount.
     const requests: Array<{ path: string; params?: Record<string, string>; body?: unknown }> = [];
     const recording = {
-      get: async (path: string, params?: Record<string, string>) => { requests.push({ path, params }); return {}; },
+      get: async (path: string, params?: Record<string, string>) => {
+        // the platform default, methodology 1 as today; a public route, not one of the proxy paths pinned here
+        if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false };
+        requests.push({ path, params });
+        return {};
+      },
       post: async (path: string, body: unknown) => { requests.push({ path, body }); return {}; },
     } as any;
     const { tools, server } = captureRegisteredTools();
@@ -671,6 +676,8 @@ describe('MCP tool output schemas', () => {
     }));
     const recording = {
       get: async (path: string, params?: Record<string, string>) => {
+        // the platform default, read before the positioning and not recorded
+        if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false };
         requests.push({ path, params });
         return { symbol: 'SPY', expirations: ['2026-10-16'], snapshot: { spotPrice: 120 }, byStrike };
       },
@@ -709,7 +716,7 @@ describe('MCP tool output schemas', () => {
     // SPY on 2026-09-29, the values the thirty-first run read with binary
     // noise; the changes now arrive exact from the proxy (eodExposure.ts).
     const recording = {
-      get: async () => ({
+      get: async (path: string) => (path === '/exposure/methodology' ? { defaultMethodology: 1, stale: false } : {
         schemaVersion: 1, symbol: 'SPY', date: '2026-09-29', asOf: '2026-09-29T21:40:00Z',
         source: 'eod_options_snapshot', dteWindow: { minDte: 0, maxDte: 60, unit: 'calendar_days' },
         spotPrice: 764.03, netGex: -10894620007, netDex: 16246461968,
@@ -1111,7 +1118,8 @@ describe('MCP tool output schemas', () => {
     const budget = { limit: 10, remaining: 8, resetSeconds: 43 };
     for (const report of [true, false]) {
       const live = {
-        get: async (_path: string, _params?: Record<string, string>, onRateLimit?: (r: typeof budget) => void) => {
+        get: async (path: string, _params?: Record<string, string>, onRateLimit?: (r: typeof budget) => void) => {
+          if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false };
           if (report) onRateLimit?.(budget);
           return {};
         },
@@ -1137,7 +1145,8 @@ describe('MCP tool output schemas', () => {
     // The whole output passes through one rounding: a tail anywhere in it,
     // here in the budget the proxy reported, is dropped.
     const live = {
-      get: async (_path: string, _params?: Record<string, string>, onRateLimit?: (r: unknown) => void) => {
+      get: async (path: string, _params?: Record<string, string>, onRateLimit?: (r: unknown) => void) => {
+        if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false };
         onRateLimit?.({ limit: 10, remaining: 8.000000000000002, resetSeconds: 43 });
         return {};
       },

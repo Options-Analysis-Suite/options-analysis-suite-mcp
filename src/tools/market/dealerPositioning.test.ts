@@ -29,7 +29,8 @@ describe('registered live dealer-positioning tool', () => {
     };
     let response: Record<string, unknown> = base;
     const server = new McpServer({ name: 'dealer-positioning-test', version: '1' });
-    register(server, { get: async () => response } as unknown as LiveApiClient);
+    // the platform default answers methodology 1
+    register(server, { get: async (path: string) => (path === '/exposure/methodology' ? { defaultMethodology: 1, stale: false } : response) } as unknown as LiveApiClient);
     const client = new Client({ name: 'dealer-positioning-consumer', version: '1' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -78,7 +79,11 @@ describe('registered live dealer-positioning tool - guide, budget and warnings',
     const budget = { limit: 120, remaining: 110, resetSeconds: 20, provider: 'tradier' };
     const server = new McpServer({ name: 'dealer-guide-test', version: '1' });
     register(server, {
-      get: async (_p: string, _q?: Record<string, string>, onRateLimit?: (r: typeof budget) => void) => { onRateLimit?.(budget); return answer; },
+      get: async (p: string, _q?: Record<string, string>, onRateLimit?: (r: typeof budget) => void) => {
+        if (p === '/exposure/methodology') return { defaultMethodology: 1, stale: false };
+        onRateLimit?.(budget);
+        return answer;
+      },
     } as unknown as LiveApiClient);
     const client = new Client({ name: 'dealer-guide-consumer', version: '1' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

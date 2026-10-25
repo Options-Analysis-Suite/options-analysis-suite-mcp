@@ -600,3 +600,19 @@ describe('unknown values and the final fit', () => {
     }
   });
 });
+
+describe('the scan\'s levels are methodology 1\'s', () => {
+  it('labels its levels and states it once in the description; the default never applies', async () => {
+    expect((summarizeStrategyScan(scan()).levels as any).methodology).toBe(1);
+    const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+    const { register } = await import('./strategyScan.js');
+    const { STRATEGY_LEVELS_METHODOLOGY } = await import('./strategyScanShaping.js');
+    let description = '';
+    const calls: string[] = [];
+    register({ registerTool: (_n: string, config: { description: string }) => { description = config.description; } } as unknown as InstanceType<typeof McpServer>,
+      { get: async (path: string) => { calls.push(path); return {}; } } as any);
+    expect(description.endsWith(STRATEGY_LEVELS_METHODOLOGY)).toBe(true);
+    expect(STRATEGY_LEVELS_METHODOLOGY).toMatch(/methodology 2 keeps their definitions and computes none, so the platform's default exposure methodology does not change them/);
+    expect(calls).toHaveLength(0);
+  });
+});

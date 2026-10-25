@@ -10,6 +10,8 @@
  * tool's confidence.
  */
 
+import { exposuresChange, exposuresFromDaily } from '../exposureMethodology.js';
+
 export interface EodExposureResponse { [key: string]: unknown }
 
 export interface ShapeEodDealerPositioningOptions {
@@ -151,6 +153,84 @@ export function summarizeEodDealerPositioning(
         fraction: 'decimal fraction of spotPrice over the next 30 calendar days (0.018 = 1.8%)',
         absolute: 'spotPrice times the fraction, in the currency of spotPrice',
       },
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Greek exposure methodology v2: under methodology 2 the route's opt-in (`exposure=v2`) adds the session's methodology-2 day and its
+// own prior. The answer carries the book in `exposures` (every expiration after the session) and the stored
+// summary's 0-60 day levels in `levels`, labeled methodology 1; no methodology-1 total (netGex, netDex) is sent.
+
+export const EOD_V2_NOTE = 'Here `exposures` cover the scope `exposures.scope` states, from the stored end-of-day chain - every expiration '
+  + 'after the session where the expiry rule is proven; an older row\'s own expiring contracts may be included, as its scope and '
+  + 'exposureStatus.expiryQualifier say; `levels` are '
+  + 'methodology 1\'s over the 0-60 day window (their own rate and dividend inputs: the snapshot\'s median rate and yield), so the two '
+  + 'differ in scope and neither is wrong. sincePriorSession compares each with its own prior: `levels` with the stored summary\'s '
+  + 'previous session, `exposures` with the newest earlier methodology-2 row (its own priorDate and sessionsSkipped, which can '
+  + 'differ); a change is null where either side has no number, and charmFlow\'s across a change of charm basis (charmBasisChanged).';
+
+const PRIOR_V2_STATUSES = new Set(['found', 'none-on-file', 'unavailable']);
+
+function priorExposuresV2(raw: unknown, current: Record<string, unknown> | null) {
+  const p = raw as { status?: unknown; priorDate?: unknown; sessionsSkipped?: unknown; prior?: unknown } | null;
+  if (!p || typeof p !== 'object' || typeof p.status !== 'string' || !PRIOR_V2_STATUSES.has(p.status)) return { status: 'unavailable' as const };
+  if (p.status !== 'found') return { status: p.status as 'none-on-file' | 'unavailable' };
+  const prior = exposuresFromDaily(p.prior);
+  const skipped = p.sessionsSkipped;
+  return {
+    status: 'found' as const,
+    priorDate: sessionDate(p.priorDate),
+    sessionsSkipped: typeof skipped === 'number' && Number.isSafeInteger(skipped) && skipped >= 0 ? skipped : null,
+    prior: prior.exposures,
+    ...(prior.exposuresUnavailable ? { priorUnavailable: prior.exposuresUnavailable } : {}),
+    change: current && prior.exposures ? exposuresChange(current, prior.exposures) : null,
+  };
+}
+
+export function summarizeEodDealerPositioningV2(response: EodExposureResponse, options: ShapeEodDealerPositioningOptions = {}) {
+  const legacy = summarizeEodDealerPositioning(response, options);
+  const session = exposuresFromDaily(response?.exposureV2);
+  const since = legacy.sincePriorSession;
+  const rawSince = response?.sincePriorSession as Record<string, unknown> | undefined;
+  return {
+    symbol: legacy.symbol,
+    date: legacy.date,
+    asOf: legacy.asOf,
+    dataSource: legacy.dataSource,
+    exposures: session.exposures,
+    ...(session.exposuresUnavailable ? { exposuresUnavailable: session.exposuresUnavailable } : {}),
+    levels: {
+      methodology: 1,
+      window: legacy.dteWindow,
+      spotPrice: legacy.spotPrice,
+      dealerRegime: legacy.dealerRegime,
+      gammaFlip: legacy.gammaFlip,
+      gammaFlipNote: legacy.gammaFlipNote,
+      callWall: legacy.callWall,
+      putWall: legacy.putWall,
+      gammaMagnet: legacy.gammaMagnet,
+      topContributingStrikes: legacy.topContributingStrikes,
+      topContributingStrikesAvailable: legacy.topContributingStrikesAvailable,
+      // the strikes' netGex and netDex are methodology 1's per-strike values, in the stored summary's own units
+      topContributingStrikesUnits: { netGex: legacy.units.netGex, netDex: legacy.units.netDex },
+    },
+    expectedMove30d: legacy.expectedMove30d,
+    sincePriorSession: {
+      // the stored summary's previous session, its levels only (its net GEX and DEX are methodology 1's)
+      levels: since === null ? null : {
+        status: since.status,
+        priorDate: since.priorDate,
+        sessionsSkipped: since.sessionsSkipped,
+        prior: since.prior === null ? null : (({ netGex: _g, netDex: _d, ...rest }) => rest)(since.prior),
+        change: since.change === null ? null : (({ netGex: _g, netDex: _d, ...rest }) => rest)(since.change),
+        dealerRegimeChanged: since.dealerRegimeChanged,
+      },
+      exposures: priorExposuresV2(rawSince?.exposureV2, session.exposures),
+    },
+    units: {
+      // the methodology-2 numbers' units are methodologyNote's
+      expectedMove30d: legacy.units.expectedMove30d,
     },
   };
 }

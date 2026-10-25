@@ -2843,6 +2843,8 @@ export function stateComputeRunTimeConventions(response: unknown): void {
       (summary as Record<string, unknown>).greekTimeConvention = statedTimeConvention(summary as Record<string, unknown>);
       (summary as Record<string, unknown>).greekTimeScope = COMPUTE_GREEK_TIME_SCOPE;
       (summary as Record<string, unknown>).exposureSweepCharmConvention = EXPOSURE_SWEEP_CHARM_CONVENTION;
+      // the sweep is the web's dealer-hedging computation: methodology 1, whatever the platform default
+      (summary as Record<string, unknown>).exposureSweepMethodology = 1;
     }
   }
 }
@@ -3165,6 +3167,8 @@ function shapeExposureSweep(value: unknown): Array<Record<string, unknown>> | un
     .filter((entry) => entry != null && typeof entry === 'object' && !Array.isArray(entry))
     .map((entry) => ({
       underlying: normalizeUnderlying(entry.underlying),
+      // the web's dealer-hedging sweep: methodology 1, whatever the platform default
+      methodology: 1,
       spot: round(entry.spot, 4),
       strikeCount: typeof entry.strikeCount === 'number' ? entry.strikeCount : undefined,
       levels: shapeKeyLevels(entry.keyLevels),
