@@ -320,21 +320,42 @@ describe('get_snapshot - strategy definitions', () => {
   });
 });
 
-describe('a saved GEX record states the methodology it was saved under', () => {
+// Greek exposure methodology v2: a saved GEX record states
+// the calculation it was saved under, read from its own field, never its date; the internal field is not sent.
+describe('a saved GEX record states the calculation it was saved under', () => {
   const records = [
     { symbol: 'SPY', timestamp: 2, data: { symbol: 'SPY', totalGammaExposure: 5, methodology: 2, savedBook: { view: 'assumedDealerBook', p: 0.85 } } },
     { symbol: 'SPY', timestamp: 1, data: { symbol: 'SPY', totalGammaExposure: 7 } },
+    { symbol: 'SPY', timestamp: 0, data: { symbol: 'SPY', totalGammaExposure: 9, methodology: 1 } },
   ];
-  test.each([[false], [true]])('full=%p: 2 kept with its book, absent stated 1, the rule once; the default never read', async (full) => {
+  test.each([[false], [true]])('full=%p: the book kept with its share, an absent or 1 field earlier, the note once, no method named', async (full) => {
     const { calls, handler } = createHarness({ data: structuredClone(records) });
-    const out = JSON.parse((await handler({ type: 'gex', symbol: 'SPY', ...(full ? { full: true } : {}) })).content[0].text);
-    expect(out.data[0].data).toMatchObject({ methodology: 2, savedBook: { view: 'assumedDealerBook', p: 0.85 } });
-    expect(out.data[1].data.methodology).toBe(1);
-    expect(out.methodologyNote).toMatch(/^Each record's data\.methodology is the exposure methodology the GEX page saved it under \(1 for a record saved before the page recorded one/);
-    expect(out.methodologyNote).toMatch(/the platform's default does not change it/);
+    const text = (await handler({ type: 'gex', symbol: 'SPY', ...(full ? { full: true } : {}) })).content[0].text;
+    const out = JSON.parse(text);
+    const rows = out.data;
+    expect(rows.map((r: any) => r.data.exposureCalculation)).toEqual(['assumedDealerBook', 'earlierDealerHedging', 'earlierDealerHedging']);
+    for (const r of rows) expect(r.data).not.toHaveProperty('methodology');
+    expect(rows[0].data.savedBook).toEqual({ view: 'assumedDealerBook', p: 0.85 });
     // The GEX total scales with the share; the delta balance does not
-    expect(out.methodologyNote).toMatch(/totalGammaExposure is the assumed dealer book's GEX .* so it scales with that share; its totalDeltaExposure is the put-minus-call delta balance, the same at every share/);
-    expect(out.methodologyNote).not.toMatch(/totals are the assumed|scale with it\)/);
+    expect(out.gexRecordsNote).toMatch(/totalGammaExposure the assumed dealer book's GEX .* so it scales with that share; its totalDeltaExposure is the put-minus-call delta balance, the same at every share/);
+    expect(out.gexRecordsNote).toContain('saved before the page moved to the assumed dealer book (October 2026): its totals are in the earlier dealer-hedging convention and are not comparable with later records.');
+    expect(out.gexRecordsNote).toMatch(/Each record keeps the calculation it was saved under\.$/);
+    expect(out).not.toHaveProperty('methodologyNote');
+    expect(text).not.toMatch(/[Mm]ethodolog|\bv2\b|V2/);
     expect(calls.map((c) => c.path)).not.toContain('/exposure/methodology');
+  });
+
+  test('the note says only what the records hold: no earlier sentence without an earlier record, no book sentence without a book', async () => {
+    const book = JSON.parse((await createHarness({ data: [structuredClone(records[0])] }).handler({ type: 'gex', symbol: 'SPY' })).content[0].text);
+    expect(book.gexRecordsNote).toContain('at the share of open interest in data.savedBook.p');
+    expect(book.gexRecordsNote).not.toContain('earlier dealer-hedging');
+    const earlier = JSON.parse((await createHarness({ data: [structuredClone(records[1])] }).handler({ type: 'gex', symbol: 'SPY' })).content[0].text);
+    expect(earlier.gexRecordsNote).toContain('earlier dealer-hedging convention');
+    expect(earlier.gexRecordsNote).not.toContain('savedBook.p');
+    // an unrecognised field is not guessed: no calculation stated, the field not sent
+    const odd = JSON.parse((await createHarness({ data: [{ symbol: 'SPY', timestamp: 3, data: { symbol: 'SPY', totalGammaExposure: 1, methodology: 3 } }] }).handler({ type: 'gex', symbol: 'SPY' })).content[0].text);
+    expect(odd.data[0].data).not.toHaveProperty('exposureCalculation');
+    expect(odd.data[0].data).not.toHaveProperty('methodology');
+    expect(odd.gexRecordsNote).toBe('Each record keeps the calculation it was saved under.');
   });
 });

@@ -397,7 +397,12 @@ describe('shapeLiveSkewGex guide', () => {
   test('the GEX window, its comparison, the strike sources and the series rule, whenever gex is asked for', () => {
     const x = g();
     expect(x.gexWindow).toMatch(/4:15 PM New York/);
-    expect(x.gexComparison).toMatch(/neither can be subtracted/);
+    expect(x.gexComparison).toMatch(/Neither can be subtracted/);
+    // review U12 r1 and r2: the snapshot's and the end-of-day exposures are one stored book over the scope each
+    // answer states; the live book holds the same broker dates less an expiration whose session has closed
+    expect(x.gexComparison).toContain('get_live_dealer_positioning selects the same broker expirations but sums the broker\'s published Greeks into its book, which leaves an expiration out once its session has closed (its exposureScope): from that close (4:00 PM New York, earlier on an early close) to 4:15 PM the two cover different expirations.');
+    expect(x.gexComparison).toContain('get_options_snapshot\'s and get_dealer_positioning\'s `exposures.gex` are the stored assumed dealer book over the scope each answer states (only get_dealer_positioning\'s levels keep the 0-60 day window).');
+    expect(x.gexComparison).not.toMatch(/netGex|every expiration on file|every expiration after the session|over the same window/);
     expect(x.strikes).toMatch(/otmSide/);
     expect(x.roots).toMatch(/every retained same-deliverable series/);
     const skewOnly = g([result('SPY', { gex: null })], { metrics: ['skew'] }, { });

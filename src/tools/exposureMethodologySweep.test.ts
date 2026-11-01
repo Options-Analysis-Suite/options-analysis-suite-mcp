@@ -2,24 +2,26 @@ import { describe, expect, test } from 'bun:test';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { registerAllTools } from './registry.js';
+import { RETIRED_METHODOLOGY_TOOLS, refusingRetiredMethodology, registerAllTools } from './registry.js';
+import { z } from 'zod';
 import { getMcpServerInfo } from '../server.js';
 import { SERVER_INSTRUCTIONS } from '../serverInstructions.js';
 import { readFileSync } from 'node:fs';
 
-// Greek exposure methodology v2: one sweep over
-// every tool that takes a methodology, through the registered tools and a mocked proxy. Every methodology-1 book number
-// in the proxy's answers is a sentinel of S1, every methodology-2 book number one of S2, so a leak is found by its value
-// whatever field carries it (the batch and the screens keep the names netGex and netDex for methodology 2's book):
-// - every answer names its methodology and where it came from;
-// - under 2 no S1 number appears outside a `levels` object (methodology 1's labeled levels, their strikes included);
-// - under 1 no S2 number appears, nor a field only methodology 2 sends.
-// The tools that take no methodology (their figures are their own engine's, or methodology 1's labeled) never read the
-// platform default.
+// Greek exposure methodology v2:
+// one sweep over every exposure tool, through the registered tools (the registry's wrapper included) and a mocked proxy.
+// Every number of the earlier calculation in the proxy's answers is a sentinel of S1, every number of the book one of S2,
+// so a leak is found by its value whatever field carries it (the batch and the screens keep the names netGex and netDex
+// for the book):
+// - no answer carries a label or a method's name, and no S1 number appears outside a `levels` object (the gamma-derived
+//   levels, their strikes included); the book's numbers reach every answer;
+// - a call naming `methodology` is refused as an invalid argument before any read, and each tool publishes the schema it
+//   did before less that property (plus additionalProperties);
+// - no tool reads a platform default.
 
-/** Methodology 1's book numbers, as the legacy routes send them */
+/** The earlier calculation's numbers, as the legacy routes send them */
 const v1 = (k: number) => 7_100_000_000 + k;
-/** Methodology 2's: each base on the call side alone (the put side 0), so the twin's outputs are the bases themselves */
+/** The book's: each base on the call side alone (the put side 0), so the twin's outputs are the bases themselves */
 const v2 = (k: number) => 8_200_000_000 + k;
 const S1 = new Set(Array.from({ length: 60 }, (_, k) => v1(k)).flatMap((n) => [n, -n]));
 const S2 = new Set(Array.from({ length: 60 }, (_, k) => v2(k)).flatMap((n) => [n, -n]));
@@ -94,7 +96,7 @@ const liveBody = (withV2: boolean) => ({
   resolved: { S: { value: 100, source: 'broker-tradier', asOf: '2026-10-23T14:59:00Z', stale: false }, r: { value: 0.04, source: 'fred', asOf: '2026-10-22' }, q: { value: 0.01, source: 'supplied', asOf: null } },
   snapshot: { spotPrice: 100, gammaFlip: 98.5, netGamma: v1(50), netDelta: v1(51), netVega: v1(52), netVanna: v1(53), netCharm: v1(54), netVomma: v1(55), callWall: 100, putWall: 100, absGamma: 100, gammaConcentration: 1, regime: 'positive', topStrikes: [] },
   byStrike: [{ strike: 100, netGamma: v1(56), callGamma: v1(57), putGamma: v1(58), netDelta: v1(59), netVega: v1(19), coverage: { gamma: legs(2), delta: legs(2), vega: legs(2) }, callOpenInterest: 600, putOpenInterest: 200, deltasByExpiration: [] }],
-  // methodology 1's split at spot carries its own sentinels, so a side leaking under 2 is seen (review)
+  // the earlier split at spot carries its own sentinels, so a side leaking is seen
   spotSides: { atSpotStrike: null, above: { strikes: 1, netGamma: v1(15), callGamma: v1(16), putGamma: v1(17), gammaCoverage: legs(2), callOpenInterest: 600, callOpenInterestCoverage: legs(1), putOpenInterest: 200, putOpenInterestCoverage: legs(1) }, below: { strikes: 1, netGamma: v1(18), callGamma: v1(27), putGamma: v1(28), gammaCoverage: legs(2), callOpenInterest: 600, callOpenInterestCoverage: legs(1), putOpenInterest: 200, putOpenInterestCoverage: legs(1) }, callOpenInterestShareAbove: 0.5 },
   byExpiration: [{ expiration: '2026-10-30', daysToExpiration: 7, netGamma: v1(10), netDelta: v1(11), callGamma: v1(12), putGamma: v1(13), grossGamma: v1(14), shareOfGrossGamma: 1, coverage: { gamma: legs(2), delta: legs(2) }, expectedMove: null, expectedMoveUnavailable: 'atm-quote-missing', events: null }],
   events: null,
@@ -109,19 +111,24 @@ const liveBody = (withV2: boolean) => ({
   } : {}),
 });
 
-/** The GEX page's saved records: one saved under methodology 2 at a dealer share of 0.85, one from before the page recorded any */
+/** The GEX page's saved records: one saved on the assumed dealer book at a dealer share of 0.85, one from before the page recorded any */
 const savedGex = [
   { symbol: 'SPY', timestamp: 2, data: { symbol: 'SPY', totalGammaExposure: 5, methodology: 2, savedBook: { view: 'assumedDealerBook', p: 0.85 } } },
   { symbol: 'SPY', timestamp: 1, data: { symbol: 'SPY', totalGammaExposure: 7 } },
 ];
 
-/** The mocked proxy: each route's methodology-1 answer, or its methodology-2 one when the tool opts in */
+/** The mocked proxy: each route's earlier answer, or its book one when the tool opts in */
 function answer(path: string, params: Record<string, string> = {}): unknown {
   const opted = params.exposure === 'v2';
   if (path.startsWith('/regime/symbol/')) return regimeSymbol;
   if (path.startsWith('/regime/intraday/')) return regimeIntraday;
   if (path === '/regime/current') return regimeMarket;
-  if (path === '/history') return { symbol: 'SPY', data: [historyRow(opted)] };
+  if (path === '/history') {
+    // the route's provenance (history-backtest.ts buildAssetHistoryProvenance), its id naming the opt-in and the revision
+    const id = `history:SPY:auto:latest:2026-10-23:2026-10-23:1:sig${opted ? ':v2:v2rev=3' : ''}`;
+    const prov = { provider: 'supabase', source: 'option_ticker_snapshots', historySnapshotId: id, snapshotId: id, fetchedAt: '2026-10-23T21:00:00.000Z', fromCache: false };
+    return { symbol: 'SPY', data: [historyRow(opted)], ...prov, metadata: prov, provenance: prov };
+  }
   if (path.startsWith('/scanner/snapshot/')) return snapshot;
   if (path === '/scanner/metrics/batch') return opted ? batchV2 : batchV1;
   if (path.startsWith('/scanner/')) return opted ? screenV2 : screenV1;
@@ -132,31 +139,36 @@ function answer(path: string, params: Record<string, string> = {}): unknown {
   return {};
 }
 
-async function run(name: string, args: Record<string, unknown>, defaultMethodology: 1 | 2 = 1) {
+async function withClient<T>(fake: unknown, use: (client: Client) => Promise<T>): Promise<T> {
+  const server = new McpServer(getMcpServerInfo());
+  registerAllTools(server, fake as any, { getAccessToken: async () => 'token' } as any, fake as any);
+  const client = new Client({ name: 'u12-sweep', version: '0' });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(a), client.connect(b)]);
+  try {
+    return await use(client);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+}
+
+async function run(name: string, args: Record<string, unknown>) {
   const paths: Array<{ path: string; params?: Record<string, string> }> = [];
   const fake = {
     get: async (path: string, params?: Record<string, string>) => {
       paths.push({ path, params });
-      if (path === '/exposure/methodology') return { defaultMethodology, stale: false };
       return structuredClone(answer(path, params));
     },
     post: async () => ({}),
-  } as any;
-  const server = new McpServer(getMcpServerInfo());
-  registerAllTools(server, fake, { getAccessToken: async () => 'token' } as any, fake);
-  const client = new Client({ name: 'u10-sweep', version: '0' });
-  const [a, b] = InMemoryTransport.createLinkedPair();
-  await Promise.all([server.connect(a), client.connect(b)]);
-  try {
+  };
+  return withClient(fake, async (client) => {
     const result = await client.callTool({ name, arguments: args });
     const text = (result.content as Array<{ type: string; text: string }>)[0].text;
     let out: Record<string, any> | null = null;
     try { out = result.isError ? null : JSON.parse(text); } catch { /* a text answer (get_platform_info) */ }
     return { isError: result.isError === true, text, out, paths };
-  } finally {
-    await client.close();
-    await server.close();
-  }
+  });
 }
 
 /** Every number in a value, with whether it sits inside a `levels` object */
@@ -172,8 +184,8 @@ function keys(value: unknown, out: string[] = []): string[] {
   else if (value && typeof value === 'object') for (const [key, v] of Object.entries(value)) { if (key === 'guide') continue; out.push(key); keys(v, out); }
   return out;
 }
-/** Fields only a methodology-2 answer sends */
-const V2_ONLY = ['charmFlow', 'vegaExposure', 'putMinusCallDeltaBalance', 'longOi', 'longOiGex', 'shareOfLongOiGex', 'exposureScope', 'exposuresCommon', 'methodologyNote', 'charmBasis'];
+const LABELS = ['methodology', 'methodologySource', 'methodologyStale', 'exposuresWithheld', 'methodologyNote'];
+const NAMES_A_METHOD = /[Mm]ethodolog|\bv2\b|V2/;
 
 const CASES: Array<[string, Record<string, unknown>]> = [
   ['get_regime', { scope: 'symbol', symbol: 'SPY' }],
@@ -186,93 +198,135 @@ const CASES: Array<[string, Record<string, unknown>]> = [
   ['get_dealer_positioning', { symbol: 'SPY' }],
   ['get_live_dealer_positioning', { symbol: 'SPY' }],
 ];
+/** The tools whose proxy route takes the book's opt-in (the regime routes and the single snapshot always send it) */
+const OPTS_IN = new Set(['run_screener', 'get_options_analytics_history', 'get_dealer_positioning', 'get_live_dealer_positioning']);
 
-describe('every tool that takes a methodology, swept under both', () => {
+describe('every exposure tool answers the one calculation', () => {
   for (const [name, args] of CASES) {
     const label = `${name} ${JSON.stringify(args)}`;
-    for (const methodology of [1, 2] as const) {
-      test(`${label}: named ${methodology}, and by the default ${methodology}`, async () => {
-        for (const [call, source] of [[{ ...args, methodology }, 'requested'], [args, 'default']] as const) {
-          const { isError, text, out } = await run(name, call, methodology);
-          expect(isError, `${label} ${text.slice(0, 300)}`).toBe(false);
-          expect(out!.methodology, label).toBe(methodology);
-          expect(out!.methodologySource, label).toBe(source);
-          const found = numbers(out);
-          if (methodology === 2) {
-            expect(found.filter(({ n, inLevels }) => S1.has(n) && !inLevels).map(({ n }) => n), `${label}: methodology 1 outside levels`).toEqual([]);
-            // the book reached the answer
-            expect(found.some(({ n }) => S2.has(n)), `${label}: no methodology-2 number`).toBe(true);
-          } else {
-            expect(found.filter(({ n }) => S2.has(n)).map(({ n }) => n), `${label}: a methodology-2 number`).toEqual([]);
-            expect(keys(out).filter((key) => V2_ONLY.includes(key)), `${label}: a methodology-2 field`).toEqual([]);
-            expect(found.some(({ n }) => S1.has(n)), `${label}: no methodology-1 number`).toBe(true);
-          }
-        }
-      });
-    }
+    test(`${label}: the book, no label, no earlier number outside levels, no method named`, async () => {
+      const { isError, text, out, paths } = await run(name, args);
+      expect(isError, `${label} ${text.slice(0, 300)}`).toBe(false);
+      for (const key of LABELS) expect(keys(out), `${label}: ${key}`).not.toContain(key);
+      const found = numbers(out);
+      expect(found.filter(({ n, inLevels }) => S1.has(n) && !inLevels).map(({ n }) => n), `${label}: an earlier number outside levels`).toEqual([]);
+      expect(found.some(({ n }) => S2.has(n)), `${label}: no book number`).toBe(true);
+      expect(text, label).not.toMatch(NAMES_A_METHOD);
+      expect(paths.map((p) => p.path), label).not.toContain('/exposure/methodology');
+      if (OPTS_IN.has(name) || (name === 'get_options_snapshot' && String(args.symbols).includes(','))) {
+        expect(paths.every((p) => p.params?.exposure === 'v2'), `${label}: every read asks for the book`).toBe(true);
+      }
+    });
   }
 
-  // a compute run's sweep label (methodology 1) needs a whole validated run: computeRuns.test.ts pins it through the tool
-  test('the saved records state their own methodology, which a default of 2 never changes', async () => {
-    const saved = await run('get_snapshot', { type: 'gex', symbol: 'SPY' }, 2);
-    expect(saved.out!.data.map((record: any) => record.data.methodology)).toEqual([2, 1]);
-    expect(saved.out!.data[0].data.savedBook).toEqual({ view: 'assumedDealerBook', p: 0.85 });
-    expect(saved.out!.methodologyNote).toMatch(/the platform's default does not change it/);
-    expect(saved.paths.map((p) => p.path)).not.toContain('/exposure/methodology');
+  test('a call naming methodology is refused as an invalid argument, null included, before any read', async () => {
+    for (const name of RETIRED_METHODOLOGY_TOOLS) {
+      const args = CASES.find(([n]) => n === name)![1];
+      for (const methodology of [1, 2, null, '2']) {
+        const { isError, text, paths } = await run(name, { ...args, methodology });
+        expect(isError, `${name} ${methodology}`).toBe(true);
+        expect(text).toBe(`MCP error -32602: Input validation error: Invalid arguments for tool ${name}: methodology is no longer a parameter: exposure has one calculation.`);
+        expect(paths, `${name} read before refusing`).toEqual([]);
+      }
+      // an unknown other key is still stripped, as the strict parse did
+      const plain = await run(name, args);
+      const extra = await run(name, { ...args, notAParameter: 1 });
+      expect(extra.isError, name).toBe(false);
+      expect(extra.paths, name).toEqual(plain.paths);
+      expect(extra.text, name).toBe(plain.text);
+    }
+    // an invalid argument of the shape still fails its own validation
+    const bad = await run('get_regime', { scope: 'nowhere' });
+    expect(bad.isError).toBe(true);
+    expect(bad.text).toMatch(/^MCP error -32602: Input validation error: Invalid arguments for tool get_regime:/);
   });
 
-  test('the README and the manifest state no scope the answers would contradict', () => {
+  test('the wrapper hands the handler only its shape\'s keys, refuses an owned methodology, and refuses a shape that keeps one', () => {
+    const seen: unknown[] = [];
+    const shape = { symbol: z.string(), days: z.number().optional() };
+    const [config, handler] = refusingRetiredMethodology('a_tool', { inputSchema: shape }, [(args: unknown) => { seen.push(args); return 'ok'; }]) as [{ inputSchema: z.ZodTypeAny }, (args: unknown, extra: unknown) => unknown];
+    expect(config.inputSchema.safeParse({ symbol: 'X', methodology: 2 }).success).toBe(true);
+    expect(handler({ symbol: 'X', notAParameter: 1, constructor: 'y' }, {})).toBe('ok');
+    expect(handler(undefined, {})).toBe('ok');
+    expect(seen).toEqual([{ symbol: 'X' }, {}]);
+    // a JSON-parsed __proto__ is an own key and still never reaches the handler
+    handler(JSON.parse('{"symbol":"X","__proto__":{"days":3}}'), {});
+    expect(seen[2]).toEqual({ symbol: 'X' });
+    for (const methodology of [1, null, undefined]) {
+      expect(() => handler({ symbol: 'X', methodology }, {})).toThrow('Input validation error: Invalid arguments for tool a_tool: methodology is no longer a parameter: exposure has one calculation.');
+    }
+    expect(seen).toHaveLength(3);
+    expect(() => refusingRetiredMethodology('a_tool', { inputSchema: { ...shape, methodology: z.number() } }, [() => 0])).toThrow('expected a raw input shape without methodology');
+    expect(() => refusingRetiredMethodology('a_tool', { inputSchema: z.object(shape) }, [() => 0])).toThrow('expected a raw input shape without methodology');
+  });
+
+  test('each tool publishes the schema it did before, less methodology, plus additionalProperties', async () => {
+    const before = JSON.parse(readFileSync(new URL('./__fixtures__/exposureToolInputSchemas.json', import.meta.url), 'utf8')) as Record<string, any>;
+    // the one description rewritten with the calculation: the migration's gamma figure is the book's GEX
+    before.get_regime.properties.migration.description = 'For scope=intraday only: add each scan\'s `migration`, the change in its gamma flip, call wall, put wall, gamma magnet and the assumed book\'s GEX since the previous scan with levels (direction, change, percent of spot, per hour). Default false.';
+    const listed = await withClient({ get: async () => ({}), post: async () => ({}) }, async (client) => (await client.listTools()).tools as any[]);
+    expect(Object.keys(before).sort()).toEqual([...RETIRED_METHODOLOGY_TOOLS].sort());
+    for (const name of RETIRED_METHODOLOGY_TOOLS) {
+      const { additionalProperties, ...schema } = listed.find((t) => t.name === name)!.inputSchema;
+      expect(additionalProperties, name).toEqual({});
+      expect(schema, name).toEqual(before[name]);
+    }
+    expect(listed.filter((t) => t.inputSchema?.properties?.methodology).map((t) => t.name)).toEqual([]);
+  });
+
+  // a compute run's sweep label needs a whole validated run: computeRuns.test.ts pins it through the tool
+  test('the saved records state their own calculation, from their own field, and the note only what they hold', async () => {
+    const saved = await run('get_snapshot', { type: 'gex', symbol: 'SPY' });
+    expect(saved.out!.data.map((record: any) => record.data.exposureCalculation)).toEqual(['assumedDealerBook', 'earlierDealerHedging']);
+    for (const record of saved.out!.data) expect(record.data).not.toHaveProperty('methodology');
+    expect(saved.out!.data[0].data.savedBook).toEqual({ view: 'assumedDealerBook', p: 0.85 });
+    expect(saved.out!.gexRecordsNote).toContain('at the share of open interest in data.savedBook.p');
+    expect(saved.out!.gexRecordsNote).toContain('saved before the page moved to the assumed dealer book (October 2026): its totals are in the earlier dealer-hedging convention and are not comparable with later records.');
+    expect(saved.text).not.toMatch(NAMES_A_METHOD);
+    for (const key of LABELS) expect(keys(saved.out)).not.toContain(key);
+  });
+
+  test('the README and the manifest state no scope the answers would contradict, and name no method', () => {
     const readme = readFileSync(new URL('../../README.md', import.meta.url), 'utf8');
     const manifest = readFileSync(new URL('../../manifest.json', import.meta.url), 'utf8');
     for (const [name, text] of [['README', readme], ['manifest', manifest]]) {
       expect(text, name).not.toContain('every expiration after the session');
       expect(text, name).not.toMatch(/legs still trading/);
+      expect(text, name).not.toMatch(NAMES_A_METHOD);
     }
     expect(readme).toContain('over the legs whose expiration session had not closed when the chain was read');
-    // the methodology-2 book is not inside the 0-60 day window
-    expect(manifest).toContain('net GEX/DEX over 0-60 days (under methodology 2 the stored assumed dealer book, over the scope the answer states) and the 0-60 day dealer regime');
+    // the book is not inside the 0-60 day window
+    expect(manifest).toContain('the stored assumed dealer book over the scope the answer states, and the 0-60 day dealer regime');
   });
 
-  test('the tools that take no methodology never read the platform default, whatever it is', async () => {
+  test('the tools with their own figures never ask for the book', async () => {
     for (const [name, args] of [
       ['scan_option_strategies', { symbol: 'SPY', expiration: '2026-11-20', strategy: 'short_put' }],
       ['rank_live_skew_gex', { symbols: 'SPY' }],
       ['get_snapshot', { type: 'gex', symbol: 'SPY' }],
       ['get_compute_runs', {}],
     ] as const) {
-      const { paths } = await run(name, args, 2);
+      const { paths } = await run(name, args);
       expect(paths.map((p) => p.path), name).not.toContain('/exposure/methodology');
       expect(paths.some((p) => p.params?.exposure === 'v2'), name).toBe(false);
     }
   });
 
-  test('the shared texts: the server instructions and the platform info name the methodology and its charm', async () => {
-    // the own-model ranking is neither methodology
-    expect(SERVER_INSTRUCTIONS).toContain('The tools that take `methodology` (1, legacy, or 2; omitted, the platform default) name the one each answer used; compare exposure figures only within one methodology, and not rank_live_skew_gex\'s GEX (its own model\'s) with either.');
+  test('the shared texts: the server instructions and the platform info describe the one calculation and its charm', async () => {
+    // The book is the market-data tools'; a saved record or run states its own calculation
+    expect(SERVER_INSTRUCTIONS).toContain('The market-data tools\' exposure figures are the assumed dealer book\'s (dealers long the calls and short the puts; Long OI beside it where sent); a saved GEX record or compute run states its own calculation (exposureCalculation), and rank_live_skew_gex\'s GEX is its own model\'s: compare none of these with another.');
+    expect(SERVER_INSTRUCTIONS).not.toMatch(NAMES_A_METHOD);
     const info = await run('get_platform_info', { topic: 'all' });
     const text = info.text;
-    // the screens keep their row names for methodology 2's numbers, netCharm among them
-    expect(text).toContain('Under methodology 2 the exposure tools send charm flow instead - charmFlow, or netCharm on run_screener\'s rows, which keep their names - the assumed dealer book\'s hedge flow per calendar day (+ is the book\'s delta hedger buying), a flow, not a time Greek.');
+    expect(text).not.toMatch(NAMES_A_METHOD);
+    // the screens keep their row names for the book's numbers, netCharm among them
+    expect(text).toContain('the exposure tools send charm flow - charmFlow, or netCharm on run_screener\'s rows, which keep their names - the assumed dealer book\'s hedge flow per calendar day (+ is the book\'s delta hedger buying), a flow, not a time Greek.');
     expect(text).toContain('run_screener\'s rows keep the names netGex, netDex, netVex, netVanna, netCharm and netVomma for them, and get_options_snapshot\'s several-symbol rows netGex and netDex');
     // no scope stated that a qualified legacy row would contradict
     expect(text).not.toContain('every expiration after the session');
-    expect(text).toContain('a compute run\'s exposure sweep is methodology 1\'s on every run (exposureSweepMethodology)');
-    expect(text).toContain('- Exposure methodology: get_regime, run_screener, get_options_analytics_history, get_options_snapshot, get_dealer_positioning and get_live_dealer_positioning take `methodology`');
-    expect(text).toContain('The gamma-derived levels (gamma flip, walls, magnet, dealer regime) are methodology 1\'s under both, labeled.');
-    // the bullet names exactly the tools that take one
-    const server = new McpServer(getMcpServerInfo());
-    const stub = { get: async () => ({}), post: async () => ({}) } as any;
-    registerAllTools(server, stub, { getAccessToken: async () => 'token' } as any, stub);
-    const client = new Client({ name: 'u10-sweep-list', version: '0' });
-    const [a, b] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(a), client.connect(b)]);
-    try {
-      const taking = (await client.listTools()).tools.filter((t: any) => t.inputSchema?.properties?.methodology).map((t) => t.name).sort();
-      expect(taking).toEqual(['get_dealer_positioning', 'get_live_dealer_positioning', 'get_options_analytics_history', 'get_options_snapshot', 'get_regime', 'run_screener']);
-      expect([...new Set(CASES.map(([name]) => name))].sort()).toEqual(taking);
-    } finally {
-      await client.close();
-      await server.close();
-    }
+    expect(text).toContain('A saved GEX snapshot and a compute run\'s exposure sweep state their own calculation (exposureCalculation): earlierDealerHedging carries dealer dollar charm per calendar day on the remaining-maturity sign for the dealer');
+    expect(text).toContain('- Exposure: the market-data tools\' exposure figures are the assumed dealer book (dealers long the calls and short the puts, every contract of open interest), Long OI beside it where sent');
+    expect(text).toContain('A saved GEX snapshot and a compute run state their own calculation (exposureCalculation), which can be the earlier dealer-hedging one.');
+    expect(text).toContain('The gamma-derived levels (gamma flip, walls, magnet, dealer regime) are their own computation, none derived from the book.');
   });
 });

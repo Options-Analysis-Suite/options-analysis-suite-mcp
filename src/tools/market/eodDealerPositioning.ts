@@ -3,8 +3,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { LiveApiError, type LiveApiClient } from '../../proxy/liveApiClient.js';
 import { toolHandler } from '../helpers.js';
 import { marketDataOutputSchema } from '../outputSchemas.js';
-import { EOD_V2_NOTE, summarizeEodDealerPositioning, summarizeEodDealerPositioningV2 } from './eodDealerPositioningShaping.js';
-import { METHODOLOGY_2_NOTE, methodologyInput, methodologyLabel, requireMethodology } from '../exposureMethodology.js';
+import { EOD_V2_NOTE, summarizeEodDealerPositioning } from './eodDealerPositioningShaping.js';
+import { BOOK_NOTE, bookNotCarriedError } from '../exposureMethodology.js';
 import { significantDeep } from './dealerPositioningShaping.js';
 
 /**
@@ -20,6 +20,10 @@ import { significantDeep } from './dealerPositioningShaping.js';
  * fallback inside it. A live gamma flip and an end-of-day one are different
  * claims: this one is the snapshot's coarse-grid level and carries no search
  * status or resolution, and the summary says so on every answer.
+ *
+ * One calculation (Greek exposure methodology v2): the session's stored
+ * assumed dealer book in `exposures`, the stored summary's 0-60 day levels in
+ * `levels`, each with its own prior.
  */
 
 /** The calendar date and the minute in New York, "YYYY-MM-DDTHH:MM" on a 24-hour clock, so it sorts as text. */
@@ -116,16 +120,16 @@ export function register(server: McpServer, client: LiveApiClient, now: () => Da
     {
       title: 'EOD Dealer Positioning / GEX',
       description:
-        'Get END-OF-DAY dealer positioning for a symbol from the most recent session on file, over the 0-60 day expiration window: net GEX and DEX, the dealer regime, the gamma flip, the call wall and put wall, the gamma magnet, the 30-day expected move, and the top contributing strikes. No broker credential is required. The gamma flip here is a coarse-grid level from the stored snapshot with no search status or resolution; for the flip as of NOW, repriced from a live chain with its search status, use get_live_dealer_positioning, which is a different claim and is never substituted here. get_options_snapshot and get_options_analytics_history report net GEX and DEX over ALL expirations, so they differ from these for the same session and neither is wrong. Long-dated contracts carry large delta, so the two can differ even in sign (SPY 2026-09-29: net DEX -16,795,316,756 over all expirations against +16,246,461,968 over 0-60 days). Under methodology 2 (`methodology`) netGex and netDex give way to `exposures`, the stored assumed dealer book get_options_snapshot and get_options_analytics_history report under 2, over its stated scope; these levels sit in `levels`, labeled methodology 1, each with its own prior in sincePriorSession. '
+        'Get END-OF-DAY dealer positioning for a symbol from the most recent session on file: the stored assumed dealer book in `exposures` (GEX, delta balance, vega exposure, vanna, charm flow and vomma, Long OI beside it) over the scope it states, and in `levels` the 0-60 day gamma-derived levels (the dealer regime, the gamma flip, the call wall and put wall, the gamma magnet and the top contributing strikes), with the 30-day expected move. No broker credential is required. The gamma flip here is a coarse-grid level from the stored snapshot with no search status or resolution; for the flip as of NOW, repriced from a live chain with its search status, use get_live_dealer_positioning, which is a different claim and is never substituted here. `exposures` is the one stored book get_options_snapshot and get_options_analytics_history report too, over the scope each answer states; only these levels keep the 0-60 day window, so the two differ in scope and neither is wrong. '
         + 'Here the call wall is the strike with the largest positive call gamma and the put wall the strike with the most negative put gamma; ties go to the lower strike, a side with no such strike leaves that wall null, and nothing orders them, so the put wall can sit above the call wall. The gamma magnet is the largest absolute gamma strike; the 30-day expected move is a decimal fraction of spot and in dollars. '
         + 'Covers roughly 5,500 listed equities and ETFs. '
         + 'Positive net gamma means dealers hedge against moves and dampen them; negative means they hedge with moves and amplify them. '
-        + '`dealerRegime` is the sign of the 0-60 day net gamma interpolated at spot between the two strikes that bracket it (the nearest strike\'s gamma when spot is outside the strike range), not the sign of `netGex` and not which side of `gammaFlip` spot sits on; it can disagree with both (SPY on 2026-09-17: netGex -5.5 billion, spot 763.01 below the flip 764.97, regime positive), and only with fewer than two gamma-bearing strikes in that window is it the sign of `netGex` itself. '
+        + '`levels.dealerRegime` is the sign of the 0-60 day net gamma interpolated at spot between the two strikes that bracket it (the nearest strike\'s gamma when spot is outside the strike range), not the sign of the book\'s `gex` and not which side of `gammaFlip` spot sits on; it can disagree with both (SPY on 2026-09-17: spot 763.01 below the flip 764.97, regime positive), and only with fewer than two gamma-bearing strikes in that window is it the sign of the whole 0-60 day net gamma. '
         + '`date` in the result is the session it describes and is authoritative; do not present it as today\'s close. '
         + 'The equity import usually lands about 02:30 US Eastern the next day, so in the evening the most recent on file is usually the previous session (the `date` parameter gives the window, the retry rules and why a session can be missing). '
         + 'Max pain is not here; it is in get_options_snapshot. '
         + 'A symbol with no exposure summary (a futures contract, or a session with no near-term options) reports not-found rather than a neutral regime. '
-        + '`sincePriorSession` compares this session with the one before it on file, from the same stored end-of-day computation over the same 0-60 day window: `prior` holds that session\'s levels, `change` this session minus that one (null where either is missing), and `dealerRegimeChanged` whether the regime differs; `sessionsSkipped` counts the NYSE sessions between `priorDate` and `date`, none of which has a summary on file (0: none falls between). '
+        + '`sincePriorSession.levels` compares this session with the one before it on file, from the same stored end-of-day computation over the same 0-60 day window: `prior` holds that session\'s levels, `change` this session minus that one (null where either is missing), and `dealerRegimeChanged` whether the regime differs; `sessionsSkipped` counts the NYSE sessions between `priorDate` and `date`, none of which has a summary on file (0: none falls between). `sincePriorSession.exposures` compares the book with the newest earlier stored book, its own `priorDate` and `sessionsSkipped` beside it. '
         + 'Both flips are found on a grid of 60 prices within 20% of each session\'s spot, about 0.68% of spot apart and re-centred every session, so a flip change smaller than that step can come from the grid rather than the market. '
         + '`status` is "none-on-file" when no earlier session has a summary and "unavailable" when it could not be read; this session\'s values are unaffected either way. '
         + 'It is a close-to-close change on file, not a change to now: the live book comes from get_live_dealer_positioning, over a different window and computation, and differencing the two is not a change. '
@@ -142,17 +146,15 @@ export function register(server: McpServer, client: LiveApiClient, now: () => Da
             + 'After the cutoff the answer says retrying will not succeed: that is the proxy\'s flag for a row absent on the normal schedule, not a promise that the file can never arrive, since a session whose import or exposure computation failed can appear after a later successful import or repair, and nothing here says whether one is coming.'),
         strikeLimit: z.number().int().min(1).max(10).optional()
           .describe('Contributing strikes to return, in stored order. Default 10, which is all the snapshot keeps.'),
-        methodology: methodologyInput(),
       },
       outputSchema: marketDataOutputSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
-    toolHandler(async ({ symbol, date, strikeLimit, methodology }) => {
-      // The answer IS exposure: named, else the platform default; never a guess when it cannot be read
-      const resolved = await requireMethodology(client, methodology);
+    toolHandler(async ({ symbol, date, strikeLimit }) => {
+      // The route's opt-in for the session's stored book (internal transport), on every call
       const params: Record<string, string> = {};
       if (date) params.date = date;
-      if (resolved.methodology === 2) params.exposure = 'v2';
+      params.exposure = 'v2';
 
       let res: Record<string, unknown>;
       try {
@@ -174,17 +176,13 @@ export function register(server: McpServer, client: LiveApiClient, now: () => Da
         throw err;
       }
 
+      // The book is the route's opt-in: an answer without the session's book day did not answer what was asked
+      if (!res || typeof res !== 'object' || !('exposureV2' in res)) throw bookNotCarriedError();
       // The live tools' one rounding: a value derived in binary, such as the
       // 30-day expected move (29.666368063999997), goes out at 15 digits.
-      if (resolved.methodology === 1) return significantDeep({ ...methodologyLabel(resolved), ...summarizeEodDealerPositioning(res, { strikeLimit }) });
-      // methodology 2 is the route's opt-in: an answer without its methodology-2 day did not answer what was asked
-      if (!res || typeof res !== 'object' || !('exposureV2' in res)) {
-        throw new LiveApiError('The answer asked for methodology 2 did not carry it, so it was not used.', 502, 'UPSTREAM_INVALID', false, undefined, undefined);
-      }
       return significantDeep({
-        ...methodologyLabel(resolved),
-        ...summarizeEodDealerPositioningV2(res, { strikeLimit }),
-        methodologyNote: `${METHODOLOGY_2_NOTE} ${EOD_V2_NOTE}`,
+        ...summarizeEodDealerPositioning(res, { strikeLimit }),
+        bookNote: `${BOOK_NOTE} ${EOD_V2_NOTE}`,
       });
     }),
   );

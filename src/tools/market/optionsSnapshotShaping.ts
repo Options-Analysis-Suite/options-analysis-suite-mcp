@@ -21,24 +21,16 @@
  *    about a different set of symbols than the one it asked about.
  */
 
-import { bookOfWire, charmBasisOf, exposuresFromDaily, hoistCommonFields, isWireBases, v2ReasonText, type MethodologyId } from '../exposureMethodology.js';
+import { bookOfWire, charmBasisOf, exposuresFromDaily, hoistCommonFields, isWireBases, publicUnavailable, v2ReasonText } from '../exposureMethodology.js';
 
 export interface SnapshotResponse { [key: string]: unknown }
 export interface MetricsBatchResponse { count?: unknown; data?: unknown }
-
-/**
- * The exposure methodology an answer follows (Greek exposure methodology v2): 1, today's; 2, the
- * snapshot's methodology-2 publication; null, withheld (no methodology named and the default could not be read).
- */
-export type SnapshotMethodology = MethodologyId | null;
 
 export interface ShapeSnapshotOptions {
   /** Which curve payloads to summarize. */
   curves?: ReadonlyArray<'maxPain' | 'gex' | 'dex' | 'skew'>;
   /** Per-curve row cap. */
   curveLimit?: number;
-  /** Default 1 */
-  methodology?: SnapshotMethodology;
 }
 
 const DEFAULT_CURVE_LIMIT = 12;
@@ -50,7 +42,8 @@ const str = (v: unknown): string | null =>
 const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 
 /**
- * Scalars copied under the proxy's own names. `expectedMovePct` is NOT here:
+ * Scalars copied under the proxy's own names. The snapshot's stored net GEX and DEX are not here: the exposure is
+ * the snapshot's published book, `exposures` (Greek exposure methodology v2). `expectedMovePct` is NOT here:
  * option_ticker_snapshots.expected_move_pct is iv * sqrt(30 / 365), a decimal
  * FRACTION of spot over 30 calendar days despite the column name, and 0.018
  * under a key ending in "Pct" reads as 0.018%. It is published under the name
@@ -64,7 +57,7 @@ const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
  * stored value is real.
  */
 const SCALARS = [
-  'spotPrice', 'maxPain', 'netGex', 'netDex',
+  'spotPrice', 'maxPain',
   'atmIv', 'atmIv7d', 'atmIv30d', 'atmIv90d',
   'putCallRatio', 'ivSkew25d',
   'totalVolume', 'totalOi', 'callVolume', 'putVolume', 'callOi', 'putOi',
@@ -85,7 +78,7 @@ function nearestStrikes<T extends { strike: number | null }>(rows: T[], centre: 
 }
 
 /**
- * A methodology-2 strike curve: each strike's value with the coverage of the metric it sums (gamma
+ * A book strike curve: each strike's value with the coverage of the metric it sums (gamma
  * for the GEX curve, delta for the balance) where that is not complete, so a partial strike - the largest included - never
  * reads as a complete one; the curve says how many strikes are short when any is.
  */
@@ -139,46 +132,6 @@ function summarizeMaxPainCurve(raw: unknown, spot: number | null, limit: number)
   return {
     strikes: rows.length,
     minimumTotalPain: minimum,
-    nearSpot: nearestStrikes(rows, spot, limit),
-  };
-}
-
-/**
- * The stored row is `{ strike, callGex, putGex, netGex }` (and the dex twin),
- * written at proxy/services/SnapshotComputeService.ts:434.
- *
- * An earlier version read `row.gex`, a key that exists only in the OpenAPI
- * EXAMPLE. It produced a null at every strike and a total of zero, which is
- * indistinguishable from a symbol with no dealer exposure at all - a fabricated
- * flat book, reported with total confidence. The key travels under its own name
- * here so the output cannot drift from the writer without the name drifting too.
- */
-function summarizeExposureCurve(raw: unknown, key: 'netGex' | 'netDex', spot: number | null, limit: number) {
-  const rows = arr(raw)
-    .map((row: any) => ({ strike: num(row?.strike), [key]: num(row?.[key]) } as { strike: number | null } & Record<string, number | null>))
-    .filter((r) => r.strike !== null);
-  if (rows.length === 0) return null;
-
-  let total = 0;
-  let measured = 0;
-  let largest: ({ strike: number | null } & Record<string, number | null>) | null = null;
-  for (const row of rows) {
-    const value = row[key];
-    if (value === null) continue;
-    measured += 1;
-    total += value;
-    const best = largest?.[key];
-    if (largest === null || best === null || best === undefined || Math.abs(value) > Math.abs(best)) {
-      largest = { strike: row.strike, [key]: value };
-    }
-  }
-  // A curve of strikes that carry no exposure value is not a zero book, so the
-  // total is withheld rather than reported as 0.
-  return {
-    strikes: rows.length,
-    strikesWithValue: measured,
-    total: measured > 0 ? total : null,
-    largestAbsolute: largest,
     nearSpot: nearestStrikes(rows, spot, limit),
   };
 }
@@ -239,7 +192,8 @@ function summarizeSkew(raw: unknown, limit: number) {
 }
 
 /**
- * The keys the options snapshot always carries, whatever their values. When
+ * The keys the options snapshot always carries, whatever their values (the stored netGex among them, read here as a
+ * shape key and never sent). When
  * a symbol has NO options snapshot the proxy falls back to a different table
  * and answers a PRICE-ONLY row - spot, open, high, low, volume - and none of
  * these keys at all. Reading that row as a snapshot would report every metric
@@ -256,11 +210,19 @@ function summarizeSkew(raw: unknown, limit: number) {
  */
 const OPTIONS_SHAPE_KEYS = ['maxPain', 'netGex', 'atmIv', 'putCallRatio'] as const;
 
-/** The sources the proxy marked unread on a partial answer (partial: true, unavailable: [...]); none otherwise. */
+/**
+ * The sources the proxy marked unread on a partial answer (partial: true, unavailable: [...]); none otherwise. The book's
+ * transport name (exposureV2, SupabaseService.getTickerSnapshot's failed bases read) reads as `exposures`.
+ */
 function unreadSources(snapshot: SnapshotResponse): string[] {
   const r = snapshot as Record<string, unknown>;
-  return r.partial === true && Array.isArray(r.unavailable) ? r.unavailable.filter((u): u is string => typeof u === 'string') : [];
+  return r.partial === true && Array.isArray(r.unavailable)
+    ? (publicUnavailable(r.unavailable) as unknown[]).filter((u): u is string => typeof u === 'string')
+    : [];
 }
+
+/** What an unread source means for the snapshot, in words */
+const UNREAD_WORDS: Record<string, string> = { exposures: 'the stored book (`exposures` is null and its gex and dex curves are unknown)' };
 
 export function isPriceOnlyRow(snapshot: SnapshotResponse): boolean {
   return 'spotPrice' in snapshot && !OPTIONS_SHAPE_KEYS.some((key) => key in snapshot);
@@ -303,7 +265,7 @@ export function shapeOptionsSnapshot(response: SnapshotResponse, options: ShapeS
 }
 
 /**
- * The single snapshot's methodology-2 publication (proxy/lib/assetExposureV2.ts, qualified at the route): its totals as
+ * The single snapshot's published book (proxy/lib/assetExposureV2.ts, qualified at the route): its totals as
  * `exposures`, and its per-strike bases as the gex and dex curves' rows - the assumed dealer book's GEX and the delta
  * balance per strike, over every expiration after the session.
  */
@@ -322,13 +284,11 @@ export function summarizeOptionsSnapshot(response: SnapshotResponse, options: Sh
   const requested = options.curves ?? [];
   const snapshot = response ?? {};
   const spot = num(snapshot.spotPrice);
-  const methodology = options.methodology === undefined ? 1 : options.methodology;
 
   const metrics: Record<string, number | null> = {};
-  // under 2 (or withheld) the snapshot's legacy totals are not sent: methodology 2's are `exposures`
-  for (const key of SCALARS) if (methodology === 1 || (key !== 'netGex' && key !== 'netDex')) metrics[key] = num(snapshot[key]);
+  for (const key of SCALARS) metrics[key] = num(snapshot[key]);
   metrics.expectedMove30dFraction = num(snapshot.expectedMovePct);
-  const v2 = methodology === 2 ? snapshotExposuresV2(snapshot.exposureV2) : null;
+  const book = snapshotExposuresV2(snapshot.exposureV2);
 
   // Every curve field null while the scalars are present means the curve table
   // has not caught up to this session, which is a different fact from "absent".
@@ -341,18 +301,9 @@ export function summarizeOptionsSnapshot(response: SnapshotResponse, options: Sh
 
   const curves: Record<string, unknown> = {};
   if (requested.includes('maxPain')) curves.maxPain = summarizeMaxPainCurve(snapshot.maxPainCurve, spot, limit);
-  if (methodology === 1) {
-    if (requested.includes('gex')) curves.gex = summarizeExposureCurve(snapshot.gexByStrike, 'netGex', spot, limit);
-    if (requested.includes('dex')) curves.dex = summarizeExposureCurve(snapshot.dexByStrike, 'netDex', spot, limit);
-  } else if (v2 !== null) {
-    // methodology 2's curves are its publication's strikes; none when the publication has none to give
-    if (requested.includes('gex')) curves.gex = v2.strikes === null ? null : summarizeV2Curve(v2.strikes.map(({ strike, book }) => ({ strike, value: book.assumedDealerBook.gex, coverage: book.coverage.gamma })), 'gex', spot, limit);
-    if (requested.includes('dex')) curves.dex = v2.strikes === null ? null : summarizeV2Curve(v2.strikes.map(({ strike, book }) => ({ strike, value: book.putMinusCallDeltaBalance, coverage: book.coverage.delta })), 'putMinusCallDeltaBalance', spot, limit);
-  } else {
-    // withheld: no exposure curve without its methodology
-    if (requested.includes('gex')) curves.gex = null;
-    if (requested.includes('dex')) curves.dex = null;
-  }
+  // the gex and dex curves are the published book's strikes; none when the publication has none to give
+  if (requested.includes('gex')) curves.gex = book.strikes === null ? null : summarizeV2Curve(book.strikes.map(({ strike, book: b }) => ({ strike, value: b.assumedDealerBook.gex, coverage: b.coverage.gamma })), 'gex', spot, limit);
+  if (requested.includes('dex')) curves.dex = book.strikes === null ? null : summarizeV2Curve(book.strikes.map(({ strike, book: b }) => ({ strike, value: b.putMinusCallDeltaBalance, coverage: b.coverage.delta })), 'putMinusCallDeltaBalance', spot, limit);
   if (requested.includes('skew')) curves.skew = summarizeSkew(snapshot.volSkew, limit);
 
   return {
@@ -360,7 +311,8 @@ export function summarizeOptionsSnapshot(response: SnapshotResponse, options: Sh
     date: str(snapshot.date),
     dataSource: 'eod' as const,
     metrics,
-    ...(v2 !== null ? { exposures: v2.exposures, ...(v2.exposuresUnavailable ? { exposuresUnavailable: v2.exposuresUnavailable } : {}) } : {}),
+    exposures: book.exposures,
+    ...(book.exposuresUnavailable ? { exposuresUnavailable: book.exposuresUnavailable } : {}),
     units: { expectedMove30dFraction: EXPECTED_MOVE_30D_FRACTION_UNIT },
     curvesRequested: [...requested],
     curvesAvailableForThisSession: curvesUnread ? null : curvesPresent,
@@ -372,7 +324,8 @@ export function summarizeOptionsSnapshot(response: SnapshotResponse, options: Sh
       unavailable,
       partialNote: curvesUnread
         ? 'The strike curves (max pain, exposures, skew) could not be read for this snapshot; the metrics above were read, the curves are unknown.'
-        : `Part of this snapshot could not be read: ${unavailable.join(', ')}.`,
+          + (unavailable.includes('exposures') ? ' Nor could the stored book: `exposures` is null.' : '')
+        : `Part of this snapshot could not be read: ${unavailable.map((u) => UNREAD_WORDS[u] ?? u).join(', ')}.`,
     } : {}),
   };
 }
@@ -388,12 +341,10 @@ export interface MetricsBatchOptions {
   rankBy?: BatchRankMetric;
   /** Largest first by default. */
   order?: 'asc' | 'desc';
-  /** Default 1 */
-  methodology?: SnapshotMethodology;
 }
 
 /**
- * One batch row's methodology 2 (the route's opt-in, proxy/lib/snapshotExposureV2.ts batchRowExposureV2): the row names
+ * One batch row's book (the route's opt-in, proxy/lib/snapshotExposureV2.ts batchRowExposureV2): the row names
  * stay, netGex the assumed dealer book's GEX and netDex the delta balance, each value's standing where it is not
  * complete (partial, qualified, unavailable), or why the row has none.
  */
@@ -425,7 +376,6 @@ function spread(iv: number | null, hv: number | null): number | null {
 }
 
 export function summarizeMetricsBatch(response: MetricsBatchResponse, requestedSymbols: string[], options: MetricsBatchOptions = {}) {
-  const methodology = options.methodology === undefined ? 1 : options.methodology;
   const rows = arr(response?.data).map((row: any) => ({
     symbol: str(row?.symbol),
     date: str(row?.date),
@@ -440,9 +390,8 @@ export function summarizeMetricsBatch(response: MetricsBatchResponse, requestedS
     maxPain: num(row?.maxPain),
     expectedMove30dFraction: num(row?.expectedMovePct),
     spotPrice: num(row?.spotPrice),
-    // Over ALL expirations on file, as the single-symbol snapshot reports them; under 2 the publication's, its standing
-    // beside it; withheld, not sent
-    ...(methodology === 1 ? { netGex: num(row?.netGex), netDex: num(row?.netDex) } : methodology === 2 ? batchExposureFields(row?.exposureV2) : {}),
+    // the published book's GEX and delta balance, each value's standing beside it
+    ...batchExposureFields(row?.exposureV2),
     ivSkew25d: num(row?.ivSkew25d),
     ivMinusHv20d: spread(num(row?.atmIv), num(row?.hv20d)),
     ivMinusHv60d: spread(num(row?.atmIv), num(row?.hv60d)),
@@ -468,9 +417,9 @@ export function summarizeMetricsBatch(response: MetricsBatchResponse, requestedS
   if (options.rankBy) {
     const metric = options.rankBy;
     const order = options.order ?? 'desc';
-    // under methodology 2 an exposure ranking takes only complete values whose expiry scope is proven:
-    // a partial, qualified or unavailable one stays in the rows, after the ranked ones, and is counted by why
-    const exposureRanking = methodology === 2 && (metric === 'netGex' || metric === 'netDex');
+    // an exposure ranking takes only complete values whose expiry scope is proven: a partial, qualified
+    // or unavailable one stays in the rows, after the ranked ones, and is counted by why
+    const exposureRanking = metric === 'netGex' || metric === 'netDex';
     const unrankedWhy = (row: (typeof rows)[number]): string | null => {
       if (!exposureRanking) return null;
       const r = row as Record<string, any>;
@@ -504,8 +453,8 @@ export function summarizeMetricsBatch(response: MetricsBatchResponse, requestedS
     };
   }
 
-  // under 2 the reference fields every row with numbers shares, once
-  const common = methodology === 2 ? hoistCommonFields(rows.filter((row) => typeof (row as Record<string, unknown>).exposureUnavailable !== 'string')) : null;
+  // the reference fields every row with numbers shares, once
+  const common = hoistCommonFields(rows.filter((row) => typeof (row as Record<string, unknown>).exposureUnavailable !== 'string'));
   return {
     dataSource: 'eod' as const,
     requested: requestedSymbols.length,
@@ -518,16 +467,15 @@ export function summarizeMetricsBatch(response: MetricsBatchResponse, requestedS
   };
 }
 
-export const SNAPSHOT_V2_NOTE = 'The snapshot\'s `exposures` and its gex and dex curves are its newest methodology-2 publication, over the '
+export const SNAPSHOT_V2_NOTE = 'The snapshot\'s `exposures` and its gex and dex curves are its newest published book, over the '
   + 'scope `exposures.scope` states - every expiration after the session where the expiry rule is proven; where no scope is stated, '
   + 'or exposureStatus carries an expiryQualifier, it may count contracts expiring that session. The gex curve is the assumed dealer '
   + 'book\'s GEX per strike, the dex curve the put-minus-call delta balance per strike; a strike whose legs are not all included '
-  + 'carries its `coverage`, and the curve\'s totalCoverage counts the strikes short of complete. Its methodology-1 net GEX and DEX '
-  + 'are not sent.';
+  + 'carries its `coverage`, and the curve\'s totalCoverage counts the strikes short of complete.';
 
-export const BATCH_V2_NOTE = 'Methodology 2: each row\'s netGex is the assumed dealer book\'s GEX - dealers long the calls and short the '
+export const BATCH_V2_NOTE = 'Each row\'s netGex is the assumed dealer book\'s GEX - dealers long the calls and short the '
   + 'puts, share 1; USD of delta per 1% move - and netDex the put-minus-call delta balance (USD, underlying-equivalent), from the '
-  + 'symbol\'s newest methodology-2 publication, over every expiration after the session where its expiry rule is proven (a value '
+  + 'symbol\'s newest published book, over every expiration after the session where its expiry rule is proven (a value '
   + 'marked qualified is not). exposureStatus marks a value that is partial '
   + '(the sum of the legs included), qualified (its expiry scope is not proven: it may count contracts expiring that session) or '
   + 'unavailable; exposureUnavailable says why a row has none. rankBy netGex or netDex ranks only complete, proven values; the others '

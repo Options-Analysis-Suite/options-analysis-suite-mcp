@@ -3,11 +3,14 @@
  *
  * The proxy's /eod/exposure/:symbol publishes packages/shared's
  * buildEodExposureResponse shape: one row per symbol per session, already
- * small. This keeps it flat, coerces every number, caps the contributing
- * strikes, names the expected move by its unit, and adds the one thing the row
- * cannot say for itself: that its gamma flip is a coarse-grid level with no
- * search status or resolution, so a model does not present it with the live
- * tool's confidence.
+ * small, and with the route's `exposure=v2` the session's stored book and its
+ * own prior beside it. The answer carries the book in `exposures` and the
+ * row's 0-60 day levels in `levels`; the row's own net GEX and DEX totals are
+ * not sent (Greek exposure methodology v2: one calculation). This keeps it
+ * flat, coerces every number, caps the contributing strikes, names the
+ * expected move by its unit, and adds the one thing the row cannot say for
+ * itself: that its gamma flip is a coarse-grid level with no search status or
+ * resolution, so a model does not present it with the live tool's confidence.
  */
 
 import { exposuresChange, exposuresFromDaily } from '../exposureMethodology.js';
@@ -58,10 +61,11 @@ const sessionDate = (v: unknown): string | null =>
   typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
 
 /**
- * Null when the route sent none or an unknown status, so a missing block is
- * never read as "no earlier session". Changes are passed through, not
- * recomputed: they are this session minus the prior, null where either
- * side is missing.
+ * The levels' prior session. Null when the route sent none or an unknown
+ * status, so a missing block is never read as "no earlier session". Changes
+ * are passed through, not recomputed: they are this session minus the prior,
+ * null where either side is missing. The row's prior net GEX and DEX totals
+ * are not read.
  */
 function sincePriorSession(value: unknown) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -78,8 +82,6 @@ function sincePriorSession(value: unknown) {
     sessionsSkipped: typeof skipped === 'number' && Number.isSafeInteger(skipped) && skipped >= 0 ? skipped : null,
     prior: prior === null ? null : {
       spotPrice: num(prior.spotPrice),
-      netGex: num(prior.netGex),
-      netDex: num(prior.netDex),
       gammaFlip: num(prior.gammaFlip),
       callWall: num(prior.callWall),
       putWall: num(prior.putWall),
@@ -88,8 +90,6 @@ function sincePriorSession(value: unknown) {
     },
     change: change === null ? null : {
       spotPrice: num(change.spotPrice),
-      netGex: num(change.netGex),
-      netDex: num(change.netDex),
       gammaFlip: num(change.gammaFlip),
       callWall: num(change.callWall),
       putWall: num(change.putWall),
@@ -99,10 +99,8 @@ function sincePriorSession(value: unknown) {
   };
 }
 
-export function summarizeEodDealerPositioning(
-  response: EodExposureResponse,
-  options: ShapeEodDealerPositioningOptions = {},
-) {
+/** The stored row's own fields: the session, its 0-60 day levels and the expected move (never its totals) */
+function storedLevels(response: EodExposureResponse, options: ShapeEodDealerPositioningOptions) {
   const limit = Math.max(1, Math.trunc(options.strikeLimit ?? DEFAULT_STRIKE_LIMIT));
   const row = response ?? {};
   const window = (row.dteWindow && typeof row.dteWindow === 'object') ? row.dteWindow as Record<string, unknown> : {};
@@ -117,20 +115,24 @@ export function summarizeEodDealerPositioning(
     date: str(row.date),
     asOf: str(row.asOf),
     dataSource: 'eod' as const,
-    dteWindow: {
-      minDte: num(window.minDte),
-      maxDte: num(window.maxDte),
-      unit: str(window.unit),
+    levels: {
+      window: {
+        minDte: num(window.minDte),
+        maxDte: num(window.maxDte),
+        unit: str(window.unit),
+      },
+      spotPrice: num(row.spotPrice),
+      dealerRegime: str(row.dealerRegime),
+      gammaFlip: num(row.gammaFlip),
+      gammaFlipNote: num(row.gammaFlip) === null ? EOD_GAMMA_FLIP_NULL_NOTE : EOD_GAMMA_FLIP_NOTE,
+      callWall: num(row.callWall),
+      putWall: num(row.putWall),
+      gammaMagnet: num(row.gammaMagnet),
+      topContributingStrikes: strikes.slice(0, limit),
+      topContributingStrikesAvailable: strikes.length,
+      // the strikes' netGex and netDex are the stored summary's per-strike values the levels rank by, in its own units
+      topContributingStrikesUnits: { netGex: str(rowUnits.netGex), netDex: str(rowUnits.netDex) },
     },
-    spotPrice: num(row.spotPrice),
-    dealerRegime: str(row.dealerRegime),
-    netGex: num(row.netGex),
-    netDex: num(row.netDex),
-    gammaFlip: num(row.gammaFlip),
-    gammaFlipNote: num(row.gammaFlip) === null ? EOD_GAMMA_FLIP_NULL_NOTE : EOD_GAMMA_FLIP_NOTE,
-    callWall: num(row.callWall),
-    putWall: num(row.putWall),
-    gammaMagnet: num(row.gammaMagnet),
     // The stored expected move is a decimal FRACTION of spot (0.018 = 1.8%),
     // which is what the shared shape's units block says of expectedMovePct30d.
     // Published under the name of its unit: under `percent` a model reads
@@ -139,35 +141,23 @@ export function summarizeEodDealerPositioning(
       fraction: num(row.expectedMovePct30d),
       absolute: num(row.expectedMove30d),
     },
-    topContributingStrikes: strikes.slice(0, limit),
-    topContributingStrikesAvailable: strikes.length,
     // The session before this one on file, same computation and window.
     sincePriorSession: sincePriorSession(row.sincePriorSession),
-    // The units describe THIS summary's keys. The row's block names
-    // expectedMovePct30d, a key this summary does not emit, so passing it
-    // through whole labelled a field the reader could not find.
-    units: {
-      netGex: str(rowUnits.netGex),
-      netDex: str(rowUnits.netDex),
-      expectedMove30d: {
-        fraction: 'decimal fraction of spotPrice over the next 30 calendar days (0.018 = 1.8%)',
-        absolute: 'spotPrice times the fraction, in the currency of spotPrice',
-      },
-    },
   };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Greek exposure methodology v2: under methodology 2 the route's opt-in (`exposure=v2`) adds the session's methodology-2 day and its
-// own prior. The answer carries the book in `exposures` (every expiration after the session) and the stored
-// summary's 0-60 day levels in `levels`, labeled methodology 1; no methodology-1 total (netGex, netDex) is sent.
+// The book: the
+// route's opt-in (`exposure=v2`, internal transport) adds the session's stored book and its own prior. The answer
+// carries the book in `exposures` (every expiration after the session) and the stored summary's 0-60 day levels in
+// `levels`; the summary's own totals (netGex, netDex) are not sent.
 
 export const EOD_V2_NOTE = 'Here `exposures` cover the scope `exposures.scope` states, from the stored end-of-day chain - every expiration '
   + 'after the session where the expiry rule is proven; an older row\'s own expiring contracts may be included, as its scope and '
   + 'exposureStatus.expiryQualifier say; `levels` are '
-  + 'methodology 1\'s over the 0-60 day window (their own rate and dividend inputs: the snapshot\'s median rate and yield), so the two '
+  + 'the gamma-derived levels over the 0-60 day window (their own rate and dividend inputs: the snapshot\'s median rate and yield), so the two '
   + 'differ in scope and neither is wrong. sincePriorSession compares each with its own prior: `levels` with the stored summary\'s '
-  + 'previous session, `exposures` with the newest earlier methodology-2 row (its own priorDate and sessionsSkipped, which can '
+  + 'previous session, `exposures` with the newest earlier stored book (its own priorDate and sessionsSkipped, which can '
   + 'differ); a change is null where either side has no number, and charmFlow\'s across a change of charm basis (charmBasisChanged).';
 
 const PRIOR_V2_STATUSES = new Set(['found', 'none-on-file', 'unavailable']);
@@ -188,49 +178,33 @@ function priorExposuresV2(raw: unknown, current: Record<string, unknown> | null)
   };
 }
 
-export function summarizeEodDealerPositioningV2(response: EodExposureResponse, options: ShapeEodDealerPositioningOptions = {}) {
-  const legacy = summarizeEodDealerPositioning(response, options);
+/** The one answer: the session's book in `exposures`, the stored summary's levels in `levels`, each with its own prior */
+export function summarizeEodDealerPositioning(response: EodExposureResponse, options: ShapeEodDealerPositioningOptions = {}) {
+  const stored = storedLevels(response, options);
   const session = exposuresFromDaily(response?.exposureV2);
-  const since = legacy.sincePriorSession;
   const rawSince = response?.sincePriorSession as Record<string, unknown> | undefined;
   return {
-    symbol: legacy.symbol,
-    date: legacy.date,
-    asOf: legacy.asOf,
-    dataSource: legacy.dataSource,
+    symbol: stored.symbol,
+    date: stored.date,
+    asOf: stored.asOf,
+    dataSource: stored.dataSource,
     exposures: session.exposures,
     ...(session.exposuresUnavailable ? { exposuresUnavailable: session.exposuresUnavailable } : {}),
-    levels: {
-      methodology: 1,
-      window: legacy.dteWindow,
-      spotPrice: legacy.spotPrice,
-      dealerRegime: legacy.dealerRegime,
-      gammaFlip: legacy.gammaFlip,
-      gammaFlipNote: legacy.gammaFlipNote,
-      callWall: legacy.callWall,
-      putWall: legacy.putWall,
-      gammaMagnet: legacy.gammaMagnet,
-      topContributingStrikes: legacy.topContributingStrikes,
-      topContributingStrikesAvailable: legacy.topContributingStrikesAvailable,
-      // the strikes' netGex and netDex are methodology 1's per-strike values, in the stored summary's own units
-      topContributingStrikesUnits: { netGex: legacy.units.netGex, netDex: legacy.units.netDex },
-    },
-    expectedMove30d: legacy.expectedMove30d,
+    levels: stored.levels,
+    expectedMove30d: stored.expectedMove30d,
     sincePriorSession: {
-      // the stored summary's previous session, its levels only (its net GEX and DEX are methodology 1's)
-      levels: since === null ? null : {
-        status: since.status,
-        priorDate: since.priorDate,
-        sessionsSkipped: since.sessionsSkipped,
-        prior: since.prior === null ? null : (({ netGex: _g, netDex: _d, ...rest }) => rest)(since.prior),
-        change: since.change === null ? null : (({ netGex: _g, netDex: _d, ...rest }) => rest)(since.change),
-        dealerRegimeChanged: since.dealerRegimeChanged,
-      },
+      // the stored summary's previous session, its levels only
+      levels: stored.sincePriorSession,
       exposures: priorExposuresV2(rawSince?.exposureV2, session.exposures),
     },
+    // The units describe THIS answer's keys: the book's are bookNote's, the
+    // strikes' are the levels' own; the row's block names expectedMovePct30d,
+    // a key this answer does not emit.
     units: {
-      // the methodology-2 numbers' units are methodologyNote's
-      expectedMove30d: legacy.units.expectedMove30d,
+      expectedMove30d: {
+        fraction: 'decimal fraction of spotPrice over the next 30 calendar days (0.018 = 1.8%)',
+        absolute: 'spotPrice times the fraction, in the currency of spotPrice',
+      },
     },
   };
 }

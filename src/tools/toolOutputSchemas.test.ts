@@ -17,7 +17,10 @@ function captureRegisteredTools() {
   const tools: Array<{ name: string; config: Record<string, unknown>; handler: Function }> = [];
   const server = {
     registerTool(name: string, config: Record<string, unknown>, handler: Function) {
-      tools.push({ name, config, handler });
+      // the registry publishes the exposure tools' shapes as loose objects (an explicit methodology is refused,
+      // not stripped); the pins here read the shape itself
+      const schema = config.inputSchema as { shape?: unknown } | undefined;
+      tools.push({ name, config: schema && typeof schema === 'object' && 'safeParse' in schema ? { ...config, inputSchema: schema.shape } : config, handler });
     },
   };
   return { tools, server };
@@ -159,7 +162,6 @@ describe('MCP tool output schemas', () => {
     const positioning = description('get_live_dealer_positioning');
     expect(positioning).not.toMatch(/last[- ]close/i);
     const snapshot = description('get_options_snapshot');
-    expect(snapshot).toMatch(/net GEX and DEX here are over ALL expirations/);
     expect(snapshot).toMatch(/0-60 day window/);
     // SnapshotComputeService EQUITY_CHAIN_MIN_DTE: stored after the session's own expirations settle.
     expect(snapshot).toMatch(/`chainExpiry` is, for a stock, ETF or index, the nearest expiration at least a day after the session \(the snapshot is stored after that session's own expirations settle; null, with no chain, when none is that far out\); a futures contract's snapshot is taken intraday and can name the session's own expiration/);
@@ -286,8 +288,6 @@ describe('MCP tool output schemas', () => {
     const requests: Array<{ path: string; params?: Record<string, string>; body?: unknown }> = [];
     const recording = {
       get: async (path: string, params?: Record<string, string>) => {
-        // the platform default, methodology 1 as today; a public route, not one of the proxy paths pinned here
-        if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false };
         requests.push({ path, params });
         return {};
       },
@@ -315,15 +315,15 @@ describe('MCP tool output schemas', () => {
 
     expect(requests).toEqual([
       { path: '/live/options-chain/SPY', params: { expiration: '2026-10-16', provider: 'tradier' } },
-      { path: '/live/exposure/SPY', params: {} },
-      { path: '/live/exposure/SPY', params: { expiration: '2026-09-25' } },
+      { path: '/live/exposure/SPY', params: { exposure: 'v2' } },
+      { path: '/live/exposure/SPY', params: { expiration: '2026-09-25', exposure: 'v2' } },
       // Plain decimals, as the scan sends its own: the route refuses an exponent.
-      { path: '/live/exposure/SPX', params: { r: '0.0425', q: '0.012' } },
+      { path: '/live/exposure/SPX', params: { r: '0.0425', q: '0.012', exposure: 'v2' } },
       { path: '/regime/fits/SPY/history', params: { days: '5' } },
       { path: '/scanner/snapshot/SPY', params: undefined },
-      { path: '/scanner/metrics/batch', params: { symbols: 'SPY,QQQ' } },
-      { path: '/eod/exposure/SPY', params: { date: '2026-09-15' } },
-      { path: '/eod/exposure/SPY', params: {} },
+      { path: '/scanner/metrics/batch', params: { symbols: 'SPY,QQQ', exposure: 'v2' } },
+      { path: '/eod/exposure/SPY', params: { date: '2026-09-15', exposure: 'v2' } },
+      { path: '/eod/exposure/SPY', params: { exposure: 'v2' } },
       // Only what was given: no `undefined` keys, so the route's exactly-one
       // rule for t / daysToExpiry sees what the caller sent.
       { path: '/compute/black-scholes', body: { optionType: 'put', S: 100, K: 95, sigma: 0.3, daysToExpiry: 30, symbol: 'spy' } },
@@ -478,7 +478,7 @@ describe('MCP tool output schemas', () => {
     // normalizer retains, names every rejection, and says a failed fetch
     // leaves its expiration out.
     const eod = description('get_dealer_positioning');
-    expect(eod).toMatch(/`dealerRegime` is the sign of the 0-60 day net gamma interpolated at spot between the two strikes that bracket it \(the nearest strike's gamma when spot is outside the strike range\), not the sign of `netGex` and not which side of `gammaFlip` spot sits on; it can disagree with both \(SPY on 2026-09-17: netGex -5\.5 billion, spot 763\.01 below the flip 764\.97, regime positive\), and only with fewer than two gamma-bearing strikes in that window is it the sign of `netGex` itself/);
+    expect(eod).toContain('`levels.dealerRegime` is the sign of the 0-60 day net gamma interpolated at spot between the two strikes that bracket it (the nearest strike\'s gamma when spot is outside the strike range), not the sign of the book\'s `gex` and not which side of `gammaFlip` spot sits on; it can disagree with both (SPY on 2026-09-17: spot 763.01 below the flip 764.97, regime positive), and only with fewer than two gamma-bearing strikes in that window is it the sign of the whole 0-60 day net gamma.');
     expect(eod).not.toMatch(/the dealer regime \(positive or negative gamma\)|near-term net gamma|the sign of the window's net gamma/);
     const live = description('get_live_dealer_positioning');
     expect(live).not.toMatch(/a dealer regime of positive or negative gamma|two near-term strikes|it is the sign of net gamma/);
@@ -604,7 +604,7 @@ describe('MCP tool output schemas', () => {
     expect(eodDate).toContain('After the cutoff the answer says retrying will not succeed: that is the proxy\'s flag for a row absent on the normal schedule, not a promise that the file can never arrive, since a session whose import or exposure computation failed can appear after a later successful import or repair, and nothing here says whether one is coming.');
     expect(eodDate).toContain('The equity import is scheduled for 01:00 US Eastern the next day, retried in half-hour steps to about 06:00 and later when it has days to catch up, and usually lands about 02:30 (02:31 to 02:34 for every session from 2026-09-08 to 09-17); the newest on file can be older when an import is late.');
     expect(eod).toContain('The equity import usually lands about 02:30 US Eastern the next day, so in the evening the most recent on file is usually the previous session');
-    expect(eod).toContain('`sincePriorSession` compares this session with the one before it on file, from the same stored end-of-day computation over the same 0-60 day window: `prior` holds that session\'s levels, `change` this session minus that one (null where either is missing), and `dealerRegimeChanged` whether the regime differs;');
+    expect(eod).toContain('`sincePriorSession.levels` compares this session with the one before it on file, from the same stored end-of-day computation over the same 0-60 day window: `prior` holds that session\'s levels, `change` this session minus that one (null where either is missing), and `dealerRegimeChanged` whether the regime differs;');
     expect(eod).toContain('`sessionsSkipped` counts the NYSE sessions between `priorDate` and `date`, none of which has a summary on file (0: none falls between).');
     expect(eod).toMatch(/Both flips are found on a grid of 60 prices within 20% of each session's spot, about 0\.68% of spot apart and re-centred every session, so a flip change smaller than that step can come from the grid rather than the market\./);
     expect(eod).toContain('`status` is "none-on-file" when no earlier session has a summary and "unavailable" when it could not be read; this session\'s values are unaffected either way.');
@@ -674,12 +674,19 @@ describe('MCP tool output schemas', () => {
       coverage: { gamma: { total: 2, included: 2 }, delta: { total: 2, included: 2 }, vega: { total: 2, included: 2 } },
       deltasByExpiration: [{ expiration: '2026-10-16', call: strike === 140 ? 0.03 : 0.5, put: strike === 140 ? -0.97 : -0.5 }],
     }));
+    // the book block the rows come from, each strike with its deltas
+    const side = (n: number) => ({ gex: n, dex: 0, vega: n, vanna: n, charmFixedRef: n, rollBasis: null, charm: n, vomma: n });
+    const bases = { call: side(1), put: side(0), coverage: Object.fromEntries(['gamma', 'delta', 'vega', 'vanna', 'charm', 'vomma'].map((m) => [m, { included: 2, total: 2 }])), dexBalance: 1 };
+    const exposureV2 = {
+      available: true, methodology: 2, referenceKind: 'spot', roll: { status: 'notApplicable', carry: null }, expiryScope: 'intraday-clock-1', scopeAsOf: '2026-10-16T14:00:00.000Z',
+      expirationsIncluded: ['2026-10-16'], strikeRows: { inScope: 3, expired: 0, unscoped: 0 }, totals: bases,
+      strikes: byStrike.map(({ strike, deltasByExpiration }) => ({ strike, bases, callOpenInterest: 10, putOpenInterest: 10, deltasByExpiration })),
+      expirations: [{ expiration: '2026-10-16', bases }], spotSides: null,
+    };
     const recording = {
       get: async (path: string, params?: Record<string, string>) => {
-        // the platform default, read before the positioning and not recorded
-        if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false };
         requests.push({ path, params });
-        return { symbol: 'SPY', expirations: ['2026-10-16'], snapshot: { spotPrice: 120 }, byStrike };
+        return { symbol: 'SPY', expirations: ['2026-10-16'], snapshot: { spotPrice: 120 }, byStrike, exposureV2 };
       },
     } as any;
     const { tools, server } = captureRegisteredTools();
@@ -692,7 +699,7 @@ describe('MCP tool output schemas', () => {
 
     const banded: any = await tool.handler({ symbol: 'spy', strikeWindowDelta: 0.1 });
     // The band only chooses rows: the request is the same as without it.
-    expect(requests).toEqual([{ path: '/live/exposure/SPY', params: {} }]);
+    expect(requests).toEqual([{ path: '/live/exposure/SPY', params: { exposure: 'v2' } }]);
     expect(banded.structuredContent.strikes).toMatchObject({ deltaBand: 0.1, inWindow: 2, returned: 2 });
 
     // The echoes are the values the rows were chosen with, not rounded to 15
@@ -716,7 +723,7 @@ describe('MCP tool output schemas', () => {
     // SPY on 2026-09-29, the values the thirty-first run read with binary
     // noise; the changes now arrive exact from the proxy (eodExposure.ts).
     const recording = {
-      get: async (path: string) => (path === '/exposure/methodology' ? { defaultMethodology: 1, stale: false } : {
+      get: async () => ({
         schemaVersion: 1, symbol: 'SPY', date: '2026-09-29', asOf: '2026-09-29T21:40:00Z',
         source: 'eod_options_snapshot', dteWindow: { minDte: 0, maxDte: 60, unit: 'calendar_days' },
         spotPrice: 764.03, netGex: -10894620007, netDex: 16246461968,
@@ -728,37 +735,30 @@ describe('MCP tool output schemas', () => {
           status: 'found', priorDate: '2026-09-28', sessionsSkipped: 0, dealerRegimeChanged: false,
           prior: { spotPrice: 765.54, netGex: -8801431612, netDex: 11348727140, gammaFlip: 772.75, callWall: 785, putWall: 765, gammaMagnet: 765, dealerRegime: 'negative_gamma' },
           change: { spotPrice: -1.51, netGex: -2093188395, netDex: 4897734828, gammaFlip: -1.17, callWall: -20, putWall: 0, gammaMagnet: -4 },
+          exposureV2: { status: 'none-on-file' },
         },
+        // the session's book day (the tool asks for it and refuses an answer without it); none published here
+        exposureV2: { available: false, reason: 'no methodology-2 row' },
       }),
     } as any;
     const { tools, server } = captureRegisteredTools();
     registerAllTools(server as any, stubClient(), stubTokens(), recording);
     const result: any = await tools.find((t) => t.name === 'get_dealer_positioning')!.handler({ symbol: 'spy' });
     const out = result.structuredContent;
-    expect(out.sincePriorSession.change).toMatchObject({ spotPrice: -1.51, gammaFlip: -1.17, netGex: -2093188395, callWall: -20 });
+    expect(out.sincePriorSession.levels.change).toMatchObject({ spotPrice: -1.51, gammaFlip: -1.17, callWall: -20 });
     expect(out.expectedMove30d.absolute).toBe(29.666368064);
-    expect(out.topContributingStrikes[0]).toMatchObject({ netGex: -1597560842.56869, netDex: 1234.56789012346 });
+    expect(out.levels.topContributingStrikes[0]).toMatchObject({ netGex: -1597560842.56869, netDex: 1234.56789012346 });
     // Whole numbers and decimals already within 15 digits pass unchanged.
-    expect(out).toMatchObject({ netGex: -10894620007, spotPrice: 764.03, gammaFlip: 771.58 });
+    expect(out.levels).toMatchObject({ spotPrice: 764.03, gammaFlip: 771.58 });
+    expect(out).not.toHaveProperty('netGex');
     expect(result.content[0].text).not.toMatch(/\d{16,}/);
     const text = tools.find((t) => t.name === 'get_dealer_positioning')!.config.description as string;
     expect(text).toContain('Numbers go out at 15 significant digits at most, each change computed as the exact difference of the two stored values before that rounding.');
   });
 
-  test('the all-expiration and 0-60 day exposure tools each say the other window exists and can differ in sign', () => {
-    // SPY 2026-09-29: net_dex -16.8B over all expirations, +16.2B over 0-60
-    // days, the same engine and convention; read as a sign bug in the
-    // thirty-third run.
-    const { tools, server } = captureRegisteredTools();
-    registerAllTools(server as any, stubClient(), stubTokens(), stubClient());
-    const text = (name: string) => tools.find((t) => t.name === name)!.config.description as string;
-    const sign = 'Long-dated contracts carry large delta, so the two can differ even in sign (SPY 2026-09-29: net DEX -16,795,316,756 over all expirations against +16,246,461,968 over 0-60 days)';
-    for (const name of ['get_options_snapshot', 'get_options_analytics_history', 'get_dealer_positioning']) {
-      expect(text(name), name).toContain(sign);
-    }
-    expect(text('get_options_analytics_history')).toContain('The GEX and DEX here are over ALL expirations on file, while get_dealer_positioning reports the 0-60 day window');
-    expect(text('get_dealer_positioning')).toContain('get_options_snapshot and get_options_analytics_history report net GEX and DEX over ALL expirations');
-  });
+  // The all-expiration and 0-60 day sign sentence (SPY 2026-09-29's net DEX) went with the earlier totals: the
+  // snapshot, the history and the end-of-day exposures are one stored book over each answer's scope, and only the
+  // end-of-day levels keep the 0-60 day window (pinned in toolDescriptions.test.ts).
 
   test('platform info states the live chain budget in the broker\'s own requests, as the tool does', async () => {
     // It said "capped at 10 requests/minute" (thirty-third run); the limit is
@@ -1119,9 +1119,9 @@ describe('MCP tool output schemas', () => {
     for (const report of [true, false]) {
       const live = {
         get: async (path: string, _params?: Record<string, string>, onRateLimit?: (r: typeof budget) => void) => {
-          if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false };
           if (report) onRateLimit?.(budget);
-          return {};
+          // the live positioning refuses an answer without its book block; an unavailable one is answered
+          return path.startsWith('/live/exposure/') ? { exposureV2: { available: false, reason: 'the methodology-2 book could not be computed' } } : {};
         },
         post: async () => ({}),
       } as any;
@@ -1146,9 +1146,8 @@ describe('MCP tool output schemas', () => {
     // here in the budget the proxy reported, is dropped.
     const live = {
       get: async (path: string, _params?: Record<string, string>, onRateLimit?: (r: unknown) => void) => {
-        if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false };
         onRateLimit?.({ limit: 10, remaining: 8.000000000000002, resetSeconds: 43 });
-        return {};
+        return path.startsWith('/live/exposure/') ? { exposureV2: { available: false, reason: 'the methodology-2 book could not be computed' } } : {};
       },
       post: async () => ({}),
     } as any;
@@ -1466,7 +1465,8 @@ describe('MCP tool output schemas', () => {
     expect(text).not.toContain('not negated');
     // The dealer exposure sweeps keep their own (unchanged) sign, said in words
     expect(text).toContain('Dealer exposure charm is NOT on the time-passing sign');
-    expect(text).toContain('dealer dollar charm per calendar day on the remaining-maturity sign for the dealer - one day of time passing moves the dealers\' dollar delta by minus it');
+    // since U12 only a saved record or run on the earlier calculation carries it, which it says (exposureCalculation)
+    expect(text).toContain('earlierDealerHedging carries dealer dollar charm per calendar day on the remaining-maturity sign for the dealer (one day of time passing moves the dealers\' dollar delta by minus it)');
     // dcharmDvol is the day's change in vanna (the daily charm per unit of volatility), not the day's change in charm
     const bs = on.tools.find((t) => t.name === 'compute_black_scholes')!;
     expect((bs as any).config.description).toContain('which is the day\'s change in vanna');

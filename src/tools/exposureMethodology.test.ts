@@ -1,15 +1,17 @@
 import { describe, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
 import {
+  BOOK_NOTE,
   COVERAGE_METRICS,
+  bookNotCarriedError,
   bookOfWire,
   charmBasisOf,
   coverageStatusOf,
+  exposuresFromDaily,
   mcpExposuresV2,
-  methodologyInput,
-  methodologyLabel,
   readStoredBlock,
-  resolveMethodology,
+  requireBookEnvelope,
+  v2ReasonText,
   type CoverageMetric,
   type WireBases,
 } from './exposureMethodology.js';
@@ -29,30 +31,30 @@ function wire(call: Partial<Record<(typeof KEYS)[number], number | null>>, put: 
   };
 }
 
-describe('resolveMethodology and the label', () => {
-  test('a named methodology never reads the default', async () => {
-    const client = { get: async () => { throw new Error('the default was read'); } };
-    expect(await resolveMethodology(client, 1)).toEqual({ methodology: 1, source: 'requested', stale: false });
-    expect(await resolveMethodology(client, 2)).toEqual({ methodology: 2, source: 'requested', stale: false });
+// Greek exposure methodology v2: one calculation, so no input, default or label; the proxy's echo is still checked, and no
+// text a model reads names a method
+const NAMES_A_METHOD = /[Mm]ethodolog|\bv[12]\b|V2/;
+
+describe('the one calculation', () => {
+  test('the proxy\'s echo of the book is required, never relabeled', () => {
+    expect(() => requireBookEnvelope({ methodology: 2, exposure: { view: 'assumedDealerBook', p: 1 } })).not.toThrow();
+    for (const bad of [null, {}, { methodology: 1, exposure: { view: 'assumedDealerBook', p: 1 } }, { methodology: 2, exposure: { view: 'longOi', p: 1 } }, { methodology: 2, exposure: { view: 'assumedDealerBook', p: 0.5 } }]) {
+      expect(() => requireBookEnvelope(bad)).toThrow('The answer did not carry the assumed dealer book, so it was not used.');
+    }
+    expect(bookNotCarriedError()).toMatchObject({ statusCode: 502, code: 'UPSTREAM_INVALID', retryable: false });
   });
 
-  test('an omitted one is the default, stale when the read was; unknown is null', async () => {
-    expect(await resolveMethodology({ get: async () => ({ defaultMethodology: 2, stale: true }) }, undefined))
-      .toEqual({ methodology: 2, source: 'default', stale: true });
-    expect(await resolveMethodology({ get: async () => { throw new Error('HTTP 503'); } }, undefined)).toBeNull();
-  });
-
-  test('the label carries methodologyStale only when stale', () => {
-    expect(methodologyLabel({ methodology: 1, source: 'default', stale: false })).toEqual({ methodology: 1, methodologySource: 'default' });
-    expect(methodologyLabel({ methodology: 2, source: 'default', stale: true })).toEqual({ methodology: 2, methodologySource: 'default', methodologyStale: true });
-  });
-
-  test('the input takes 1 or 2 only', () => {
-    const input = methodologyInput();
-    expect(input.safeParse(1).success).toBe(true);
-    expect(input.safeParse(2).success).toBe(true);
-    expect(input.safeParse(undefined).success).toBe(true);
-    for (const bad of [0, 3, '2', 1.5, null]) expect(input.safeParse(bad).success).toBe(false);
+  test('the note and every reason name no method', () => {
+    expect(BOOK_NOTE).toContain('the assumed dealer book');
+    expect(BOOK_NOTE).not.toMatch(NAMES_A_METHOD);
+    // every proxy reason (its transport text names its calculation) reads as fixed words that do not
+    for (const reason of ['no methodology-2 row', 'methodology 2 has not been published for 2026-10-23', 'no strike curves for the session',
+      'the strike curves are from another session', 'the snapshot is of another run', 'the methodology-2 row is not of the session\'s current publication',
+      'the methodology-2 rows could not be read', 'the strike curves could not be read', 'the methodology-2 bases could not be read', 'something else', undefined]) {
+      expect(v2ReasonText(reason)).not.toMatch(NAMES_A_METHOD);
+    }
+    expect(v2ReasonText('methodology 2 has not been published for 2026-10-23')).toBe('the assumed dealer book is not published for this session');
+    expect(exposuresFromDaily({ available: true, bases: { nope: 1 } })).toEqual({ exposures: null, exposuresUnavailable: 'the stored book is unreadable' });
   });
 });
 
@@ -162,7 +164,7 @@ describe('the book() twin against packages/shared/src/exposure/book.ts', () => {
   });
 });
 
-describe('the MCP shape of a methodology-2 exposure', () => {
+describe('the MCP shape of a book exposure', () => {
   const b = bookOfWire(wire({ gex: 3, vega: 2 }, { gex: 1, vega: 1 }, { vega: [1, 2], vomma: [0, 2] }));
 
   test('coverage lists only what is not complete, under the name of the number it governs', () => {
@@ -219,7 +221,7 @@ describe('readStoredBlock', () => {
     expect(readStoredBlock(legacy)!.expiryScope).toBeNull();
   });
 
-  test('anything that does not read as a methodology-2 block is null', () => {
+  test('anything that does not read as a stored book block is null', () => {
     const variants: Array<(b: any) => void> = [
       (b) => { b.methodology = 1; },
       (b) => { delete b.coverage.vomma; },

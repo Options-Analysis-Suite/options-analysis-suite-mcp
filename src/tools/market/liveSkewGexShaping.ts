@@ -39,12 +39,12 @@ const BY_SIZE: ReadonlySet<LiveSkewGexRankBy> = new Set(['skewChange', 'gexChang
 export const MAX_LIVE_SKEW_GEX_SYMBOLS = 50;
 
 /**
- * Greek exposure methodology v2: this tool's GEX is its own engine's, never labeled platform
- * methodology 1, and the platform's default methodology does not control it.
+ * This tool's GEX is its own engine's: not the platform's stored or live
+ * exposure book, and it does not change with it.
  */
 export const LIVE_SKEW_GEX_METHODOLOGY = 'GEX here is this tool\'s own model (`method`: implied volatility solved from the live mids), '
-  + 'neither platform exposure methodology 1 nor 2, and the platform\'s default exposure methodology does not change it; its sign '
-  + '(calls positive, puts negative) is the assumed dealer book\'s in both.';
+  + 'not the platform\'s stored or live exposure book, and it does not change with it; its sign '
+  + '(calls positive, puts negative) is the assumed dealer book\'s.';
 
 /** Room under the response ceiling for the wire sanitizer's renames and the envelope. */
 export const LIVE_SKEW_GEX_MARGIN_BYTES = 2 * 1024;
@@ -362,7 +362,7 @@ export function shapeLiveSkewGex(response: unknown, options: LiveSkewGexShapeOpt
     rates: [...rates.values()].sort((a, b) => (a.expiration < b.expiration ? -1 : a.expiration > b.expiration ? 1 : 0)),
     units: LIVE_SKEW_GEX_UNITS,
     method: record(body.method),
-    methodologyNote: LIVE_SKEW_GEX_METHODOLOGY,
+    gexNote: LIVE_SKEW_GEX_METHODOLOGY,
     notes: record(body.notes),
     ...('rateLimit' in options ? { rateLimit: options.rateLimit ?? null } : {}),
     guide: {} as Guide,
@@ -479,8 +479,11 @@ function rankingGuide(shell: Record<string, any>, rows: Row[], options: LiveSkew
   if (gexAsked) {
     g.gexWindow = 'From 4:15 PM New York on an expiration day, that day\'s expiration leaves the GEX window unless the broker '
       + 'lists nothing else (gex.expirations is the window used).';
-    g.gexComparison = 'get_live_dealer_positioning sums the broker\'s published Greeks over the same window; get_options_snapshot\'s '
-      + 'netGex covers every expiration on file and get_dealer_positioning\'s 0-60 days, so neither can be subtracted from this.';
+    g.gexComparison = 'get_live_dealer_positioning selects the same broker expirations but sums the broker\'s published Greeks into '
+      + 'its book, which leaves an expiration out once its session has closed (its exposureScope): from that close (4:00 PM New '
+      + 'York, earlier on an early close) to 4:15 PM the two cover different expirations. get_options_snapshot\'s and '
+      + 'get_dealer_positioning\'s `exposures.gex` are the stored assumed dealer book over the scope each answer states (only '
+      + 'get_dealer_positioning\'s levels keep the 0-60 day window). Neither can be subtracted from this.';
   }
   if (gexes.length) {
     g.strikes = 'gex.strikes sorts the window\'s priced strikes by IV source: otmSide (their own out-of-the-money quote), '

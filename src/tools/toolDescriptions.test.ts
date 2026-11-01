@@ -149,19 +149,19 @@ describe('get_live_dealer_positioning description', () => {
     expect(firstSentence(d)).toMatch(/\bLIVE dealer positioning \(GEX, gamma exposure\)/);
     expect(firstSentence(d)).toContain('computed in real time from the broker credential stored on your Options Analysis Suite account');
     expect(firstSentence(d)).toContain('the repriced gamma flip, the call wall and put wall');
-    expect(firstSentence(d)).toContain('a dealer regime (normally the sign of net gamma at spot; net GEX is the fallback with fewer than two gamma-bearing strikes or no recognized regime, and the flip side does not determine it) and per-strike rows near spot');
+    expect(firstSentence(d)).toContain('a dealer regime (normally the sign of net gamma at spot; the levels\' net gamma total is the fallback with fewer than two gamma-bearing strikes or no recognized regime, and the flip side does not determine it); and per-strike rows near spot');
   });
 
   test('what each expiration adds: the current session, and the moomoo delay', () => {
     const d = desc('get_live_dealer_positioning');
-    expect(d).toContain('Per expiration it adds its own GEX, DEX and gross-gamma share (0DTE concentration), its at-the-money straddle expected move and the earnings and ex-dividend dates on file, also in the top-level `events` (none on file, here or in a separate earnings or dividends lookup, is not none scheduled: a fund rarely has earnings on file, and its ex-dividend date often appears only on or after the day, so for a fund neither rules one out); `spotSides` splits open interest above and below spot (a squeeze argument\'s inputs).');
-    expect(d).toContain('The gamma flip is the crossing nearest spot that a sampled search found (a fine step, 0.0005% of spot growing to at most 0.02% farther out), not necessarily the only one; a null flip beside a complete `levelStatus.gammaFlip` is the result of a search over every counted leg (read `coverage.gammaFlipSearchStatus` when reported), not withheld and not proof of no flip.');
+    expect(d).toContain('Per expiration it adds its own GEX, delta balance and share of the book\'s Long OI GEX (0DTE concentration), its at-the-money straddle expected move and the earnings and ex-dividend dates on file, also in the top-level `events` (none on file, here or in a separate earnings or dividends lookup, is not none scheduled: a fund rarely has earnings on file, and its ex-dividend date often appears only on or after the day, so for a fund neither rules one out); `spotSides` splits open interest above and below spot (a squeeze argument\'s inputs).');
+    expect(d).toContain('The gamma flip is the crossing nearest spot that a sampled search found (a fine step, 0.0005% of spot growing to at most 0.02% farther out), not necessarily the only one; a null flip beside a complete `levels.status.gammaFlip` is the result of a search over every counted leg (read `levels.coverage.gammaFlipSearchStatus` when reported), not withheld and not proof of no flip.');
     expect(d).toContain('It reflects the current session, not the most recent session on file; on moomoo, option quotes are real time only once the account holds assets or a US position, and until then may be about 15 minutes delayed, unmarked.');
   });
 
   test('the end-of-day sibling and the prerequisite sit in the first part', () => {
     const d = desc('get_live_dealer_positioning');
-    const sibling = 'For the most recent session on file (0-60 days), free and without a broker, use get_dealer_positioning; its coarse-grid gamma flip is a different claim from the repriced one here.';
+    const sibling = 'For the most recent session on file, free and without a broker, use get_dealer_positioning; its coarse-grid gamma flip is a different claim from the repriced one here.';
     expect(d.indexOf(sibling)).toBeGreaterThanOrEqual(0);
     expect(d.indexOf(sibling) + sibling.length).toBeLessThanOrEqual(FIRST_PART);
     expect(d.indexOf(BROKER_PREREQUISITE)).toBeGreaterThanOrEqual(0);
@@ -169,14 +169,14 @@ describe('get_live_dealer_positioning description', () => {
   });
 
   test('the default window and the one-expiration book', () => {
-    expect(desc('get_live_dealer_positioning')).toContain('Without `expiration` it covers the first four listed expirations that may still trade (on a monthly-listed name that can span months; get_dealer_positioning covers 0-60 days from the most recent session on file; its window and session can differ from this live answer, so comparing them does not isolate today\'s longer-dated book); with `expiration` every total (charm included), level and row is computed over that one listed date alone, the way to see a same-day (0DTE) or single-week book.');
+    expect(desc('get_live_dealer_positioning')).toContain('Without `expiration` it covers the first four listed expirations that may still trade (on a monthly-listed name that can span months; get_dealer_positioning\'s book covers the scope its answer states (every expiration after the most recent session on file where the expiry rule is proven) and its levels 0-60 days; its scope and session can differ from this live answer, so comparing them does not isolate today\'s longer-dated book); with `expiration` every total (charm included), level and row is computed over that one listed date alone, the way to see a same-day (0DTE) or single-week book.');
   });
 
   test('the cost on every broker, the no-loop rule and the 15-second cache', () => {
     const d = desc('get_live_dealer_positioning');
     expect(d).toContain('EXPENSIVE: broker requests spend your broker\'s own quota (120 requests a minute on Tradier and Schwab, 600 on Public, 120 on tastytrade, 30 on moomoo), shared with the other live tools. Cold-call estimates, not actual spend or upper bounds: a default call reads the expirations list and four chains: 9 requests on Tradier and Public, 5 on Schwab, 49 reserved on tastytrade and settled to the real count, and 9 reserved on moomoo and settled to what it spent (about three fully cold calls a minute on its 30, more once its contract lists are cached for the day); with `expiration` it reads the list and one chain: 3 on Tradier and Public, 2 on Schwab, 13 reserved on tastytrade, and 3 reserved on moomoo and settled to what it spent. Counts vary with the broker\'s caches, and a long tastytrade or moomoo chain reserves more once its count is known and is refused RATE_LIMITED when the budget cannot hold it.');
     for (const broker of ['Tradier', 'Public', 'Schwab', 'tastytrade', 'moomoo']) expect(d.slice(d.indexOf('Cold-call estimates, not actual spend or upper bounds: a default call')), broker).toContain(broker);
-    expect(d).toContain('Do not call it in a loop or for a list of symbols. A repeat within 15 seconds for the same symbol, broker, `expiration`, `r`, `q` and methodology can be answered from a short cache, uncharged, with the same `asOf`; `strikeRange`, `strikeWindowPct` and `strikeWindowDelta` only choose which computed rows are returned, so widening a cached window spends no broker requests.');
+    expect(d).toContain('Do not call it in a loop or for a list of symbols. A repeat within 15 seconds for the same symbol, broker, `expiration`, `r` and `q` can be answered from a short cache, uncharged, with the same `asOf`; `strikeRange`, `strikeWindowPct` and `strikeWindowDelta` only choose which computed rows are returned, so widening a cached window spends no broker requests.');
     expect(d).not.toMatch(/weighted unit|10-unit|10 units/);
   });
 
@@ -295,7 +295,7 @@ describe('get_regime description', () => {
     const d = desc('get_regime');
     expect(d).toContain('scope="market": the MARKET COMPOSITE stress regime, an aggregate of SPY, QQQ, IWM and DIA (not per-symbol): stress score, a Calm-to-Crisis label, confidence, drivers and feature z-scores, the latest by default or one `date`; without `date`, the composite\'s own newest intraday scan is preferred when its market date is the same as or later than the daily row\'s (`scanSource` says which), and a symbol\'s scans of the current session are scope="intraday".');
     expect(d).not.toContain('`include_symbols`');
-    expect(d).toContain('scope="symbol": one symbol\'s daily regime plus its Greek exposures (net gamma, delta, vega, vanna, charm and vomma; call wall, put wall, gamma flip, gamma magnet, top gamma strikes); requires `symbol`; `days` returns the newest stored sessions, 1 to 30, default 1 = the latest.');
+    expect(d).toContain('scope="symbol": one symbol\'s daily regime plus the assumed dealer book\'s exposures and the gamma-derived levels (call wall, put wall, gamma flip, gamma magnet, top gamma strikes); requires `symbol`; `days` returns the newest stored sessions, 1 to 30, default 1 = the latest.');
   });
 
   test('freshness compares market dates, and interval filters across the requested window', () => {
@@ -308,7 +308,7 @@ describe('get_regime description', () => {
 
   test('the scope for current exposures, and the positioning tools named', () => {
     const d = desc('get_regime');
-    expect(d).toContain('For a symbol\'s CURRENT exposures use this scope, not get_options_analytics_history (a daily history over all expirations). The dedicated positioning tools are get_dealer_positioning (end of day, 0-60 day window) and get_live_dealer_positioning (live); this scan\'s levels are its own computation and can differ from theirs.');
+    expect(d).toContain('For a symbol\'s CURRENT exposures use this scope, not get_options_analytics_history (a daily history). The dedicated positioning tools are get_dealer_positioning (end of day, its levels over 0-60 days) and get_live_dealer_positioning (live); this scan\'s levels are its own computation and can differ from theirs.');
     // Keep the end-of-day alternatives early in the get_regime description.
     expect(d.indexOf('get_options_analytics_history')).toBeLessThan(FIRST_PART);
     expect(d.indexOf('get_dealer_positioning (end of day')).toBeLessThan(FIRST_PART);
@@ -332,7 +332,7 @@ describe('get_regime description', () => {
     expect(param('get_regime', 'include_symbols')).toBe('For scope=market only: also return per-symbol daily rows, each tier sorted by absolute stress score and capped at the top 8, for a question needing individual symbols\' regimes; the composite\'s own label, score, confidence and drivers come without it. Default false.');
     expect(param('get_regime', 'full')).toBe('For scope=symbol only. Default false. With `days` 1, true keeps the `history` wrapper around the one entry instead of flattening it to the top level; with `days` above 1 it returns the same entries as the default (the same exposures, model coverage and top strikes), so it changes nothing there.');
     expect(param('get_regime', 'group')).toBe('For scope=sectors only: one sector or industry by name, any case (e.g. Technology, Semiconductors), returned with its daily history over `days` on each exchange the group is listed on.');
-    expect(param('get_regime', 'migration')).toBe('For scope=intraday only: add each scan\'s `migration`, the change in its gamma flip, call wall, put wall, gamma magnet and net gamma since the previous scan with exposures (direction, change, percent of spot, per hour). Default false.');
+    expect(param('get_regime', 'migration')).toBe('For scope=intraday only: add each scan\'s `migration`, the change in its gamma flip, call wall, put wall, gamma magnet and the assumed book\'s GEX since the previous scan with levels (direction, change, percent of spot, per hour). Default false.');
     expect(param('get_regime', 'full')).toContain('with `days` above 1 it returns the same entries as the default');
   });
 });
@@ -365,7 +365,7 @@ describe('every description fits the client cut', () => {
   });
   const opening: Record<string, RegExp> = {
     get_intraday_bars: /^Get one session's LIVE intraday bars \(1, 5, 15 or 30 minutes\)/,
-    get_dealer_positioning: /^Get END-OF-DAY dealer positioning for a symbol from the most recent session on file, over the 0-60 day expiration window/,
+    get_dealer_positioning: /^Get END-OF-DAY dealer positioning for a symbol from the most recent session on file: the stored assumed dealer book in `exposures`/,
     compute_scenario: /^Reprice a multi-leg options strategy across spot moves, implied-volatility shocks and days elapsed/,
     get_snapshot: /^Get the user's synced snapshot history by type\./,
     get_insider_trading: /^Get insider trading activity for a company\./,
@@ -427,27 +427,37 @@ describe('scenario parameters retain their complete rules on the wire', () => {
   });
 });
 
-describe('each exposure tool says what methodology 2 changes', () => {
-  test('get_regime: the scopes\' exposures by methodology, after the first part\'s pointers', () => {
+describe('each exposure tool describes the one calculation', () => {
+  const NAMES_A_METHOD = /[Mm]ethodolog|\bv2\b|V2/;
+  const LIVE_BOOK_LINE = 'the assumed dealer book\'s GEX, delta balance, vega exposure, vanna, charm flow and vomma; the gamma-derived levels in `levels` with their statuses and coverage';
+
+  test('no tool title, description or parameter names a method', () => {
+    for (const t of tools as (Listed & { title?: string })[]) {
+      for (const [where, text] of [['title', t.title], ['description', t.description], ...Object.entries(t.inputSchema.properties ?? {}).map(([p, v]) => [`param ${p}`, v.description])] as [string, string | undefined][]) {
+        expect(String(text ?? ''), `${t.name} ${where}`).not.toMatch(NAMES_A_METHOD);
+      }
+      expect(t.inputSchema.properties ?? {}, t.name).not.toHaveProperty('methodology');
+    }
+  });
+
+  test('get_regime: the scopes\' exposures are the book and the levels their own, after the first part\'s pointers', () => {
     const d = desc('get_regime');
-    const line = 'The market, symbol and intraday scopes\' exposures follow `methodology`: 1 is the figures named above; 2 is the assumed dealer book\'s GEX, delta balance, vega exposure, vanna, charm flow and vomma, the walls, flip, magnet and top strikes staying methodology 1\'s, labeled.';
+    const line = 'On the market, symbol and intraday scopes `exposures` is the assumed dealer book and `levels` the gamma-derived levels, each with its own window.';
     expect(d).toContain(line);
     expect(d.indexOf(line)).toBeGreaterThan(d.indexOf('get_dealer_positioning (end of day'));
+    expect(d).toContain('one symbol\'s daily regime plus the assumed dealer book\'s exposures and the gamma-derived levels (call wall, put wall, gamma flip, gamma magnet, top gamma strikes)');
   });
 
-  test('get_options_analytics_history and get_options_snapshot: the book they share with get_dealer_positioning under 2', () => {
-    expect(desc('get_options_analytics_history')).toContain('the exposures by `methodology` (1: GEX/DEX/VEX and net vanna/charm/vomma; 2: the assumed dealer book\'s GEX, delta balance, vega exposure, vanna, charm flow and vomma)');
-    expect(desc('get_options_analytics_history')).toContain('Under methodology 2 (`methodology`) this, get_options_snapshot and get_dealer_positioning report one stored book, the assumed dealer book, over the scope each answer states; only get_dealer_positioning\'s levels keep the 0-60 day window.');
-    expect(desc('get_options_snapshot')).toContain('Under methodology 2 (`methodology`) one symbol\'s net GEX and DEX give way to `exposures`, and several symbols\' netGex and netDex are the assumed dealer book\'s GEX and delta balance: the one stored book get_options_analytics_history and get_dealer_positioning report under 2, over the scope each answer states.');
+  test('get_options_analytics_history, get_options_snapshot and get_dealer_positioning: the one stored book they share', () => {
+    expect(desc('get_options_analytics_history')).toContain('the assumed dealer book\'s GEX, delta balance, vega exposure, vanna, charm flow and vomma, put/call ratio');
+    expect(desc('get_options_analytics_history')).toContain('This, get_options_snapshot and get_dealer_positioning report one stored book, the assumed dealer book, over the scope each answer states; only get_dealer_positioning\'s levels keep the 0-60 day window.');
+    expect(desc('get_options_snapshot')).toContain('One symbol\'s `exposures` and several symbols\' netGex and netDex are the one stored book get_options_analytics_history and get_dealer_positioning report, over the scope each answer states (every expiration after the session where the expiry rule is proven); only get_dealer_positioning\'s levels keep the 0-60 day window.');
+    expect(desc('get_dealer_positioning')).toContain('`exposures` is the one stored book get_options_snapshot and get_options_analytics_history report too, over the scope each answer states; only these levels keep the 0-60 day window');
   });
 
-  test('get_dealer_positioning and get_live_dealer_positioning: the book in place of the totals, the levels labeled', () => {
-    expect(desc('get_dealer_positioning')).toContain('Under methodology 2 (`methodology`) netGex and netDex give way to `exposures`, the stored assumed dealer book get_options_snapshot and get_options_analytics_history report under 2, over its stated scope; these levels sit in `levels`, labeled methodology 1, each with its own prior in sincePriorSession.');
+  test('get_live_dealer_positioning: the book in every figure, the levels their own', () => {
     const live = desc('get_live_dealer_positioning');
-    const line = 'Under methodology 2 (`methodology`) every total, row, per-expiration and spot-side figure is the assumed dealer book\'s (GEX, delta balance, vega exposure, vanna, charm flow, vomma; an expiration\'s share is of Long OI GEX), and the levels with their statuses and coverage sit in `levels`, labeled methodology 1.';
-    expect(live).toContain(line);
-    // after the first part's sibling and prerequisite, which keep their places
-    expect(live.indexOf(line)).toBeGreaterThan(live.indexOf(BROKER_PREREQUISITE));
+    expect(live).toContain(LIVE_BOOK_LINE);
     expect(live).not.toContain('netCharm');
   });
 });

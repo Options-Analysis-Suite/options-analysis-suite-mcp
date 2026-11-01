@@ -3870,3 +3870,29 @@ describe('compute runs\' time convention', () => {
     expect(budgetPayload.data[0].greekTimeScope).toBe('model Greeks and their aggregates (not the exposure sweep)');
   });
 });
+
+// Greek exposure methodology v2, review r1: the single-run floor keeps the compact sweep (at most twenty entries, the
+// rest counted), trims it last of the evidence, and still fits the budget when its entries are hostile
+describe('U12: the single-run floor keeps the compact sweep', () => {
+  const compactEntry = (index: number, pad = '') => ({
+    exposureCalculation: 'assumedDealerBook', underlying: `U${index}`, strikeCount: 200, levels: { regime: 'unknown' },
+    reference: { kind: `spot${pad}`, price: 10 }, totals: { gex: { value: 1, status: 'complete', included: 2, total: 2 } },
+  });
+
+  test('twenty entries kept and the rest counted, under the budget', () => {
+    const payload: any = { data: [{ status: 'completed', summary: {}, exposureSweep: Array.from({ length: 30 }, (_, i) => compactEntry(i)), oversized: 'x'.repeat(900_000) }], count: 1 };
+    trimFullComputeRunsResponse(payload);
+    expect(payload.data[0].exposureSweep.map((entry: any) => entry.underlying)).toEqual(Array.from({ length: 20 }, (_, i) => `U${i}`));
+    expect(payload.data[0].exposureSweepNotShown).toBe(10);
+    expect(Buffer.byteLength(JSON.stringify(payload))).toBeLessThanOrEqual(48 * 1024);
+  });
+
+  test('hostile entries are trimmed until the floor fits, every cut counted', () => {
+    const payload: any = { data: [{ status: 'completed', summary: {}, exposureSweep: Array.from({ length: 30 }, (_, i) => compactEntry(i, 'y'.repeat(8_000))), oversized: 'x'.repeat(900_000) }], count: 1 };
+    trimFullComputeRunsResponse(payload);
+    const kept = payload.data[0].exposureSweep.length;
+    expect(kept).toBeLessThan(20);
+    expect(payload.data[0].exposureSweepNotShown).toBe(30 - kept);
+    expect(Buffer.byteLength(JSON.stringify(payload))).toBeLessThanOrEqual(48 * 1024);
+  });
+});

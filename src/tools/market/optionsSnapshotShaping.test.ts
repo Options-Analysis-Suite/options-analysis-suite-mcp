@@ -61,6 +61,22 @@ const painRow = (strike: number, totalPain: number) => ({
   strike, callPain: totalPain / 2, putPain: totalPain / 2, totalPain,
 });
 
+// The published book's wire (proxy/lib/assetExposureV2.ts, the route's always-present block): each side's resolved
+// bases, the coverage per metric and the delta balance; a strike's GEX in the assumed book is call gex minus put gex.
+const METRICS = ['gamma', 'delta', 'vega', 'vanna', 'charm', 'vomma'] as const;
+const coverage = (over: Partial<Record<(typeof METRICS)[number], [number, number]>> = {}) => Object.fromEntries(METRICS.map((m) => {
+  const [included, total] = over[m] ?? [2, 2];
+  return [m, { included, total }];
+}));
+const side = (gex: number, charm: number) => ({ gex, dex: 0, vega: 1, vanna: 1, charmFixedRef: charm, rollBasis: 0, charm, vomma: 1 });
+const bases = (callGex: number, putGex: number, dexBalance: number | null, over: Partial<Record<(typeof METRICS)[number], [number, number]>> = {}) => ({
+  call: side(callGex, 3), put: side(putGex, 1), coverage: coverage(over), dexBalance,
+});
+const bookBlock = (strikes: Array<{ strike: number; bases: ReturnType<typeof bases> }>, over: Record<string, unknown> = {}) => ({
+  available: true, methodology: 2, referenceKind: 'spot', roll: { status: 'notApplicable', carry: null },
+  totals: bases(3000, 1000, -500), strikes, definition: 'expiry-scoped', expiryQualifier: null, ...over,
+});
+
 describe('summarizeOptionsSnapshot', () => {
   it('returns the scalars without any curve being asked for', () => {
     const shaped = summarizeOptionsSnapshot(snapshot());
@@ -81,6 +97,24 @@ describe('summarizeOptionsSnapshot', () => {
     // published until the producer writes it; the live positioning tool
     // resolves q from the company profile instead.
     expect(shaped.metrics).not.toHaveProperty('dividendYield');
+  });
+
+  it('never sends the stored net GEX and DEX or their curves: the exposure is the published book', () => {
+    // the row still stores the earlier calculation's totals and curves; none of them is read into the answer
+    const legacyOnly = summarizeOptionsSnapshot(snapshot({
+      gexByStrike: [{ strike: 650, callGex: 6, putGex: 4, netGex: 10 }],
+      dexByStrike: [{ strike: 650, callDex: 1, putDex: 2, netDex: -3 }],
+    }), { curves: ['gex', 'dex'] });
+    expect(legacyOnly.metrics).not.toHaveProperty('netGex');
+    expect(legacyOnly.metrics).not.toHaveProperty('netDex');
+    expect(legacyOnly.curves).toEqual({ gex: null, dex: null });
+    expect(legacyOnly).toMatchObject({ exposures: null, exposuresUnavailable: 'the stored book is unreadable' });
+    expect(JSON.stringify(legacyOnly)).not.toMatch(/4200000|-2800000|"net(Gex|Dex)"/);
+    // with the book: its totals in `exposures`, its strikes the curves, the stored totals still absent
+    const withBook = summarizeOptionsSnapshot(snapshot({ exposureV2: bookBlock([{ strike: 650, bases: bases(6, 4, -3) }]) }), { curves: ['gex'] });
+    expect(withBook.metrics).not.toHaveProperty('netGex');
+    expect(withBook.exposures).toMatchObject({ gex: 2000, putMinusCallDeltaBalance: -500 });
+    expect((withBook.curves as any).gex.largestAbsolute).toEqual({ strike: 650, gex: 2 });
   });
 
   it('separates "no curve this session" from "no curve at all"', () => {
@@ -109,44 +143,42 @@ describe('summarizeOptionsSnapshot', () => {
   });
 
   it('keeps exposure totals over the WHOLE curve, not the returned slice', () => {
-    // Shape from proxy/services/SnapshotComputeService.ts:434, the writer -
-    // NOT from openapi/examples.ts, which is a simplification and whose `gex`
-    // key does not exist in the stored payload.
-    const gex = [
-      { strike: 400, callGex: 600_000, putGex: 400_000, netGex: 1_000_000 },
-      { strike: 650, callGex: 6, putGex: 4, netGex: 10 },
-      { strike: 655, callGex: 12, putGex: 8, netGex: 20 },
-      { strike: 660, callGex: 18, putGex: 12, netGex: 30 },
-    ];
-    const shaped = summarizeOptionsSnapshot(snapshot({ gexByStrike: gex }), { curves: ['gex'], curveLimit: 2 });
+    // The book's per-strike bases from the route's block (proxy/lib/assetExposureV2.ts); a strike's GEX in the assumed
+    // book is call minus put.
+    const block = bookBlock([
+      { strike: 400, bases: bases(1_600_000, 600_000, 1) },
+      { strike: 650, bases: bases(16, 6, 1) },
+      { strike: 655, bases: bases(32, 12, 1) },
+      { strike: 660, bases: bases(48, 18, 1) },
+    ]);
+    const shaped = summarizeOptionsSnapshot(snapshot({ exposureV2: block }), { curves: ['gex'], curveLimit: 2 });
     const summary = (shaped.curves as any).gex;
 
     expect(summary.strikes).toBe(4);
     expect(summary.total).toBe(1_000_060);
-    expect(summary.largestAbsolute).toEqual({ strike: 400, netGex: 1_000_000 });
+    expect(summary.largestAbsolute).toEqual({ strike: 400, gex: 1_000_000 });
     expect(summary.nearSpot).toHaveLength(2);
   });
 
-  it('reads netDex, which is a different key from netGex', () => {
-    const dex = [
-      { strike: 650, callDex: 1, putDex: 2, netDex: -3_400_000 },
-      { strike: 655, callDex: 1, putDex: 2, netDex: 400_000 },
-    ];
-    const shaped = summarizeOptionsSnapshot(snapshot({ dexByStrike: dex }), { curves: ['dex'] });
-    const summary = (shaped.curves as any).dex;
-    expect(summary.total).toBe(-3_000_000);
-    expect(summary.largestAbsolute).toEqual({ strike: 650, netDex: -3_400_000 });
-    expect(summary.nearSpot[0].netDex).toBe(-3_400_000);
+  it('reads the dex curve from the delta balance, a different value from the GEX', () => {
+    const block = bookBlock([
+      { strike: 650, bases: bases(2, 1, -3_400_000) },
+      { strike: 655, bases: bases(2, 1, 400_000) },
+    ]);
+    const shaped = summarizeOptionsSnapshot(snapshot({ exposureV2: block }), { curves: ['gex', 'dex'] });
+    const dex = (shaped.curves as any).dex;
+    expect(dex.total).toBe(-3_000_000);
+    expect(dex.largestAbsolute).toEqual({ strike: 650, putMinusCallDeltaBalance: -3_400_000 });
+    expect(dex.nearSpot[0].putMinusCallDeltaBalance).toBe(-3_400_000);
+    expect((shaped.curves as any).gex.total).toBe(2);
   });
 
   it('withholds an exposure total when no strike carried a value', () => {
     // The bug this replaced read a key that does not exist and reported
     // total: 0 - a flat dealer book, stated with total confidence, for a symbol
     // whose exposure was simply unreadable. Zero is a claim; absence is not.
-    const shaped = summarizeOptionsSnapshot(
-      snapshot({ gexByStrike: [{ strike: 650 }, { strike: 655 }] }),
-      { curves: ['gex'] },
-    );
+    const block = bookBlock([650, 655].map((strike) => ({ strike, bases: bases(5, 1, 1, { gamma: [0, 2] }) })));
+    const shaped = summarizeOptionsSnapshot(snapshot({ exposureV2: block }), { curves: ['gex'] });
     const summary = (shaped.curves as any).gex;
     expect(summary.strikes).toBe(2);
     expect(summary.strikesWithValue).toBe(0);
@@ -198,23 +230,26 @@ describe('summarizeOptionsSnapshot', () => {
     const strikes = Array.from({ length: 900 }, (_, i) => 200 + i);
     const shaped = summarizeOptionsSnapshot(snapshot({
       maxPainCurve: strikes.map((s) => painRow(s, Math.abs(s - 650) * 1000)),
-      gexByStrike: strikes.map((s) => ({ strike: s, callGex: s, putGex: s, netGex: s * 13 })),
-      dexByStrike: strikes.map((s) => ({ strike: s, callDex: s, putDex: s, netDex: -s * 7 })),
+      exposureV2: bookBlock(strikes.map((s) => ({ strike: s, bases: bases(s * 14, s, -s * 7, s % 3 === 0 ? { gamma: [1, 2] } : {}) }))),
       volSkew: Object.fromEntries(['2026-09-18', '2026-10-16', '2026-11-20', '2026-12-18']
         .map((exp) => [exp, strikes.map((s) => ({ strike: s, iv: 0.14 }))])),
     }), { curves: ['maxPain', 'gex', 'dex', 'skew'], curveLimit: 40 });
 
     expect(new TextEncoder().encode(JSON.stringify(shaped)).byteLength).toBeLessThan(50 * 1024);
     expect((shaped.curves as any).maxPain.minimumTotalPain.strike).toBe(650);
+    expect((shaped.curves as any).gex.nearSpot).toHaveLength(40);
+    expect((shaped.curves as any).dex.strikes).toBe(900);
   });
 
   it('survives an empty or malformed snapshot without throwing', () => {
     for (const response of [{}, { ticker: null }, { maxPainCurve: 'nope' }, { volSkew: [] }]) {
       expect(() => summarizeOptionsSnapshot(response as any, { curves: ['maxPain', 'gex', 'dex', 'skew'] })).not.toThrow();
     }
-    const shaped = summarizeOptionsSnapshot({} as any, { curves: ['maxPain'] });
+    const shaped = summarizeOptionsSnapshot({} as any, { curves: ['maxPain', 'gex'] });
     expect(shaped.metrics.spotPrice).toBeNull();
     expect((shaped.curves as any).maxPain).toBeNull();
+    expect((shaped.curves as any).gex).toBeNull();
+    expect(shaped.exposures).toBeNull();
   });
 
   /**
@@ -314,10 +349,10 @@ describe('shaper output survives the shared wire sanitizer', () => {
   it('keeps every key it emits', () => {
     const shaped = summarizeOptionsSnapshot(snapshot({
       maxPainCurve: [painRow(650, 10)],
-      gexByStrike: [{ strike: 650, callGex: 1, putGex: 2, netGex: 3 }],
-      dexByStrike: [{ strike: 650, callDex: 1, putDex: 2, netDex: 3 }],
+      exposureV2: bookBlock([{ strike: 650, bases: bases(3, 1, 2, { delta: [1, 2] }) }], { totals: bases(3, 1, 2, { vega: [1, 2] }) }),
       volSkew: { '2026-09-18': [{ strike: 650, iv: 0.14 }] },
     }), { curves: ['maxPain', 'gex', 'dex', 'skew'] });
+    expect(shaped.exposures).not.toBeNull();
 
     expectSanitizerLeavesIntact(shaped);
   });
@@ -329,15 +364,20 @@ describe('shaper output survives the shared wire sanitizer', () => {
 });
 
 describe('summarizeMetricsBatch ranking', () => {
+  // each row's book (the batch opt-in, proxy/lib/snapshotExposureV2.ts batchRowExposureV2) beside the stored legacy
+  // totals, which are never read: the stored netGex and netDex carry the opposite sign of the book's here
+  const book = (gex: number, dex: number) => ({ available: true, netGex: { value: gex, status: 'complete' }, netDex: { value: dex, status: 'complete' }, referenceKind: 'spot', charmBasis: 'cash' });
   const rows = [
-    { symbol: 'SPY', date: '2026-09-09', atmIv: 0.14, hv20d: 0.10, hv60d: 0.12, ivRank: 20, totalOi: 100, netGex: 5e9, spotPrice: 650, netDex: -1e9, ivSkew25d: 0.03 },
-    { symbol: 'QQQ', date: '2026-09-09', atmIv: 0.19, hv20d: 0.17, hv60d: null, ivRank: 55, totalOi: 80, netGex: -2e9, spotPrice: 560, netDex: 2e9, ivSkew25d: 0.04 },
-    { symbol: 'IWM', date: '2026-09-09', atmIv: 0.22, hv20d: 0.15, hv60d: 0.16, ivRank: null, totalOi: 60, netGex: 1e9, spotPrice: 220, netDex: 0, ivSkew25d: null },
+    { symbol: 'SPY', date: '2026-09-09', atmIv: 0.14, hv20d: 0.10, hv60d: 0.12, ivRank: 20, totalOi: 100, netGex: -5e9, spotPrice: 650, netDex: 1e9, ivSkew25d: 0.03, exposureV2: book(5e9, -1e9) },
+    { symbol: 'QQQ', date: '2026-09-09', atmIv: 0.19, hv20d: 0.17, hv60d: null, ivRank: 55, totalOi: 80, netGex: 2e9, spotPrice: 560, netDex: -2e9, ivSkew25d: 0.04, exposureV2: book(-2e9, 2e9) },
+    { symbol: 'IWM', date: '2026-09-09', atmIv: 0.22, hv20d: 0.15, hv60d: 0.16, ivRank: null, totalOi: 60, netGex: -1e9, spotPrice: 220, netDex: 7, ivSkew25d: null, exposureV2: book(1e9, 0) },
   ];
 
-  it('carries spot, the exposures, the skew and the IV minus realized spreads on every row', () => {
+  it('carries spot, the book\'s exposures, the skew and the IV minus realized spreads on every row', () => {
     const shaped: any = summarizeMetricsBatch({ data: rows }, ['SPY', 'QQQ', 'IWM']);
     expect(shaped.metrics[0]).toMatchObject({ symbol: 'SPY', spotPrice: 650, netGex: 5e9, netDex: -1e9, ivSkew25d: 0.03, ivMinusHv20d: 0.04, ivMinusHv60d: 0.02 });
+    expect(shaped.metrics[2].netDex).toBe(0);
+    expect(shaped.exposuresCommon).toEqual({ referenceKind: 'spot', charmBasis: 'cash' });
     expect(shaped.metrics[1].ivMinusHv60d).toBeNull();
     expect(shaped.metrics[2].ivSkew25d).toBeNull();
     expect(shaped.rankMeta).toBeUndefined();
@@ -352,6 +392,13 @@ describe('summarizeMetricsBatch ranking', () => {
     expect(asc.rankMeta.order).toBe('asc');
     const gex: any = summarizeMetricsBatch({ data: rows }, ['SPY', 'QQQ', 'IWM'], { rankBy: 'netGex' });
     expect(gex.metrics.map((r: any) => r.symbol)).toEqual(['SPY', 'IWM', 'QQQ']);
+    expect(gex.rankMeta).toMatchObject({ ranked: 3, unranked: 0, unrankedReasons: {} });
+  });
+
+  it('a row without its book has no exposure figure, whatever the stored row carries, and says why', () => {
+    const shaped: any = summarizeMetricsBatch({ data: [{ symbol: 'SPY', netGex: 5e9, netDex: -1e9 }] }, ['SPY'], { rankBy: 'netDex' });
+    expect(shaped.metrics[0]).toMatchObject({ netGex: null, netDex: null, exposureUnavailable: 'the stored book is unreadable' });
+    expect(shaped.rankMeta).toMatchObject({ ranked: 0, unranked: 1, unrankedReasons: { unavailable: 1 } });
   });
 
   it('keeps the request order when nothing is asked to rank by', () => {

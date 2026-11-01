@@ -5,6 +5,20 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { LiveApiClient } from '../../proxy/liveApiClient.js';
 import { register } from './dealerPositioning.js';
 
+// The route's book (proxy/lib/liveExposureV2.ts) over one strike: every answer carries it, asked for with exposure=v2
+const METRICS = ['gamma', 'delta', 'vega', 'vanna', 'charm', 'vomma'];
+const wireBases = () => ({
+  call: { gex: 12, dex: 0, vega: 30, vanna: 2, charmFixedRef: 3, rollBasis: null, charm: 3, vomma: 4 },
+  put: { gex: 0, dex: 0, vega: 0, vanna: 0, charmFixedRef: 0, rollBasis: null, charm: 0, vomma: 0 },
+  coverage: Object.fromEntries(METRICS.map((m) => [m, { included: 2, total: 2 }])), dexBalance: -100,
+});
+const exposureV2 = {
+  available: true, methodology: 2, referenceKind: 'spot', roll: { status: 'notApplicable', carry: null },
+  scopeAsOf: '2026-09-10T14:59:59.000Z', expirationsIncluded: ['2026-09-18'], strikeRows: { inScope: 1, expired: 0, unscoped: 0 },
+  totals: wireBases(), strikes: [{ strike: 100, bases: wireBases(), callOpenInterest: 1, putOpenInterest: 1, deltasByExpiration: [] }],
+  expirations: [{ expiration: '2026-09-18', bases: wireBases() }], spotSides: null,
+};
+
 describe('registered live dealer-positioning tool', () => {
   it('preserves search meaning through shaping, wire cleanup and structured output', async () => {
     const base = {
@@ -25,12 +39,12 @@ describe('registered live dealer-positioning tool', () => {
         gammaFlip: { total: 2, included: 2 }, gammaFlipMethod: 'mixed',
         gammaFlipResolution: 0.0185, gammaFlipSearchStatus: 'found',
       },
-      byStrike: [],
+      exposureV2,
     };
     let response: Record<string, unknown> = base;
+    const requests: Array<Record<string, string> | undefined> = [];
     const server = new McpServer({ name: 'dealer-positioning-test', version: '1' });
-    // the platform default answers methodology 1
-    register(server, { get: async (path: string) => (path === '/exposure/methodology' ? { defaultMethodology: 1, stale: false } : response) } as unknown as LiveApiClient);
+    register(server, { get: async (_path: string, params?: Record<string, string>) => { requests.push(params); return response; } } as unknown as LiveApiClient);
     const client = new Client({ name: 'dealer-positioning-consumer', version: '1' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -51,12 +65,15 @@ describe('registered live dealer-positioning tool', () => {
         const text = (result.content as { type: string; text: string }[])[0].text;
         expect(JSON.parse(text), scenario.name).toEqual(wire);
         expect(wire.levels.gammaFlip, scenario.name).toBe(scenario.flip);
-        expect(wire.coverage.gammaFlipResolution, scenario.name).toBe(scenario.resolution);
-        expect(wire.coverage.gammaFlipSearchStatus, scenario.name).toBe(scenario.status);
-        expect(wire.coverage.gammaFlipMethod, scenario.name).toBe('mixed');
+        expect(wire.levels.coverage.gammaFlipResolution, scenario.name).toBe(scenario.resolution);
+        expect(wire.levels.coverage.gammaFlipSearchStatus, scenario.name).toBe(scenario.status);
+        expect(wire.levels.coverage.gammaFlipMethod, scenario.name).toBe('mixed');
+        expect(wire.exposures.gex, scenario.name).toBe(12);
         expect(wire.limitations.join(' '), scenario.name).toMatch(/can be missed/);
         if (scenario.name === 'unresolved') expect(wire.limitations.join(' ')).toMatch(/numerical/);
       }
+      // every call asked for the book
+      expect(requests).toEqual(cases.map(() => ({ exposure: 'v2' })));
     } finally {
       await client.close();
       await server.close();
@@ -74,13 +91,12 @@ describe('registered live dealer-positioning tool - guide, budget and warnings',
       warnings: ['Risk-free: 3M unavailable; falling back to 1M'],
       snapshot: { spotPrice: 100, gammaFlip: 98, netGamma: 12, netDelta: -100, netVega: 30, netVanna: 2, netCharm: 3, netVomma: 4, callWall: 100, putWall: 95, absGamma: 100, gammaConcentration: 1, regime: 'positive', topStrikes: [] },
       coverage: { strikes: 1, strikesWithGamma: 1, strikesWithDelta: 1, gamma: { total: 2, included: 2 }, delta: { total: 2, included: 2 }, vega: { total: 2, included: 2 }, vanna: { total: 2, included: 2 }, charm: { total: 2, included: 2 }, vomma: { total: 2, included: 2 }, gammaFlip: { total: 2, included: 2 }, gammaFlipMethod: 'repriced', gammaFlipResolution: 0.02, gammaFlipSearchStatus: 'found' },
-      byStrike: [],
+      exposureV2,
     };
     const budget = { limit: 120, remaining: 110, resetSeconds: 20, provider: 'tradier' };
     const server = new McpServer({ name: 'dealer-guide-test', version: '1' });
     register(server, {
-      get: async (p: string, _q?: Record<string, string>, onRateLimit?: (r: typeof budget) => void) => {
-        if (p === '/exposure/methodology') return { defaultMethodology: 1, stale: false };
+      get: async (_p: string, _q?: Record<string, string>, onRateLimit?: (r: typeof budget) => void) => {
         onRateLimit?.(budget);
         return answer;
       },

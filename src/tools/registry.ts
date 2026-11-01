@@ -4,6 +4,8 @@
  * Registers all MCP tools on the server.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
 import type { AccessTokenProvider, ProxyClient } from '../proxy/proxyClient.js';
 import type { LiveApiClient } from '../proxy/liveApiClient.js';
 
@@ -60,6 +62,34 @@ import { register as queryAnalysis } from './user/queryAnalysis.js';
 import { register as computeRuns } from './user/computeRuns.js';
 
 /**
+ * The tools that took `methodology` before exposure had one calculation (Greek exposure methodology v2): a call naming it, null included, is refused as an invalid argument,
+ * not stripped, and an omitted one gets the one calculation. Each tool's raw shape registers as z.looseObject, which
+ * publishes the same properties, required fields and constraints (plus `additionalProperties: {}`, today's meaning) and
+ * lets the key reach this check; the handler sees only its shape's keys, as the strict parse gave it before.
+ */
+export const RETIRED_METHODOLOGY_TOOLS: ReadonlySet<string> = new Set([
+  'get_regime', 'get_live_dealer_positioning', 'get_dealer_positioning', 'get_options_analytics_history', 'get_options_snapshot', 'run_screener',
+]);
+export const METHODOLOGY_RETIRED = 'methodology is no longer a parameter: exposure has one calculation.';
+
+export function refusingRetiredMethodology(name: string, config: { inputSchema?: unknown }, rest: unknown[]): unknown[] {
+  const shape = config.inputSchema;
+  if (!shape || typeof shape !== 'object' || 'safeParse' in shape || Object.hasOwn(shape, 'methodology')) {
+    throw new Error(`${name}: expected a raw input shape without methodology`);
+  }
+  const keys = Object.keys(shape);
+  const handler = rest[rest.length - 1] as (args: Record<string, unknown>, extra: unknown) => unknown;
+  const refusing = (args: Record<string, unknown> | undefined, extra: unknown) => {
+    const input = args ?? {};
+    if (Object.hasOwn(input, 'methodology')) {
+      throw new McpError(ErrorCode.InvalidParams, `Input validation error: Invalid arguments for tool ${name}: ${METHODOLOGY_RETIRED}`);
+    }
+    return handler(Object.fromEntries(keys.filter((key) => Object.hasOwn(input, key)).map((key) => [key, input[key]])), extra);
+  };
+  return [{ ...config, inputSchema: z.looseObject(shape as z.ZodRawShape) }, ...rest.slice(0, -1), refusing];
+}
+
+/**
  * The server every tool registers on, with each tool's `title` also given as
  * `annotations.title`.
  *
@@ -73,10 +103,14 @@ function withAnnotationTitles(server: McpServer): McpServer {
   return new Proxy(server, {
     get(target, property) {
       if (property === 'registerTool') {
-        return (name: string, config: { title?: string; annotations?: Record<string, unknown> }, ...rest: unknown[]) =>
-          registerTool(name, typeof config.title === 'string'
+        return (name: string, config: { title?: string; annotations?: Record<string, unknown>; inputSchema?: unknown }, ...rest: unknown[]) => {
+          const titled = typeof config.title === 'string'
             ? { ...config, annotations: { ...config.annotations, title: config.title } }
-            : config, ...rest);
+            : config;
+          return RETIRED_METHODOLOGY_TOOLS.has(name)
+            ? registerTool(name, ...refusingRetiredMethodology(name, titled, rest))
+            : registerTool(name, titled, ...rest);
+        };
       }
       const value = Reflect.get(target, property, target);
       return typeof value === 'function' ? value.bind(target) : value;

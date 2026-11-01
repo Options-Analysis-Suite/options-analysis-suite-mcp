@@ -1,16 +1,10 @@
 import { collapseProvenance } from './provenanceShaping.js';
-import { bookOfWire, charmBasisOf, COVERAGE_METRICS, hoistCommonFields, isWireBases, qualifierText, V2_BOOK_TEXT, type CoverageMetric, type WireBases } from '../exposureMethodology.js';
+import { bookOfWire, charmBasisOf, COVERAGE_METRICS, hoistCommonFields, isWireBases, publicSnapshotId, publicUnavailable, qualifierText, v2ReasonText, V2_BOOK_TEXT, type CoverageMetric, type WireBases } from '../exposureMethodology.js';
 
 type OptionsAnalyticsPoint = {
   date?: string;
   spot_price?: number;
   max_pain?: number;
-  net_gex?: number;
-  net_dex?: number;
-  net_vex?: number;
-  net_vanna?: number;
-  net_charm?: number;
-  net_vomma?: number;
   atm_iv?: number;
   atm_iv_30d?: number;
   hv_20d?: number;
@@ -126,28 +120,32 @@ export function labelOptionsAnalyticsHistory<T>(payload: T): T {
 
 
 // ---------------------------------------------------------------------------------------------------------------
-// Greek exposure methodology v2: under
-// methodology 2 the route's rows (`exposure=v2`, proxy/routes/history-backtest.ts) carry their legacy exposure columns
-// AND `exposureV2` - a day's resolved bases (proxy/lib/historyExposureV2.ts dailyExposureV2) or a bucket's averaged
-// ones (bucketExposureV2). Each row becomes methodology 2's: the legacy columns go (the per-strike gamma concentration
-// with them: methodology 1's, and no past session keeps a methodology-2 strike curve), and the assumed dealer book's
-// six numbers stand in their place through the book() twin, with what they cover where it is not everything.
+// The exposure columns are the assumed dealer book. The route's rows (asked with `exposure=v2`, proxy/routes/history-backtest.ts)
+// carry the levels engine's net columns AND the book: a day's resolved bases (proxy/lib/historyExposureV2.ts
+// dailyExposureV2) or a bucket's averaged ones (bucketExposureV2). Each row's net columns go (the per-strike gamma
+// concentration with them: no past session keeps the book's strike curve), and the assumed dealer book's six numbers
+// stand in their place through the book() twin, with what they cover where it is not everything.
 
-/** The legacy columns a methodology-2 row never carries */
-export const V1_EXPOSURE_COLUMNS = ['net_gex', 'net_dex', 'net_vex', 'net_vanna', 'net_charm', 'net_vomma', 'gamma_concentration'] as const;
-/** Methodology 2's six numbers on a point, in the compact shape's order */
-export const V2_POINT_KEYS = ['gex', 'putMinusCallDeltaBalance', 'vegaExposure', 'vanna', 'charmFlow', 'vomma'] as const;
-const V2_NAME: Record<CoverageMetric, (typeof V2_POINT_KEYS)[number]> = {
+/** The net columns the route still sends beside the book, never forwarded */
+export const NET_EXPOSURE_COLUMNS = ['net_gex', 'net_dex', 'net_vex', 'net_vanna', 'net_charm', 'net_vomma', 'gamma_concentration'] as const;
+/** The book's six numbers on a point, in the compact shape's order */
+export const BOOK_POINT_KEYS = ['gex', 'putMinusCallDeltaBalance', 'vegaExposure', 'vanna', 'charmFlow', 'vomma'] as const;
+const BOOK_NAME: Record<CoverageMetric, (typeof BOOK_POINT_KEYS)[number]> = {
   gamma: 'gex', delta: 'putMinusCallDeltaBalance', vega: 'vegaExposure', vanna: 'vanna', charm: 'charmFlow', vomma: 'vomma',
 };
 
-// The route's refusals are fixed words (historyExposureV2.ts NO_ROW, READ_FAILED and the BUCKET_ ones); any other
-// reason is the stored row's own (fromStoredBases) and goes out as one fixed phrase.
-const ROUTE_REASONS = new Set([
-  'no methodology-2 row', 'the methodology-2 rows could not be read', 'no methodology-2 row in this period',
-  'every methodology-2 row in this period is unreadable', 'no readable methodology-2 row in this period',
-]);
-const UNREADABLE_ROW = 'the methodology-2 row could not be read';
+// The route's refusals are fixed transport texts (historyExposureV2.ts NO_ROW, READ_FAILED and the BUCKET_ ones), read
+// here into words that name no calculation; any other reason is the stored row's own (fromStoredBases) and goes out as
+// one fixed phrase.
+const ROUTE_REASON_WORDS: Record<string, string> = {
+  'no methodology-2 row': v2ReasonText('no methodology-2 row'),
+  'the methodology-2 rows could not be read': v2ReasonText('the methodology-2 rows could not be read'),
+  'no methodology-2 row in this period': 'the assumed dealer book is not published for any session in this period',
+  'every methodology-2 row in this period is unreadable': 'every stored book in this period is unreadable',
+  'no readable methodology-2 row in this period': 'no stored book in this period could be read',
+};
+const UNREADABLE_ROW = 'the stored book is unreadable';
+const NO_BOOK_IN_ANSWER = 'the answer carries no book for this point';
 
 const ROLL_WORDS: Record<string, string> = { fitted: 'fitted', insufficientData: 'insufficient data', rejectedFit: 'fit rejected', notApplicable: 'not applicable' };
 
@@ -159,9 +157,9 @@ function bookFields(bases: WireBases): { values: Record<string, number | null>; 
   const coverage: Record<string, unknown> = {};
   for (const metric of COVERAGE_METRICS) {
     const pair = book.coverage[metric];
-    if (pair.status !== 'complete') coverage[V2_NAME[metric]] = { status: pair.status, included: pair.included, total: pair.total };
+    if (pair.status !== 'complete') coverage[BOOK_NAME[metric]] = { status: pair.status, included: pair.included, total: pair.total };
   }
-  return { values: Object.fromEntries(V2_POINT_KEYS.map((key) => [key, values[key] ?? null])), coverage: Object.keys(coverage).length > 0 ? coverage : null };
+  return { values: Object.fromEntries(BOOK_POINT_KEYS.map((key) => [key, values[key] ?? null])), coverage: Object.keys(coverage).length > 0 ? coverage : null };
 }
 
 function referenceFields(referenceKind: unknown, roll: { status?: unknown; carry?: unknown } | undefined): Record<string, unknown> {
@@ -174,15 +172,15 @@ function referenceFields(referenceKind: unknown, roll: { status?: unknown; carry
   };
 }
 
-const nullValues = (): Record<string, null> => Object.fromEntries(V2_POINT_KEYS.map((key) => [key, null]));
+const nullValues = (): Record<string, null> => Object.fromEntries(BOOK_POINT_KEYS.map((key) => [key, null]));
 
-/** One row's methodology-2 fields from its `exposureV2` (a day's or a bucket's) */
-function v2FieldsOf(raw: unknown): Record<string, unknown> {
+/** One row's book fields from the route's book (a day's or a bucket's) */
+function bookFieldsOf(raw: unknown): Record<string, unknown> {
   const answer = raw as Record<string, any> | null;
-  if (!answer || typeof answer !== 'object') return { ...nullValues(), exposureUnavailable: 'no methodology-2 answer for this point' };
+  if (!answer || typeof answer !== 'object') return { ...nullValues(), exposureUnavailable: NO_BOOK_IN_ANSWER };
   const isBucket = typeof answer.days === 'number';
   const days = isBucket ? { exposureDays: { days: answer.days, withRow: answer.rows, missing: answer.missing, unreadable: answer.unreadable } } : {};
-  const reasonOf = (reason: unknown) => (typeof reason === 'string' && ROUTE_REASONS.has(reason) ? reason : UNREADABLE_ROW);
+  const reasonOf = (reason: unknown) => (typeof reason === 'string' && Object.hasOwn(ROUTE_REASON_WORDS, reason) ? ROUTE_REASON_WORDS[reason] : UNREADABLE_ROW);
   if (answer.available !== true || !isWireBases(answer.bases)) {
     return { ...nullValues(), exposureUnavailable: answer.available === true ? UNREADABLE_ROW : reasonOf(answer.reason), ...days };
   }
@@ -194,7 +192,7 @@ function v2FieldsOf(raw: unknown): Record<string, unknown> {
     const metricDays: Record<string, unknown> = {};
     for (const metric of COVERAGE_METRICS) {
       const d = answer.metricDays?.[metric];
-      if (d && (d.partial > 0 || d.unavailable > 0)) metricDays[V2_NAME[metric]] = { averaged: d.complete + d.partial, partial: d.partial, unavailable: d.unavailable };
+      if (d && (d.partial > 0 || d.unavailable > 0)) metricDays[BOOK_NAME[metric]] = { averaged: d.complete + d.partial, partial: d.partial, unavailable: d.unavailable };
     }
     if (Object.keys(metricDays).length > 0) status.metricDays = metricDays;
     const q = answer.expiryQualified ?? {};
@@ -220,8 +218,8 @@ function v2FieldsOf(raw: unknown): Record<string, unknown> {
   return { ...values, ...reference, ...(Object.keys(status).length > 0 ? { exposureStatus: status } : {}), ...days };
 }
 
-/** Whether a methodology-2 point's numbers are short of complete (partial legs, partial or missing days), qualified, or unavailable */
-export function v2PointStanding(point: Record<string, any>): 'unavailable' | 'qualified' | 'partial' | 'complete' {
+/** Whether a point's book numbers are short of complete (partial legs, partial or missing days), qualified, or unavailable */
+export function bookPointStanding(point: Record<string, any>): 'unavailable' | 'qualified' | 'partial' | 'complete' {
   if (typeof point.exposureUnavailable === 'string') return 'unavailable';
   const status = point.exposureStatus;
   if (status?.expiryQualifier || status?.expiryQualifiedDays) return 'qualified';
@@ -233,51 +231,63 @@ export function v2PointStanding(point: Record<string, any>): 'unavailable' | 'qu
 }
 
 /**
- * The route's methodology-2 answer as methodology 2's rows: every row's legacy columns and `exposureV2` replaced by
- * the six numbers and their standing, and the reference fields every row shares sent once as `exposuresCommon`.
+ * The route's answer as the book's rows: every row's net columns and its route book replaced by the six numbers and
+ * their standing, and the reference fields every row shares sent once as `exposuresCommon`.
  */
-export function methodology2History<T>(payload: T): T {
+export function bookHistory<T>(payload: T): T {
   if (payload == null || typeof payload !== 'object' || Array.isArray(payload)) return payload;
   const response = payload as OptionsAnalyticsPayload;
   const key = getPointArrayKey(response);
   if (!key) return payload;
   const rows = (response[key] as unknown[]).map((row) => {
     if (row == null || typeof row !== 'object' || Array.isArray(row)) return row;
-    const { exposureV2, ...rest } = row as Record<string, unknown>;
-    for (const column of V1_EXPOSURE_COLUMNS) delete rest[column];
-    return { ...rest, ...v2FieldsOf(exposureV2) };
+    const { exposureV2: routeBook, ...rest } = row as Record<string, unknown>;
+    for (const column of NET_EXPOSURE_COLUMNS) delete rest[column];
+    return { ...rest, ...bookFieldsOf(routeBook) };
   });
-  // a point without methodology-2 numbers has no reference to share; one with numbers and no reference keeps every row's
+  // a point without book numbers has no reference to share; one with numbers and no reference keeps every row's
   const common = hoistCommonFields(rows.filter((row) => !!row && typeof row === 'object' && typeof (row as Record<string, unknown>).exposureUnavailable !== 'string'));
-  return { ...response, [key]: rows, ...(common ? { exposuresCommon: common } : {}) } as T;
+  // a read of the stored books that failed (the route's partial, unavailable: ['exposureV2']): named as `exposures`, with
+  // what it means for the points
+  const bookUnread = Array.isArray(response.unavailable) && response.unavailable.includes('exposureV2');
+  // the provenance identifiers, wherever the route repeats them (top level, metadata, provenance), in their public form
+  const record = response as Record<string, unknown>;
+  const ids: Record<string, unknown> = {};
+  for (const key of ['historySnapshotId', 'snapshotId'] as const) if (typeof record[key] === 'string') ids[key] = publicSnapshotId(record[key]);
+  for (const nested of ['metadata', 'provenance'] as const) {
+    const block = record[nested];
+    if (block && typeof block === 'object' && !Array.isArray(block)) {
+      const copy = { ...(block as Record<string, unknown>) };
+      for (const key of ['historySnapshotId', 'snapshotId'] as const) if (typeof copy[key] === 'string') copy[key] = publicSnapshotId(copy[key]);
+      ids[nested] = copy;
+    }
+  }
+  return {
+    ...response,
+    [key]: rows,
+    ...ids,
+    ...(common ? { exposuresCommon: common } : {}),
+    ...(Array.isArray(response.unavailable) ? { unavailable: publicUnavailable(response.unavailable) } : {}),
+    ...(bookUnread ? { partialNote: HISTORY_BOOK_UNREAD } : {}),
+  } as T;
 }
 
-/** The legacy columns removed, for an answer whose methodology could not be resolved (its exposures withheld) */
-export function withoutExposureColumns<T>(payload: T): T {
-  if (payload == null || typeof payload !== 'object' || Array.isArray(payload)) return payload;
-  const response = payload as OptionsAnalyticsPayload;
-  const key = getPointArrayKey(response);
-  if (!key) return payload;
-  const rows = (response[key] as unknown[]).map((row) => {
-    if (row == null || typeof row !== 'object' || Array.isArray(row)) return row;
-    const rest = { ...(row as Record<string, unknown>) };
-    for (const column of V1_EXPOSURE_COLUMNS) delete rest[column];
-    return rest;
-  });
-  return { ...response, [key]: rows } as T;
-}
+/** What a failed read of the stored books means for the answer */
+export const HISTORY_BOOK_UNREAD = 'The stored books could not be read on this call, so the points\' exposures are missing (null, with exposureUnavailable), not zero.';
 
-export const HISTORY_V2_NOTE = 'Methodology 2: each point carries ' + V2_BOOK_TEXT + ', and putMinusCallDeltaBalance '
+/** The history's book note, sent once on every answer as `bookNote` */
+export const HISTORY_BOOK_NOTE = 'Each point carries ' + V2_BOOK_TEXT + ', and putMinusCallDeltaBalance '
   + '(USD, underlying-equivalent), over every expiration after the session where the expiry rule is proven (a point whose '
-  + 'exposureStatus carries an expiryQualifier may count contracts expiring that day), in place of methodology 1\'s net columns; gamma '
-  + 'concentration is not sent (it is methodology 1\'s, and no past session keeps a methodology-2 strike curve). referenceKind and '
+  + 'exposureStatus carries an expiryQualifier may count contracts expiring that day); gamma concentration is not sent '
+  + '(no past session keeps the book\'s strike curve). referenceKind and '
   + 'charmBasis ("cash": charm on the cash price; "fixed reference": on the forward or future held fixed) are the point\'s, or '
   + '`exposuresCommon`\'s when every point shares them. `exposureStatus`, only where a point is not complete and proven: coverage '
   + '(a number summing only the legs included), expiryQualifier (a day whose values may count what the expiry rule leaves out), '
   + 'and on a weekly, biweekly or monthly point metricDays (a number averaged over fewer days than the point has rows, or over '
   + 'partial days: averaged, partial, unavailable), expiryQualifiedDays, and rolls and referenceKinds (the days of each, when they '
   + 'differ: then no one charmBasis holds for the period). A period point is the mean of its days\' books and carries '
-  + 'exposureDays {days, withRow, missing, unreadable}. exposureUnavailable says why a point has no methodology-2 numbers.';
+  + 'exposureDays {days, withRow, missing, unreadable}. A point without a stored book is a gap: its six numbers are null and '
+  + 'exposureUnavailable says why.';
 
 export function sortOptionsAnalyticsPoints(points: unknown): OptionsAnalyticsPoint[] {
   if (!Array.isArray(points)) return [];
@@ -318,32 +328,16 @@ function maxAbs(values: number[]): number | undefined {
   return Math.max(...values.map((value) => Math.abs(value)));
 }
 
-/** The exposure methodology a summary's points follow; null: withheld (the default could not be read), no exposure field */
-export type HistoryMethodology = 1 | 2 | null;
+// a point's own reference and standing, kept on the compact shape as it came
+const BOOK_POINT_PASSTHROUGH = ['referenceKind', 'charmBasis', 'roll', 'carry', 'exposureStatus', 'exposureDays', 'exposureUnavailable'] as const;
 
-// a methodology-2 point's own reference and standing, kept on the compact shape as it came
-const V2_POINT_PASSTHROUGH = ['referenceKind', 'charmBasis', 'roll', 'carry', 'exposureStatus', 'exposureDays', 'exposureUnavailable'] as const;
-
-export function compactOptionsAnalyticsPoint(point: OptionsAnalyticsPoint, methodology: HistoryMethodology = 1): Record<string, unknown> {
-  const base = compactBasePoint(point);
-  if (methodology === 1) {
-    return {
-      ...base,
-      net_gex: round(point.net_gex, 0),
-      net_dex: round(point.net_dex, 0),
-      net_vex: round(point.net_vex, 0),
-      net_vanna: round(point.net_vanna, 0),
-      net_charm: round(point.net_charm, 0),
-      net_vomma: round(point.net_vomma, 0),
-    };
-  }
-  if (methodology === null) return base;
-  const v2 = point as Record<string, unknown>;
+export function compactOptionsAnalyticsPoint(point: OptionsAnalyticsPoint): Record<string, unknown> {
+  const book = point as Record<string, unknown>;
   return {
-    ...base,
-    // a null is a point without that methodology-2 number (exposureUnavailable or its coverage says why), never omitted
-    ...Object.fromEntries(V2_POINT_KEYS.map((key) => [key, v2[key] === null ? null : round(v2[key], 0)])),
-    ...Object.fromEntries(V2_POINT_PASSTHROUGH.filter((key) => v2[key] !== undefined).map((key) => [key, v2[key]])),
+    ...compactBasePoint(point),
+    // a null is a point without that book number (exposureUnavailable or its coverage says why), never omitted
+    ...Object.fromEntries(BOOK_POINT_KEYS.map((key) => [key, book[key] === null ? null : round(book[key], 0)])),
+    ...Object.fromEntries(BOOK_POINT_PASSTHROUGH.filter((key) => book[key] !== undefined).map((key) => [key, book[key]])),
   };
 }
 
@@ -385,7 +379,6 @@ export function summarizeOptionsAnalyticsHistory(
   payload: unknown,
   recentCap = DEFAULT_RECENT_CAP,
   trendCap = DEFAULT_TREND_CAP,
-  methodology: HistoryMethodology = 1,
 ): unknown {
   if (payload == null || typeof payload !== 'object') return payload;
   const response = payload as OptionsAnalyticsPayload;
@@ -401,51 +394,33 @@ export function summarizeOptionsAnalyticsHistory(
   const recentDates = new Set(recent.map((point) => getPointDate(point)));
   const trendSample = pickEvenlySpaced(sorted, trendCap)
     .filter((point) => !recentDates.has(getPointDate(point)))
-    .map((point) => compactOptionsAnalyticsPoint(point, methodology));
+    .map((point) => compactOptionsAnalyticsPoint(point));
 
   const atmIvSeries = getNumberSeries(sorted, getPreferredAtmIv);
   const hv20Series = getNumberSeries(sorted, (point) => point.hv_20d);
   const putCallSeries = getNumberSeries(sorted, (point) => point.put_call_ratio);
   const expectedMoveSeries = getNumberSeries(sorted, (point) => point.expected_move_pct);
   const spotSeries = getNumberSeries(sorted, (point) => point.spot_price);
-  // each methodology's own series; a withheld answer has none
-  const exposureOf = (v1: keyof OptionsAnalyticsPoint, v2: (typeof V2_POINT_KEYS)[number]) => (point: OptionsAnalyticsPoint) => {
-    const value = methodology === 2 ? (point as Record<string, unknown>)[v2] : methodology === 1 ? point[v1] : undefined;
+  const bookSeries = (key: (typeof BOOK_POINT_KEYS)[number]) => getNumberSeries(sorted, (point) => {
+    const value = (point as Record<string, unknown>)[key];
     return typeof value === 'number' ? value : undefined;
+  });
+  // the extremes say how many points they stand on were short of complete
+  const standings = sorted.map((point) => bookPointStanding(point as Record<string, any>));
+  const exposureExtremes = {
+    maxAbsGex: round(maxAbs(bookSeries('gex')), 0),
+    maxAbsPutMinusCallDeltaBalance: round(maxAbs(bookSeries('putMinusCallDeltaBalance')), 0),
+    maxAbsVegaExposure: round(maxAbs(bookSeries('vegaExposure')), 0),
+    maxAbsVanna: round(maxAbs(bookSeries('vanna')), 0),
+    maxAbsCharmFlow: round(maxAbs(bookSeries('charmFlow')), 0),
+    maxAbsVomma: round(maxAbs(bookSeries('vomma')), 0),
+    exposurePoints: {
+      total: standings.length,
+      partial: standings.filter((s) => s === 'partial').length,
+      qualified: standings.filter((s) => s === 'qualified').length,
+      unavailable: standings.filter((s) => s === 'unavailable').length,
+    },
   };
-  const gexSeries = getNumberSeries(sorted, exposureOf('net_gex', 'gex'));
-  const dexSeries = getNumberSeries(sorted, exposureOf('net_dex', 'putMinusCallDeltaBalance'));
-  const vexSeries = getNumberSeries(sorted, exposureOf('net_vex', 'vegaExposure'));
-  const vannaSeries = getNumberSeries(sorted, exposureOf('net_vanna', 'vanna'));
-  const charmSeries = getNumberSeries(sorted, exposureOf('net_charm', 'charmFlow'));
-  const vommaSeries = getNumberSeries(sorted, exposureOf('net_vomma', 'vomma'));
-  // under 2 the extremes say how many points they stand on were short of complete
-  const standings = methodology === 2 ? sorted.map((point) => v2PointStanding(point as Record<string, any>)) : [];
-  const exposureExtremes = methodology === 1
-    ? {
-      maxAbsNetGex: round(maxAbs(gexSeries), 0),
-      maxAbsNetDex: round(maxAbs(dexSeries), 0),
-      maxAbsNetVex: round(maxAbs(vexSeries), 0),
-      maxAbsNetVanna: round(maxAbs(vannaSeries), 0),
-      maxAbsNetCharm: round(maxAbs(charmSeries), 0),
-      maxAbsNetVomma: round(maxAbs(vommaSeries), 0),
-    }
-    : methodology === 2
-      ? {
-        maxAbsGex: round(maxAbs(gexSeries), 0),
-        maxAbsPutMinusCallDeltaBalance: round(maxAbs(dexSeries), 0),
-        maxAbsVegaExposure: round(maxAbs(vexSeries), 0),
-        maxAbsVanna: round(maxAbs(vannaSeries), 0),
-        maxAbsCharmFlow: round(maxAbs(charmSeries), 0),
-        maxAbsVomma: round(maxAbs(vommaSeries), 0),
-        exposurePoints: {
-          total: standings.length,
-          partial: standings.filter((s) => s === 'partial').length,
-          qualified: standings.filter((s) => s === 'qualified').length,
-          unavailable: standings.filter((s) => s === 'unavailable').length,
-        },
-      }
-      : {};
   const riskFreeRateSeries = getNumberSeries(sorted, (point) => point.risk_free_rate);
   const latestAtmIv = getPreferredAtmIv(latest);
   const earliestAtmIv = getPreferredAtmIv(earliest);
@@ -459,8 +434,8 @@ export function summarizeOptionsAnalyticsHistory(
     count: sorted.length,
     startDate: getPointDate(earliest),
     endDate: getPointDate(latest),
-    latest: compactOptionsAnalyticsPoint(latest, methodology),
-    earliest: compactOptionsAnalyticsPoint(earliest, methodology),
+    latest: compactOptionsAnalyticsPoint(latest),
+    earliest: compactOptionsAnalyticsPoint(earliest),
     units: OPTIONS_ANALYTICS_UNITS,
     summary: {
       avgAtmIv: round(avg(atmIvSeries)),
@@ -489,7 +464,7 @@ export function summarizeOptionsAnalyticsHistory(
       latestIvPercentile: round(latest.iv_percentile),
       ...exposureExtremes,
     },
-    [dataKey]: recent.map((point) => compactOptionsAnalyticsPoint(point, methodology)),
+    [dataKey]: recent.map((point) => compactOptionsAnalyticsPoint(point)),
     trendSample,
     [`_${dataKey}_meta`]: {
       summarized: true,

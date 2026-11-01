@@ -1,73 +1,45 @@
 /**
- * Greek exposure methodology v2 in the MCP server: the one `methodology` input, the label every exposure-bearing answer carries, and the
- * one MCP shape of a methodology-2 exposure - from a stored public block (the regime rows) or from the proxy's wire
- * bases through a twin of the shared book().
+ * The MCP server's one exposure calculation, the assumed dealer book (Greek exposure methodology v2): the one MCP shape of a book exposure, from a stored public block
+ * (the regime rows) or from the proxy's wire bases through a twin of the shared book().
  *
  * The rules:
- * - one methodology per answer: `methodology`, `methodologySource` and, from a stale default, `methodologyStale`;
- * - methodology 2 answers v2 numbers or says why not, never a v1 number;
- * - the gamma-derived levels stay the legacy computation's, in `levels` labeled methodology 1, each with its own window;
- * - the default resolves only for an answer that carries exposures;
+ * - every exposure number is the assumed book's, the Long OI view's or the delta balance, or says why there is none;
+ * - the gamma-derived levels stay their own computation, in `levels`, each with its own window, none derived from the book;
  * - a storage word never reaches the wire.
+ * The proxy's transport still names its calculation (`exposure=v2`, `methodology: 2`); requireBookEnvelope checks that
+ * echo and never sends it.
  */
-import { z } from 'zod';
 import { LiveApiError } from '../proxy/liveApiClient.js';
-import { defaultMethodologyReaderFor, type DefaultReadClient, type MethodologyId } from '../proxy/methodologyDefault.js';
-
-export type { MethodologyId };
-
-/** The input every exposure-bearing tool takes, its scope clause the tool's own */
-export function methodologyInput(scopeClause = '') {
-  return z.union([z.literal(1), z.literal(2)]).optional()
-    .describe(`${scopeClause}Greek exposure methodology: 1 (legacy) or 2. Omitted = the platform default; the answer's \`methodology\` says which was used.`);
-}
-
-export interface ResolvedMethodology {
-  methodology: MethodologyId;
-  source: 'requested' | 'default';
-  stale: boolean;
-}
-
-export const DEFAULT_UNREADABLE = 'The platform\'s default exposure methodology could not be read. Retry, or name methodology 1 or 2.';
-
-/** The methodology a call names, else the platform default; null when the default has never been read */
-export async function resolveMethodology(client: DefaultReadClient & object, requested: unknown): Promise<ResolvedMethodology | null> {
-  if (requested === 1 || requested === 2) return { methodology: requested, source: 'requested', stale: false };
-  const read = await defaultMethodologyReaderFor(client).read(client);
-  return read.known ? { methodology: read.methodology, source: 'default', stale: read.stale } : null;
-}
 
 /**
- * A proxy answer asked for methodology 2 must say it is one: the route's own `methodology: 2` and its book, the
- * assumed dealer book at p = 1. Anything else is refused, never relabeled: the proxy did not answer what was asked.
+ * A proxy answer must say it carries the book: the route's own `methodology: 2` and its book, the assumed dealer
+ * book at p = 1. Anything else is refused, never relabeled: the proxy did not answer what was asked.
  */
-export function requireMethodology2Envelope(res: unknown): void {
+export function requireBookEnvelope(res: unknown): void {
   const body = res as { methodology?: unknown; exposure?: { view?: unknown; p?: unknown } } | null;
   if (body && typeof body === 'object' && body.methodology === 2 && body.exposure?.view === 'assumedDealerBook' && body.exposure?.p === 1) return;
-  throw new LiveApiError('The answer asked for methodology 2 did not say it was one, so it was not used.', 502, 'UPSTREAM_INVALID', false, undefined, undefined);
+  throw bookNotCarriedError();
 }
 
 /**
- * For a tool whose answer IS exposure: the methodology, or a retryable refusal when none is named and the default has
- * never been read. A tool that answers more than exposures withholds them instead.
+ * A proxy answer's `unavailable` list as the MCP sends it: the book's transport name, `exposureV2`,
+ * reads as `exposures`; every other source as sent. The partial signal itself is kept.
  */
-export async function requireMethodology(client: DefaultReadClient & object, requested: unknown): Promise<ResolvedMethodology> {
-  const resolved = await resolveMethodology(client, requested);
-  if (resolved) return resolved;
-  throw defaultUnavailableError();
+export function publicUnavailable(list: unknown): unknown {
+  return Array.isArray(list) ? list.map((source) => (source === 'exposureV2' ? 'exposures' : source)) : list;
 }
 
-/** The retryable refusal of an exposure answer whose methodology could not be resolved */
-export function defaultUnavailableError(): LiveApiError {
-  return new LiveApiError(DEFAULT_UNREADABLE, 503, 'DEFAULT_METHODOLOGY_UNAVAILABLE', true, undefined, undefined);
+/**
+ * A proxy history identifier as the MCP sends it: the route appends `:v2` for the book's opt-in and
+ * `:v2rev=<n>` for the book publication's revision; sent without the first and as `:rev=<n>`, the same opaque identity.
+ */
+export function publicSnapshotId(id: unknown): unknown {
+  return typeof id === 'string' ? id.replace(/:v2rev=/g, ':rev=').replace(/:v2(?=:|$)/g, '') : id;
 }
 
-export function methodologyLabel(resolved: ResolvedMethodology): Record<string, unknown> {
-  return {
-    methodology: resolved.methodology,
-    methodologySource: resolved.source,
-    ...(resolved.stale ? { methodologyStale: true } : {}),
-  };
+/** The refusal of a proxy answer that does not carry the assumed dealer book it was asked for */
+export function bookNotCarriedError(): LiveApiError {
+  return new LiveApiError('The answer did not carry the assumed dealer book, so it was not used.', 502, 'UPSTREAM_INVALID', false, undefined, undefined);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -80,7 +52,7 @@ export type CoverageMetric = (typeof COVERAGE_METRICS)[number];
 export type CoverageStatus = 'complete' | 'partial' | 'unavailable';
 export interface CoveragePair { included: number; total: number }
 
-/** The proxy's methodology-2 wire bases: each side's resolved values (charm already resolved under the roll), null where unavailable */
+/** The proxy's wire bases of the book: each side's resolved values (charm already resolved under the roll), null where unavailable */
 export interface WireBases {
   call: Partial<Record<string, number | null>>;
   put: Partial<Record<string, number | null>>;
@@ -194,7 +166,7 @@ export function coverageShortfall(book: V2Book, metrics: ReadonlyArray<CoverageM
   return Object.keys(coverage).length > 0 ? coverage : null;
 }
 
-/** One methodology-2 exposure as the MCP sends it: the assumed book's five numbers, Long OI, the delta balance, what is not complete, the reference */
+/** One book exposure as the MCP sends it: the assumed book's five numbers, Long OI, the delta balance, what is not complete, the reference */
 export function mcpExposuresV2(book: V2Book, reference: V2Reference, scope?: string): Record<string, unknown> {
   const coverage = coverageShortfall(book);
   const roll = ROLL_WORDS[reference.rollStatus] ?? reference.rollStatus;
@@ -213,7 +185,7 @@ export function mcpExposuresV2(book: V2Book, reference: V2Reference, scope?: str
   };
 }
 
-// The fields of a methodology-2 exposure that every one of several objects shares (the scope, the reference and its
+// The fields of a book exposure that every one of several objects shares (the scope, the reference and its
 // charm basis): moved out of each and returned once, for the answer's `exposuresCommon`; a field that differs, or is
 // missing from one, stays on each. Fewer than two objects share nothing.
 export const COMMON_EXPOSURE_KEYS = ['scope', 'referenceKind', 'charmBasis', 'roll', 'carry'] as const;
@@ -232,17 +204,18 @@ export function hoistCommonFields(objects: ReadonlyArray<unknown>): Record<strin
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// A proxy methodology-2 day (proxy/lib/historyExposureV2.ts DailyExposureV2, the opt-ins' wire: resolved sides,
+// A proxy day of the book (proxy/lib/historyExposureV2.ts DailyExposureV2, the opt-ins' wire: resolved sides,
 // coverage, delta balance, roll, reference kind, definition and expiry qualifier) as the MCP's `exposures` object.
 
-/** Why a proxy answer has no methodology-2 numbers, in fixed words (the proxy's own reasons can name dates and runs) */
+/** Why a proxy answer has no book numbers, in fixed words (the proxy's own reasons, transport text that can name its
+ * calculation, dates and runs, are read and never sent) */
 export function v2ReasonText(reason: unknown): string {
   const r = typeof reason === 'string' ? reason : '';
-  if (r === 'no methodology-2 row' || /^methodology 2 has not been published/.test(r)) return 'methodology 2 is not published for this session';
-  if (/^(no strike curves|the strike curves are from another session|the strike curves belong to another computation)/.test(r)) return 'the session\'s strike curves are not of its methodology-2 publication';
-  if (/^the (snapshot|bases)\b/.test(r) || r === 'the methodology-2 row is not of the session\'s current publication') return 'the methodology-2 row is not of the session\'s current publication';
-  if (r === 'the methodology-2 rows could not be read' || r === 'the strike curves could not be read' || r === 'the methodology-2 bases could not be read') return 'the methodology-2 data could not be read on this call';
-  return 'the methodology-2 data is unreadable';
+  if (r === 'no methodology-2 row' || /^methodology 2 has not been published/.test(r)) return 'the assumed dealer book is not published for this session';
+  if (/^(no strike curves|the strike curves are from another session|the strike curves belong to another computation)/.test(r)) return 'the session\'s strike curves are not of its published book';
+  if (/^the (snapshot|bases)\b/.test(r) || r === 'the methodology-2 row is not of the session\'s current publication') return 'the stored book is not of the session\'s current publication';
+  if (r === 'the methodology-2 rows could not be read' || r === 'the strike curves could not be read' || r === 'the methodology-2 bases could not be read') return 'the stored book could not be read on this call';
+  return 'the stored book is unreadable';
 }
 
 /** The day's scope from its definition: expiry-scoped, or a legacy-scope row from before the expiry rule */
@@ -256,11 +229,11 @@ function definitionScope(definition: unknown, qualifier: unknown): string | unde
   return undefined;
 }
 
-/** One day's methodology-2 `exposures` (with exposureStatus.expiryQualifier where the scope is not proven), or why there are none */
+/** One day's book `exposures` (with exposureStatus.expiryQualifier where the scope is not proven), or why there are none */
 export function exposuresFromDaily(daily: unknown): { exposures: Record<string, unknown> | null; exposuresUnavailable?: string } {
   const d = daily as { available?: unknown; reason?: unknown; bases?: unknown; referenceKind?: unknown; roll?: { status?: unknown; carry?: unknown }; definition?: unknown; expiryQualifier?: unknown } | null;
   if (!d || typeof d !== 'object' || d.available !== true) return { exposures: null, exposuresUnavailable: v2ReasonText(d?.reason) };
-  if (!isWireBases(d.bases)) return { exposures: null, exposuresUnavailable: 'the methodology-2 data is unreadable' };
+  if (!isWireBases(d.bases)) return { exposures: null, exposuresUnavailable: 'the stored book is unreadable' };
   const referenceKind = typeof d.referenceKind === 'string' && REFERENCE_KINDS.has(d.referenceKind) ? d.referenceKind : 'unknown';
   const rollStatus = typeof d.roll?.status === 'string' ? d.roll.status : 'notApplicable';
   const carry = typeof d.roll?.carry === 'number' && Number.isFinite(d.roll.carry) ? d.roll.carry : null;
@@ -270,7 +243,7 @@ export function exposuresFromDaily(daily: unknown): { exposures: Record<string, 
 }
 
 /**
- * Each methodology-2 number's change between two days' exposures: this minus that where both are numbers, else null;
+ * Each book number's change between two days' exposures: this minus that where both are numbers, else null;
  * the charm flow's null across a change of charm basis (a cash roll at one end, a fixed reference at the other), which
  * is a change of what is measured, not of the market.
  */
@@ -334,16 +307,16 @@ export function readStoredBlock(block: unknown): StoredBlock | null {
   };
 }
 
-/** The units and the two views, once per methodology-2 answer (a plain key: the wire drops an unknown underscore key) */
-/** The assumed dealer book and its five numbers' units, the words every methodology-2 note uses */
+/** The assumed dealer book and its five numbers' units, the words every book note uses */
 export const V2_BOOK_TEXT = 'the assumed dealer book - dealers long the calls and short the puts, '
   + 'every contract of open interest (share 1): gex (USD of delta per 1% move), vegaExposure (USD per vol point), '
   + 'vanna (USD of delta per vol point; + means the book\'s delta hedger sells when IV rises), charmFlow (USD of the '
   + 'underlying the book\'s hedger trades per calendar day to stay delta-neutral; + is buying) and vomma (USD per (vol point)^2)';
 
-export const METHODOLOGY_2_NOTE = 'Methodology 2: `exposures` is ' + V2_BOOK_TEXT + '; '
+/** The note every answer carrying book exposures sends once, as `bookNote` (a plain key: the wire drops an unknown underscore key) */
+export const BOOK_NOTE = '`exposures` is ' + V2_BOOK_TEXT + '; '
   + '`longOi` is the same five with every contract held long; putMinusCallDeltaBalance (USD, underlying-equivalent) is the '
   + 'same in every view. `coverage` lists only the numbers that are not complete: partial is the sum of the legs included '
   + '(legs short, not an error bound), unavailable is null. charmBasis "cash" is charm on the cash price, "fixed reference" '
-  + 'on the forward or future held fixed. `exposuresCommon`, where sent, holds the exposure fields every entry shares, sent once. No methodology-1 total (net gamma, delta, vega, vanna, charm or vomma) is in a '
-  + 'methodology-2 answer; `levels`, where sent, are methodology 1\'s gamma-derived levels, labeled so, none derived from this book.';
+  + 'on the forward or future held fixed. `exposuresCommon`, where sent, holds the exposure fields every entry shares, sent once. '
+  + '`levels`, where sent, are the gamma-derived levels, each with its own window, none derived from this book.';

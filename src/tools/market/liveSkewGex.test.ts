@@ -266,13 +266,16 @@ describe('ranking guidance through both MCP channels', () => {
   });
 });
 
-describe('rank_live_skew_gex and the exposure methodology', () => {
-  it('its GEX is its own model\'s, never labeled platform methodology 1, and the default is never read', async () => {
+describe('rank_live_skew_gex and the platform\'s exposure book', () => {
+  it('its GEX is its own model\'s, not the platform\'s book, and no text names a method', async () => {
     const { client, calls, close } = await harness(async () => payload);
     try {
-      const out = JSON.parse(text(await client.callTool({ name: 'rank_live_skew_gex', arguments: { symbols: 'AAA,BBB' } })));
-      expect(out.methodologyNote).toMatch(/^GEX here is this tool's own model .* neither platform exposure methodology 1 nor 2, and the platform's default exposure methodology does not change it/);
-      expect(out).not.toHaveProperty('methodology');
+      const raw = text(await client.callTool({ name: 'rank_live_skew_gex', arguments: { symbols: 'AAA,BBB' } }));
+      const out = JSON.parse(raw);
+      expect(out.gexNote).toBe('GEX here is this tool\'s own model (`method`: implied volatility solved from the live mids), not the platform\'s stored or live exposure book, and it does not change with it; its sign (calls positive, puts negative) is the assumed dealer book\'s.');
+      for (const key of ['methodology', 'methodologyNote']) expect(out).not.toHaveProperty(key);
+      // `method.id` (own-model-v1) is this tool's model version, not an exposure calculation
+      expect(raw).not.toMatch(/[Mm]ethodolog|\bv2\b|V2/);
       expect(calls.map((c) => c.path)).not.toContain('/exposure/methodology');
     } finally {
       await close();

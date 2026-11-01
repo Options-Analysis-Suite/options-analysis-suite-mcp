@@ -2,7 +2,23 @@ import { describe, expect, it } from 'bun:test';
 import { EOD_GAMMA_FLIP_NOTE, EOD_GAMMA_FLIP_NULL_NOTE, summarizeEodDealerPositioning } from './eodDealerPositioningShaping.js';
 import { sanitizeMcpWireOutput } from '../helpers.js';
 
-/** The proxy's /eod/exposure shape, as packages/shared's buildEodExposureResponse emits it. */
+// One calculation (Greek exposure methodology v2): the answer is the session's stored book in `exposures` and the
+// stored summary's 0-60 day levels in `levels`; the summary's own net GEX and DEX totals are never sent.
+
+const METRICS = ['gamma', 'delta', 'vega', 'vanna', 'charm', 'vomma'] as const;
+const side = (gex: number, vega: number, vanna: number, charm: number, vomma: number) => ({ gex, dex: 0, vega, vanna, charmFixedRef: charm, rollBasis: 0, charm, vomma });
+const wire = (over: Partial<Record<(typeof METRICS)[number], [number, number]>> = {}) => ({
+  call: side(3000, 70, 50, 30, 20), put: side(1000, 10, -20, -60, 90),
+  coverage: Object.fromEntries(METRICS.map((m) => { const [included, total] = over[m] ?? [4, 4]; return [m, { included, total }]; })),
+  dexBalance: -12345.5,
+});
+/** The proxy's day of the stored book (proxy/lib/historyExposureV2.ts DailyExposureV2), the route's `exposure=v2` opt-in */
+const day = (over: Record<string, unknown> = {}) => ({
+  available: true, provenance: 'nightly', referenceKind: 'spot', roll: { status: 'notApplicable', carry: null },
+  bases: wire(), definition: 'expiry-scoped', expiryQualifier: null, ...over,
+});
+
+/** The proxy's /eod/exposure shape, as packages/shared's buildEodExposureResponse emits it, with the session's book */
 const response = (over: Record<string, unknown> = {}) => ({
   schemaVersion: 1,
   symbol: 'SPY',
@@ -31,33 +47,43 @@ const response = (over: Record<string, unknown> = {}) => ({
     netDex: 'dealer-perspective dollar delta exposure',
     expectedMovePct30d: 'decimal fraction',
   },
+  exposureV2: day(),
   ...over,
 });
+
+/** The answer with every `levels` object removed: what must carry no total of the stored summary */
+function withoutLevels(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutLevels);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([key]) => key !== 'levels').map(([key, v]) => [key, withoutLevels(v)]));
+}
 
 describe('summarizeEodDealerPositioning', () => {
   it('keeps every level, labels the gamma flip as coarse-grid, and survives the sanitizer intact', () => {
     const shaped = summarizeEodDealerPositioning(response());
     expect(shaped).toMatchObject({
       symbol: 'SPY', date: '2026-09-15', dataSource: 'eod',
-      dteWindow: { minDte: 0, maxDte: 60, unit: 'calendar_days' },
-      spotPrice: 650.12, dealerRegime: 'positive_gamma',
-      netGex: 1.2e9, netDex: -3.4e9, gammaFlip: 641.5, callWall: 660, putWall: 640, gammaMagnet: 650,
+      levels: {
+        window: { minDte: 0, maxDte: 60, unit: 'calendar_days' },
+        spotPrice: 650.12, dealerRegime: 'positive_gamma',
+        gammaFlip: 641.5, callWall: 660, putWall: 640, gammaMagnet: 650,
+        topContributingStrikesAvailable: 3,
+      },
       expectedMove30d: { fraction: 0.018, absolute: 11.70216 },
-      topContributingStrikesAvailable: 3,
     });
     // The one thing the row cannot say for itself: this flip carries no
     // search status, and the live tool is a different claim.
-    expect(shaped.gammaFlipNote).toBe(EOD_GAMMA_FLIP_NOTE);
-    expect(shaped.gammaFlipNote).toContain('get_live_dealer_positioning');
+    expect(shaped.levels.gammaFlipNote).toBe(EOD_GAMMA_FLIP_NOTE);
+    expect(shaped.levels.gammaFlipNote).toContain('get_live_dealer_positioning');
     // The stored expected move is a decimal FRACTION of spot (0.018 = 1.8%),
     // which is what the shared shape's units block says of it. It is published
     // under the name of its unit, never as `percent`, and the units block
-    // describes the keys THIS summary emits rather than the row's.
+    // describes the keys THIS answer emits rather than the row's.
     expect(shaped.expectedMove30d).not.toHaveProperty('percent');
     expect(shaped.units.expectedMove30d.fraction).toContain('decimal fraction');
-    expect(shaped.units.netGex).toBe('dealer-perspective dollar delta change for a 1% spot move');
+    expect(shaped.levels.topContributingStrikesUnits.netGex).toBe('dealer-perspective dollar delta change for a 1% spot move');
     expect(shaped.units).not.toHaveProperty('expectedMovePct30d');
-    expect(shaped.topContributingStrikes).toHaveLength(3);
+    expect(shaped.levels.topContributingStrikes).toHaveLength(3);
     const expected = structuredClone(shaped);
     expect(sanitizeMcpWireOutput(shaped as Record<string, unknown>)).toEqual(expected as Record<string, unknown>);
   });
@@ -82,7 +108,7 @@ describe('summarizeEodDealerPositioning', () => {
     // 95 and -10,000 at 105 are two non-zero listed strikes whose sweep is
     // zero at every price, and the producer stores no search status, so the
     // note keeps both causes and says the row cannot tell them apart.
-    const shaped = summarizeEodDealerPositioning(response({ gammaFlip: null }));
+    const shaped = summarizeEodDealerPositioning(response({ gammaFlip: null })).levels;
     expect(shaped.gammaFlip).toBeNull();
     expect(shaped.gammaFlipNote).toBe(EOD_GAMMA_FLIP_NULL_NOTE);
     expect(shaped.gammaFlipNote).toMatch(/^No level is stored for this session: the coarse-grid sweep within 20% of spot found no zero crossing, or its net gamma profile was zero at every price it sampled; the stored row does not say which\. A session with no near-term open interest at all is not served\. That is not a level of zero and says nothing about a crossing beyond that range\./);
@@ -96,15 +122,15 @@ describe('summarizeEodDealerPositioning', () => {
       { gammaFlip: null, topContributingStrikes: [{ strike: 95, netGex: 10000 }, { strike: 105, netGex: -10000 }] },
       { gammaFlip: null, topContributingStrikes: undefined },
     ]) {
-      expect(summarizeEodDealerPositioning(response(over)).gammaFlipNote).toBe(EOD_GAMMA_FLIP_NULL_NOTE);
+      expect(summarizeEodDealerPositioning(response(over)).levels.gammaFlipNote).toBe(EOD_GAMMA_FLIP_NULL_NOTE);
     }
     // And a real level keeps the level note, whatever the strikes say.
-    expect(summarizeEodDealerPositioning(response()).gammaFlipNote).toBe(EOD_GAMMA_FLIP_NOTE);
-    expect(summarizeEodDealerPositioning(response({ topContributingStrikes: [] })).gammaFlipNote).toBe(EOD_GAMMA_FLIP_NOTE);
+    expect(summarizeEodDealerPositioning(response()).levels.gammaFlipNote).toBe(EOD_GAMMA_FLIP_NOTE);
+    expect(summarizeEodDealerPositioning(response({ topContributingStrikes: [] })).levels.gammaFlipNote).toBe(EOD_GAMMA_FLIP_NOTE);
   });
 
   it('caps the contributing strikes in stored order and says how many there were', () => {
-    const shaped = summarizeEodDealerPositioning(response(), { strikeLimit: 2 });
+    const shaped = summarizeEodDealerPositioning(response(), { strikeLimit: 2 }).levels;
     expect(shaped.topContributingStrikes.map((s) => s.strike)).toEqual([650, 655]);
     expect(shaped.topContributingStrikesAvailable).toBe(3);
   });
@@ -114,34 +140,79 @@ describe('summarizeEodDealerPositioning', () => {
       gammaFlip: 'n/a', callWall: undefined, expectedMove30d: NaN,
       topContributingStrikes: [{ strike: 'x' }, { strike: 650 }], units: 'nope', dteWindow: null,
     }) as any);
-    expect(shaped.gammaFlip).toBeNull();
-    expect(shaped.callWall).toBeNull();
+    expect(shaped.levels.gammaFlip).toBeNull();
+    expect(shaped.levels.callWall).toBeNull();
     expect(shaped.expectedMove30d.absolute).toBeNull();
-    expect(shaped.topContributingStrikes).toEqual([{ strike: 650, netGex: null, netDex: null }]);
-    // A malformed row block loses the row's unit text, not this summary's own.
-    expect(shaped.units.netGex).toBeNull();
+    expect(shaped.levels.topContributingStrikes).toEqual([{ strike: 650, netGex: null, netDex: null }]);
+    // A malformed row block loses the row's unit text, not this answer's own.
+    expect(shaped.levels.topContributingStrikesUnits.netGex).toBeNull();
     expect(shaped.units.expectedMove30d.fraction).toContain('decimal fraction');
-    expect(shaped.dteWindow).toEqual({ minDte: null, maxDte: null, unit: null });
+    expect(shaped.levels.window).toEqual({ minDte: null, maxDte: null, unit: null });
     expect(() => summarizeEodDealerPositioning({} as any)).not.toThrow();
   });
 
-  it('carries the session before it on file, and keeps a missing block distinct from none on file', () => {
+  it('carries the session before it on file, its levels only, and keeps a missing block distinct from none on file', () => {
     const since = {
       status: 'found' as const, priorDate: '2026-09-11', sessionsSkipped: 1,
       prior: { spotPrice: 640.12, netGex: 0.8e9, netDex: -3e9, gammaFlip: 638.25, callWall: 655, putWall: 640, gammaMagnet: 645, dealerRegime: 'negative_gamma' },
       change: { spotPrice: 10, netGex: 0.4e9, netDex: -0.4e9, gammaFlip: 3.25, callWall: 5, putWall: 0, gammaMagnet: 5 },
       dealerRegimeChanged: true,
     };
-    expect(summarizeEodDealerPositioning(response({ sincePriorSession: since }) as any).sincePriorSession).toEqual(since);
+    // the stored summary's prior totals are not sent, as its own are not
+    const levelsOnly = {
+      ...since,
+      prior: { spotPrice: 640.12, gammaFlip: 638.25, callWall: 655, putWall: 640, gammaMagnet: 645, dealerRegime: 'negative_gamma' },
+      change: { spotPrice: 10, gammaFlip: 3.25, callWall: 5, putWall: 0, gammaMagnet: 5 },
+    };
+    expect(summarizeEodDealerPositioning(response({ sincePriorSession: since }) as any).sincePriorSession.levels).toEqual(levelsOnly);
     // Absent (data-api's shape) or an unknown status: unknown, not "none on file".
-    expect(summarizeEodDealerPositioning(response() as any).sincePriorSession).toBeNull();
-    expect(summarizeEodDealerPositioning(response({ sincePriorSession: { ...since, status: 'maybe' } }) as any).sincePriorSession).toBeNull();
+    expect(summarizeEodDealerPositioning(response() as any).sincePriorSession.levels).toBeNull();
+    expect(summarizeEodDealerPositioning(response({ sincePriorSession: { ...since, status: 'maybe' } }) as any).sincePriorSession.levels).toBeNull();
     const odd = summarizeEodDealerPositioning(response({
-      sincePriorSession: { ...since, priorDate: 'yesterday', sessionsSkipped: -1, dealerRegimeChanged: 'yes', change: { ...since.change, netGex: 'lots' } },
-    }) as any).sincePriorSession!;
+      sincePriorSession: { ...since, priorDate: 'yesterday', sessionsSkipped: -1, dealerRegimeChanged: 'yes', change: { ...since.change, gammaFlip: 'lots' } },
+    }) as any).sincePriorSession.levels!;
     expect(odd).toMatchObject({ priorDate: null, sessionsSkipped: null, dealerRegimeChanged: null });
-    expect(odd.change!.netGex).toBeNull();
+    expect(odd.change!.gammaFlip).toBeNull();
     const none = { status: 'none-on-file' as const, priorDate: null, sessionsSkipped: null, prior: null, change: null, dealerRegimeChanged: null };
-    expect(summarizeEodDealerPositioning(response({ sincePriorSession: none }) as any).sincePriorSession).toEqual(none);
+    expect(summarizeEodDealerPositioning(response({ sincePriorSession: none }) as any).sincePriorSession.levels).toEqual(none);
+  });
+
+  it('answers the book in `exposures` and no total of the stored summary anywhere', () => {
+    const shaped = summarizeEodDealerPositioning(response({
+      sincePriorSession: {
+        status: 'found', priorDate: '2026-09-11', sessionsSkipped: 0, dealerRegimeChanged: false,
+        prior: { spotPrice: 640, netGex: 0.8e9, netDex: -3e9, gammaFlip: 638 }, change: { spotPrice: 10, netGex: 0.41e9, netDex: -0.43e9, gammaFlip: 3 },
+        exposureV2: { status: 'found', priorDate: '2026-09-11', sessionsSkipped: 0, prior: day() },
+      },
+    }));
+    expect(shaped.exposures).toEqual({
+      scope: 'every expiration after the session',
+      gex: 2000, vegaExposure: 60, vanna: 70, charmFlow: -90, vomma: -70,
+      longOi: { gex: 4000, vegaExposure: 80, vanna: 30, charmFlow: 30, vomma: 110 },
+      putMinusCallDeltaBalance: -12345.5, referenceKind: 'spot', charmBasis: 'cash',
+    });
+    expect(shaped.sincePriorSession.exposures).toMatchObject({ status: 'found', priorDate: '2026-09-11', prior: { gex: 2000 }, change: { gex: 0 } });
+    // the summary's net GEX and DEX (1.2e9, -3.4e9) and their prior and change: nowhere, levels included
+    const text = JSON.stringify(shaped);
+    for (const value of ['1200000000', '-3400000000', '800000000', '-3000000000', '410000000', '-430000000']) expect(text).not.toContain(value);
+    expect(JSON.stringify(withoutLevels(shaped))).not.toMatch(/"net(Gex|Dex|Gamma|Vega|Vanna|Charm|Vomma)"/);
+    expect(JSON.stringify(shaped.sincePriorSession.levels)).not.toMatch(/"net(Gex|Dex)"/);
+    expect(shaped).not.toHaveProperty('netGex');
+    expect(shaped).not.toHaveProperty('netDex');
+    expect(shaped.levels).not.toHaveProperty('methodology');
+    expect(text).not.toMatch(/methodolog|\bv2\b|V2/i);
+  });
+
+  it('a session without its book says why in words, its levels standing', () => {
+    for (const [exposureV2, reason] of [
+      [{ available: false, reason: 'no methodology-2 row' }, 'the assumed dealer book is not published for this session'],
+      [{ available: false, reason: 'the methodology-2 row is not of the session\'s current publication' }, 'the stored book is not of the session\'s current publication'],
+      [{ available: true, bases: null }, 'the stored book is unreadable'],
+    ] as const) {
+      const shaped = summarizeEodDealerPositioning(response({ exposureV2 }));
+      expect(shaped).toMatchObject({ exposures: null, exposuresUnavailable: reason });
+      expect(shaped.levels.gammaFlip).toBe(641.5);
+      expect(JSON.stringify(shaped)).not.toMatch(/methodolog|\bv2\b|V2/i);
+    }
   });
 });

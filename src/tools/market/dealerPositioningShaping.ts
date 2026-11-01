@@ -10,18 +10,22 @@
  * So this shapes one source: the live computation over the caller's broker
  * chain, which works for any symbol their broker lists.
  *
- * The raw payload is far past the response ceiling - byStrike over four
- * expirations is thousands of rows - so per-strike rows are trimmed to a window
+ * The raw payload is far past the response ceiling - the strikes over four
+ * expirations are thousands of rows - so per-strike rows are trimmed to a window
  * around spot. Totals come from the full input window; per-metric coverage
  * identifies any missing contributions rather than calling partial sums a
  * measurement of the whole book.
+ *
+ * One calculation (Greek exposure methodology v2): every
+ * exposure number is the route's assumed dealer book (its exposureV2 block, read by name through the book twin); the
+ * gamma-derived levels are the levels engine's own, beside the statuses and coverage they are read from.
  */
 
 import { MAX_RESPONSE_BYTES, significant } from '../helpers.js';
 import { omittedRowsSentence, readOmittedRows } from './omittedRows.js';
 import type { LiveRateLimit } from '../../proxy/liveApiClient.js';
 import { rateLimitGuide, spotClockGuide, type Guide } from '../liveGuide.js';
-import { bookOfWire, coverageShortfall, isWireBases, mcpExposuresV2, type V2Book } from '../exposureMethodology.js';
+import { BOOK_NOTE, bookOfWire, coverageShortfall, isWireBases, mcpExposuresV2, type V2Book } from '../exposureMethodology.js';
 
 export interface DealerPositioningOptions {
   /** Total per-strike rows kept nearest spot (the cap, with strikeWindowPct). */
@@ -39,13 +43,6 @@ export interface DealerPositioningOptions {
    * the guide, so the answer measured is the answer fitted. Absent: no rateLimit field.
    */
   rateLimit?: LiveRateLimit | null;
-  /** The answer's methodology label, first in the answer and inside the fit */
-  label?: Record<string, unknown>;
-  /**
-   * Methodology 2: the route's exposureV2 replaces every methodology-1 exposure (the totals, the rows', each
-   * expiration's and each side of spot's); the levels stay methodology 1's, labeled; the note rides inside the fit.
-   */
-  methodology2?: { note: string };
 }
 
 const DEFAULT_STRIKE_RANGE = 10;
@@ -152,34 +149,6 @@ export function measuredLevel(raw: unknown, status: FieldStatus): { value: numbe
   if (raw === null) return { value: null, status };
   const value = num(raw);
   return { value, status: value === null ? 'unavailable' : status };
-}
-
-/**
- * One side of spot. Net GEX and each open interest carry their coverage the
- * way the window totals do (a partial sum is published and labelled partial);
- * the call and put GEX go out only under complete or empty gamma coverage,
- * for the reason the per-strike sides do.
- */
-function spotSide(value: unknown) {
-  const raw = record(value);
-  const gammaCoverage = metricCoverage(raw.gammaCoverage);
-  const callOiCoverage = metricCoverage(raw.callOpenInterestCoverage);
-  const putOiCoverage = metricCoverage(raw.putOpenInterestCoverage);
-  const gamma = measuredValue(raw.netGamma, gammaCoverage);
-  const established = gammaCoverage.status === 'complete' || gammaCoverage.status === 'empty';
-  const side = (v: unknown) => (established ? measuredValue(v, gammaCoverage).value : null);
-  const callOi = measuredValue(raw.callOpenInterest, callOiCoverage);
-  const putOi = measuredValue(raw.putOpenInterest, putOiCoverage);
-  return {
-    strikes: count(raw.strikes),
-    netGex: gamma.value,
-    callGex: side(raw.callGamma),
-    putGex: side(raw.putGamma),
-    callOpenInterest: callOi.value,
-    putOpenInterest: putOi.value,
-    status: { netGex: gamma.status, callOpenInterest: callOi.status, putOpenInterest: putOi.status },
-    coverage: { gamma: gammaCoverage, callOpenInterest: callOiCoverage, putOpenInterest: putOiCoverage },
-  };
 }
 
 /** A finite number as the decimal it prints as: n x 10^-scale, exactly. */
@@ -289,29 +258,28 @@ export function readRegime(explicit: unknown, netGex: number | null): string | n
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Methodology 2 (Greek exposure methodology v2): the route's exposureV2 (proxy/lib/liveExposureV2.ts), the window's own book over the
-// same legs under the intraday expiry scope, read through the twin. Every methodology-1 exposure is replaced by its
-// methodology-2 counterpart or left out: the totals, each row's, each expiration's and each side of spot's. The levels
-// stay methodology 1's, labeled, beside the coverage they are read from; the window, its fetch gaps, the expected moves
-// and the events are unchanged.
+// The book (methodology v2; the only
+// calculation): the route's exposureV2 (proxy/lib/liveExposureV2.ts), the window's own book over the
+// same legs under the intraday expiry scope, read through the twin. Its numbers are the totals, each row's, each
+// expiration's and each side of spot's. The levels are the levels engine's, beside the coverage they are read from; the
+// window, its fetch gaps, the expected moves and the events come with them.
 
-/** The route's failure reason (proxy/lib/liveExposureV2.ts LIVE_V2_FAILED) */
+/** The route's failure reason (proxy/lib/liveExposureV2.ts LIVE_V2_FAILED, transport text: read, never sent) */
 const LIVE_V2_FAILED = 'the methodology-2 book could not be computed';
-const LIVE_V2_UNREADABLE = 'the methodology-2 data is unreadable';
+const LIVE_V2_UNREADABLE = 'the book the route sent could not be read';
 
 /** What `exposures` cover, in words (the dates are exposureScope's) */
 export const LIVE_V2_SCOPE = 'the window\'s expirations still in the book when the chain was read (exposureScope.expirationsIncluded)';
 
-/** The per-answer note's live part (after METHODOLOGY_2_NOTE) */
+/** The per-answer note's live part (after BOOK_NOTE) */
 export const LIVE_V2_NOTE = 'Here `exposures` is the book of the window\'s legs still in it when the chain was read, on the '
   + 'broker\'s spot and the resolved rate and yield (exposureScope: an expiration leaves it at its session\'s close, while the '
   + 'window lists it until 4:15 PM New York); the rows, byExpiration\'s `exposures` and spotSides\' gex are the same book. '
-  + '`levels` are methodology 1\'s over every leg of the window, their statuses and coverage inside them, so near a close the '
-  + 'two can cover different legs and neither is wrong.';
+  + '`levels` are the gamma-derived levels over every leg of the window, their statuses and coverage inside them, so near a '
+  + 'close the two can cover different legs and neither is wrong.';
 
-/** Where the levels come from, on every methodology-2 answer */
-export const LEVELS_V1_BASIS = 'methodology 1: the legacy engine\'s gamma over every leg of the window (levels.coverage), '
-  + 'not derived from `exposures`';
+/** Where the levels come from, on every answer */
+export const LEVELS_BASIS = 'the levels engine\'s own gamma over every leg of the window (levels.coverage), not derived from `exposures`';
 
 interface LiveV2Strike {
   strike: number;
@@ -353,7 +321,7 @@ function readLiveV2(raw: unknown): LiveV2 {
     unavailable, scopeAsOf: null, totals: null, referenceKind: 'spot', rollStatus: 'notApplicable', expirationsIncluded: [],
     strikeRowsExpired: 0, strikeRowsUnscoped: 0, strikes: [], expirations: new Map(), spotSides: null,
   });
-  if (v.available !== true) return none(v.reason === LIVE_V2_FAILED ? 'the methodology-2 book could not be computed on this call' : LIVE_V2_UNREADABLE);
+  if (v.available !== true) return none(v.reason === LIVE_V2_FAILED ? 'the assumed dealer book could not be computed on this call' : LIVE_V2_UNREADABLE);
   if (!isWireBases(v.totals)) return none(LIVE_V2_UNREADABLE);
   const census = record(v.strikeRows);
   const strikes = arr(v.strikes).flatMap((value): LiveV2Strike[] => {
@@ -430,7 +398,7 @@ function liveV2Exposures(v2: LiveV2): Record<string, unknown> {
   };
 }
 
-/** One row's methodology-2 numbers: the assumed book's GEX and vega exposure and the delta balance, with what is short */
+/** One row's numbers: the assumed book's GEX and vega exposure and the delta balance, with what is short */
 function liveV2Row(entry: LiveV2Strike, own: ExpirationDeltas | null) {
   const coverage = coverageShortfall(entry.book, ['gamma', 'delta', 'vega']);
   return {
@@ -450,13 +418,13 @@ const LIVE_V2_EXPIRATION_WHY: Record<'expired' | 'no legs', string> = {
 };
 
 /**
- * One expiration's methodology-2 numbers. The share of the book's Long OI GEX only when every window expiration is in
+ * One expiration's numbers. The share of the book's Long OI GEX only when every window expiration is in
  * the book with complete gamma coverage or out of it by the clock (a date answered empty leaves the share unknown).
  */
 function liveV2Expiration(v2: LiveV2, expiration: string | null, shareKnown: boolean): Record<string, unknown> {
   if (v2.unavailable !== null || v2.totals === null) return { exposures: null };
   const entry = expiration === null ? undefined : v2.expirations.get(expiration);
-  if (entry === undefined) return { exposures: null, exposuresUnavailable: 'not in the methodology-2 answer' };
+  if (entry === undefined) return { exposures: null, exposuresUnavailable: 'not in the book the route sent' };
   if (typeof entry === 'string') return { exposures: null, exposuresUnavailable: LIVE_V2_EXPIRATION_WHY[entry] };
   const coverage = coverageShortfall(entry, ['gamma', 'delta']);
   const whole = v2.totals.longOi.gex;
@@ -488,32 +456,14 @@ function liveV2SpotSide(side: LiveV2SpotSide) {
   };
 }
 
+/**
+ * The answer: the book's `exposures` and `exposureScope`, its rows, each expiration's and each side of spot's numbers,
+ * read by name from the route's exposureV2, and the gamma-derived levels with their statuses and the coverage they are
+ * read from.
+ */
 export function summarizeDealerPositioning(
   response: Record<string, unknown>,
-  options: Omit<DealerPositioningOptions, 'methodology2'> = {},
-) {
-  return shapeDealerPositioning(response, options);
-}
-
-/**
- * Methodology 2's answer: its own layout - `exposures`, `exposureScope`, and the levels labeled methodology
- * 1 with their statuses and coverage inside them - read by name, never through methodology 1's type.
- */
-export function summarizeDealerPositioningV2(
-  response: Record<string, unknown>,
-  options: Omit<DealerPositioningOptions, 'methodology2'> & { note: string },
-): Record<string, unknown> {
-  const { note, ...rest } = options;
-  return shapeDealerPositioning(response, { ...rest, methodology2: { note } });
-}
-
-/**
- * The one shaper. Its type is methodology 1's answer: methodology 2's parts are cast to it locally, and only
- * summarizeDealerPositioningV2, untyped, ever returns them.
- */
-function shapeDealerPositioning(
-  response: Record<string, unknown>,
-  options: DealerPositioningOptions,
+  options: DealerPositioningOptions = {},
 ) {
   const windowDelta = num(options.strikeWindowDelta);
   const requestedDeltaBand = windowDelta !== null && windowDelta > 0 && windowDelta < 0.5 ? windowDelta : null;
@@ -527,11 +477,12 @@ function shapeDealerPositioning(
   )));
   const body = response ?? {};
   const snapshot = record(body.snapshot);
-  // Methodology 2: the route's own book replaces every methodology-1 exposure below
-  const v2 = options.methodology2 ? readLiveV2(body.exposureV2) : null;
+  // The route's own book: every exposure number below is read from it
+  const v2 = readLiveV2(body.exposureV2);
 
   const spotPrice = num(snapshot.spotPrice);
 
+  // The levels' coverage: the legs their gamma and the flip's search were read from
   const rawCoverage = record(body.coverage);
   const reportedResolution = num(rawCoverage.gammaFlipResolution);
   const searchStatus = rawCoverage.gammaFlipSearchStatus;
@@ -539,13 +490,7 @@ function shapeDealerPositioning(
     unit: 'total/included count option legs the broker quoted that are not known to have zero open interest; a leg whose open interest was omitted or corrupt is counted and excluded, because it exists and cannot be sized',
     strikes: count(rawCoverage.strikes),
     strikesWithGamma: count(rawCoverage.strikesWithGamma),
-    strikesWithDelta: count(rawCoverage.strikesWithDelta),
     gamma: metricCoverage(rawCoverage.gamma),
-    delta: metricCoverage(rawCoverage.delta),
-    vega: metricCoverage(rawCoverage.vega),
-    vanna: metricCoverage(rawCoverage.vanna),
-    charm: metricCoverage(rawCoverage.charm),
-    vomma: metricCoverage(rawCoverage.vomma),
     gammaFlip: metricCoverage(rawCoverage.gammaFlip),
     // How the flip was produced (packages/shared exposure-compute
     // GammaFlipMethod): `repriced` = every leg recomputed from IV;
@@ -568,93 +513,43 @@ function shapeDealerPositioning(
     gammaFlipSearchStatus: searchStatus === 'found' || searchStatus === 'not-found' || searchStatus === 'unresolved'
       ? searchStatus : null,
   };
-  const fields = {
-    netGex: measuredValue(snapshot.netGamma, coverage.gamma),
-    netDex: measuredValue(snapshot.netDelta, coverage.delta),
-    netVega: measuredValue(snapshot.netVega, coverage.vega),
-    netVanna: measuredValue(snapshot.netVanna, coverage.vanna),
-    netCharm: measuredValue(snapshot.netCharm, coverage.charm),
-    netVomma: measuredValue(snapshot.netVomma, coverage.vomma),
-  };
-  const exposure = Object.fromEntries(Object.entries(fields).map(([key, field]) => [key, field.value])) as Record<keyof typeof fields, number | null>;
-  const exposureStatus = Object.fromEntries(Object.entries(fields).map(([key, field]) => [key, field.status])) as Record<keyof typeof fields, FieldStatus>;
+  // The levels engine's own gamma total, never sent: its status is what the walls, the magnet, the concentration and the
+  // regime require, and its sign the regime's fallback.
+  const levelsGamma = measuredValue(snapshot.netGamma, coverage.gamma);
 
   // Repriced gamma needs its own coverage: published IV can support a flip
   // even when the broker publishes no gamma. Partial books cannot establish
-  // a whole-book level, so their sums remain visible but their levels do not.
+  // a whole-book level, so their levels are withheld.
   const levelFields = {
     gammaFlip: measuredLevel(snapshot.gammaFlip, coverage.gammaFlip.status),
-    callWall: measuredLevel(snapshot.callWall, fields.netGex.status),
-    putWall: measuredLevel(snapshot.putWall, fields.netGex.status),
-    gammaMagnet: measuredLevel(snapshot.absGamma, fields.netGex.status),
-    gammaConcentration: measuredLevel(snapshot.gammaConcentration, fields.netGex.status),
+    callWall: measuredLevel(snapshot.callWall, levelsGamma.status),
+    putWall: measuredLevel(snapshot.putWall, levelsGamma.status),
+    gammaMagnet: measuredLevel(snapshot.absGamma, levelsGamma.status),
+    gammaConcentration: measuredLevel(snapshot.gammaConcentration, levelsGamma.status),
   };
   // Resolution belongs to the reported level. Incomplete coverage, a missing
   // value or no detected crossing leaves no level whose step can be quoted.
   if (levelFields.gammaFlip.value === null) coverage.gammaFlipResolution = null;
-  const dealerRegime = fields.netGex.status === 'complete'
-    ? readRegime(snapshot.regime, fields.netGex.value) : null;
+  const dealerRegime = levelsGamma.status === 'complete'
+    ? readRegime(snapshot.regime, levelsGamma.value) : null;
 
-  // Shape coverage only for the displayed window, rather than expanding every
-  // strike in a multi-expiration book before discarding most of them.
-  // Under methodology 2 the rows are its book's strikes (the legs in it), never the legacy engine's
-  const v2Strikes = new Map((v2?.strikes ?? []).map((entry) => [entry.strike, entry]));
-  const rows = (v2 !== null
-    ? (v2.strikes.map((entry) => ({ strike: entry.strike as number | null, row: {} as Record<string, unknown>, deltas: entry.deltas })))
-    : arr(body.byStrike).map((value) => {
-      const row = record(value);
-      return { strike: num(row.strike), row, deltas: readDeltas(row.deltasByExpiration) };
-    })).filter((row) => row.strike !== null);
+  // The rows are the book's strikes (the legs in it). Shape them only for the
+  // displayed window, rather than expanding every strike before discarding most.
+  const v2Strikes = new Map(v2.strikes.map((entry) => [entry.strike, entry]));
+  const rows = v2.strikes.map((entry) => ({ strike: entry.strike, deltas: entry.deltas }));
   // A window keeps the strikes within it, nearest first up to the cap: a
   // percent of spot (none without spot) or a delta band.
   const windowed = requestedDeltaBand !== null || (requestedWindowPct !== null && spotPrice !== null);
   const candidates = requestedDeltaBand !== null
     ? rows.filter((row) => inDeltaBand(row.deltas, requestedDeltaBand))
     : requestedWindowPct !== null && spotPrice !== null
-      ? rows.filter((row) => withinPercent(row.strike as number, spotPrice, requestedWindowPct))
+      ? rows.filter((row) => withinPercent(row.strike, spotPrice, requestedWindowPct))
       : rows;
   // One expiration has one delta a leg, so a row can carry it; over several
   // a strike has one per expiration, and no single number is published.
   const singleExpiration = arr(body.expirations).length === 1;
-  const shapeRowV1 = ({ strike, row, deltas }: { strike: number | null; row: Record<string, unknown>; deltas: ExpirationDeltas[] }) => {
-    const own = singleExpiration && deltas.length === 1 ? deltas[0] : null;
-    const raw = record(row.coverage);
-    const coverage = { gamma: metricCoverage(raw.gamma), delta: metricCoverage(raw.delta), vega: metricCoverage(raw.vega) };
-    const gamma = measuredValue(row.netGamma, coverage.gamma);
-    // The walls are chosen per side (largest positive call gamma, most
-    // negative put gamma) and a row carrying net gamma alone could not be
-    // checked against them. The route's gamma coverage counts both sides
-    // together, so under partial coverage a side can be an unmeasured zero
-    // (no call gammas, usable put gammas: callGex 0 beside a real putGex);
-    // the sides go out only when the coverage establishes them, complete
-    // or empty, and the partial net is published on its own.
-    const sideValue = (raw: unknown): number | null =>
-      (coverage.gamma.status === 'complete' || coverage.gamma.status === 'empty')
-        ? measuredValue(raw, coverage.gamma).value
-        : null;
-    const callGamma = { value: sideValue(row.callGamma) };
-    const putGamma = { value: sideValue(row.putGamma) };
-    const delta = measuredValue(row.netDelta, coverage.delta);
-    const vega = measuredValue(row.netVega, coverage.vega);
-    return {
-      strike, netGex: gamma.value, callGex: callGamma.value, putGex: putGamma.value, netDex: delta.value, netVega: vega.value,
-      // Summed over the window's expirations; null when the broker did not
-      // publish a size for some leg at this strike.
-      callOpenInterest: count(row.callOpenInterest), putOpenInterest: count(row.putOpenInterest),
-      // The broker's per-contract deltas at this strike, only when the window
-      // is one expiration; null when unpublished or over several.
-      callDelta: own?.call ?? null, putDelta: own?.put ?? null,
-      status: { netGex: gamma.status, netDex: delta.status, netVega: vega.status },
-      // Only when some status is not complete: a complete row's counts add
-      // nothing its status does not say, and dropping them is what lets the
-      // cap reach MAX_STRIKE_ROWS inside the response budget.
-      ...(gamma.status === 'complete' && delta.status === 'complete' && vega.status === 'complete'
-        ? {} : { coverage }),
-    };
-  };
-  const shapeRow = (entry: { strike: number | null; row: Record<string, unknown>; deltas: ExpirationDeltas[] }) => (v2 !== null
-    ? liveV2Row(v2Strikes.get(entry.strike as number)!, singleExpiration && entry.deltas.length === 1 ? entry.deltas[0] : null) as unknown as ReturnType<typeof shapeRowV1>
-    : shapeRowV1(entry));
+  const shapeRow = (entry: { strike: number; deltas: ExpirationDeltas[] }) =>
+    liveV2Row(v2Strikes.get(entry.strike)!, singleExpiration && entry.deltas.length === 1 ? entry.deltas[0] : null);
   let nearSpot = nearestStrikes(candidates, spotPrice, limit).map(shapeRow);
 
   // The walls and the magnet are chosen over every strike in the window, so
@@ -664,37 +559,26 @@ function shapeDealerPositioning(
     if (field.value === null) continue;
     levelStrikes.set(field.value, [...(levelStrikes.get(field.value) ?? []), level]);
   }
-  // Methodology 1 keys its strikes to the cent (strike_cents); under methodology 2 a row is the book's exact strike, so a
-  // level names each of the book's strikes at it to the cent, by the rows' own rounding
-  const levelKey = (strike: number) => (v2 !== null ? Math.round(strike * 100) / 100 : strike);
+  // The levels key their strikes to the cent (strike_cents) and a row is the book's exact strike, so a level names each
+  // of the book's strikes at it to the cent, by the rows' own rounding
+  const levelKey = (strike: number) => Math.round(strike * 100) / 100;
   const shapeLevels = (kept: ReadonlyArray<{ strike: number | null }>) => {
     const shown = new Set(kept.map((row) => row.strike));
     return rows
-      .filter((row) => levelStrikes.has(levelKey(row.strike as number)) && !shown.has(row.strike))
-      .map((row) => ({ levels: levelStrikes.get(levelKey(row.strike as number))!, ...shapeRow(row) }));
+      .filter((row) => levelStrikes.has(levelKey(row.strike)) && !shown.has(row.strike))
+      .map((row) => ({ levels: levelStrikes.get(levelKey(row.strike))!, ...shapeRow(row) }));
   };
   let atLevels = shapeLevels(nearSpot);
 
-  // Each expiration computed alone on the window's own rows (the route's
-  // expirationBreakdown). The sides and the gross go out only under complete
-  // or empty gamma coverage, for the reason the per-strike sides do; the share
-  // only when the route published one (it requires every expiration complete).
-  // Each expiration's share of the book's Long OI GEX needs every window date in the book complete, or out of it by the clock
-  const v2ShareKnown = v2 !== null && v2.totals !== null && v2.totals.coverage.gamma.status === 'complete'
+  // Each expiration's own book beside its expected move and events. Its share of the book's Long OI GEX needs every
+  // window date in the book complete, or out of it by the clock.
+  const shareKnown = v2.totals !== null && v2.totals.coverage.gamma.status === 'complete'
     && arr(body.expirations).every((expiration) => {
       const entry = v2.expirations.get(String(expiration));
       return entry === 'expired' || (entry !== undefined && entry !== 'no legs' && entry.coverage.gamma.status === 'complete');
     });
   const byExpiration = arr(body.byExpiration).map((value) => {
     const entry = record(value);
-    const raw = record(entry.coverage);
-    const gammaCoverage = metricCoverage(raw.gamma);
-    const deltaCoverage = metricCoverage(raw.delta);
-    const gamma = measuredValue(entry.netGamma, gammaCoverage);
-    const delta = measuredValue(entry.netDelta, deltaCoverage);
-    const established = gammaCoverage.status === 'complete' || gammaCoverage.status === 'empty';
-    const side = (v: unknown) => (established ? measuredValue(v, gammaCoverage).value : null);
-    const share = num(entry.shareOfGrossGamma);
     const move = record(entry.expectedMove);
     const straddle = num(move.straddle);
     // Null when the route's calendar read failed (or it sent none); the
@@ -702,21 +586,12 @@ function shapeDealerPositioning(
     const rawEvents = entry.events !== null && typeof entry.events === 'object' ? record(entry.events) : null;
     const entryOmitted = readOmittedRows(entry.omittedRows);
     const entryExcluded = readExcludedRoots(entry.excludedRoots);
-    const numbers = {
-      netGex: gamma.value,
-      netDex: delta.value,
-      callGex: side(entry.callGamma),
-      putGex: side(entry.putGamma),
-      grossGex: side(entry.grossGamma),
-      shareOfGrossGex: share !== null && share >= 0 && share <= 1 ? share : null,
-      status: { netGex: gamma.status, netDex: delta.status },
-    };
     return {
       expiration: str(entry.expiration),
       ...(entryOmitted !== null ? { omittedRows: entryOmitted } : {}),
       ...(entryExcluded !== null ? { excludedRoots: entryExcluded } : {}),
       daysToExpiration: Number.isSafeInteger(entry.daysToExpiration) ? entry.daysToExpiration as number : null,
-      ...(v2 !== null ? liveV2Expiration(v2, str(entry.expiration), v2ShareKnown) as unknown as typeof numbers : numbers),
+      ...liveV2Expiration(v2, str(entry.expiration), shareKnown),
       expectedMove: straddle === null ? null : {
         strike: num(move.strike),
         callMid: num(move.callMid),
@@ -739,13 +614,9 @@ function shapeDealerPositioning(
   }).filter((entry) => entry.expiration !== null);
 
   const limitations = [
-    v2 === null
-      ? 'Totals cover the selected expirations, not every listed expiration. Metric coverage counts active option legs; per-strike coverage combines those expirations.'
-      : '`exposures` cover the selected expirations still in the book when the chain was read (exposureScope), not every listed expiration; a coverage entry counts the active option legs of one number, and a row\'s combines its strike\'s expirations.',
+    '`exposures` cover the selected expirations still in the book when the chain was read (exposureScope), not every listed expiration; a coverage entry counts the active option legs of one number, and a row\'s combines its strike\'s expirations.',
     'Partial sums include only supported contributions and are not whole-book measurements. Levels are withheld when their required coverage is incomplete.',
-    v2 === null
-      ? 'Unknown or unmeasured values are null. Empty means no active legs; it supports a reported zero sum but no inferred level or regime.'
-      : 'Unavailable numbers are null. A level whose status is unknown or unmeasured is null; empty means no active legs, which supports no inferred level or regime.',
+    'Unavailable numbers are null. A level whose status is unknown or unmeasured is null; empty means no active legs, which supports no inferred level or regime.',
     'The gamma-flip search samples prices within 20% of spot. A pair of crossings within one sampling interval can be missed, so no detected flip does not prove that no crossing exists within or beyond that range.',
   ];
   if (coverage.gammaFlipSearchStatus === 'unresolved') {
@@ -757,9 +628,6 @@ function shapeDealerPositioning(
         ? 'The gamma flip is a sampled root and the sampling step was not reported, so how finely it was searched is unknown.'
         : `The gamma flip is a sampled root found at a step of ${coverage.gammaFlipResolution} in price: this is the local sampling bracket width, not a confidence interval or an error bound on the level. It is the nearest crossing detected by the search.`,
     );
-  }
-  if (v2 === null && Object.values(fields).some((field) => field.status === 'unavailable')) {
-    limitations.push('Some reported totals are missing or invalid despite available input coverage.');
   }
   // A spot that printed before the last session's open (Public's 04:00
   // snapshot) skews everything read against it; resolved.S carries the flag,
@@ -790,8 +658,8 @@ function shapeDealerPositioning(
     const named = unpublished.length === 1 ? unpublished[0]
       : `${unpublished.slice(0, -1).join(', ')} and ${unpublished[unpublished.length - 1]}`;
     limitations.push(unpublished.length === 1
-      ? `The broker published no open interest for ${named} (a zero on every contract, as Schwab prints on index options), so its legs are excluded and a level it feeds is withheld for incomplete coverage (\`${v2 === null ? 'levelStatus' : 'levels.status'}\` says which)${v2 === null ? '' : '; the methodology-2 numbers it feeds carry the shortfall in their coverage'}; the expected move is priced from quotes and is unaffected.`
-      : `The broker published no open interest for ${named} (a zero on every contract, as Schwab prints on index options), so their legs are excluded and a level they feed is withheld for incomplete coverage (\`${v2 === null ? 'levelStatus' : 'levels.status'}\` says which)${v2 === null ? '' : '; the methodology-2 numbers they feed carry the shortfall in their coverage'}; the expected moves are priced from quotes and are unaffected.`);
+      ? `The broker published no open interest for ${named} (a zero on every contract, as Schwab prints on index options), so its legs are excluded and a level it feeds is withheld for incomplete coverage (\`levels.status\` says which); the book's numbers it feeds carry the shortfall in their coverage; the expected move is priced from quotes and is unaffected.`
+      : `The broker published no open interest for ${named} (a zero on every contract, as Schwab prints on index options), so their legs are excluded and a level they feed is withheld for incomplete coverage (\`levels.status\` says which); the book's numbers they feed carry the shortfall in their coverage; the expected moves are priced from quotes and are unaffected.`);
   }
 
   const levels = {
@@ -807,23 +675,11 @@ function shapeDealerPositioning(
     callWall: levelFields.callWall.status,
     putWall: levelFields.putWall.status,
     gammaMagnet: levelFields.gammaMagnet.status,
-    dealerRegime: fields.netGex.status,
+    dealerRegime: levelsGamma.status,
     gammaConcentration: levelFields.gammaConcentration.status,
   };
-  const v1Book = { levels, levelStatus, exposure, exposureStatus, coverage };
-  const legacySpotSides = () => {
-    if (body.spotSides === null || typeof body.spotSides !== 'object') return null;
-    const raw = record(body.spotSides);
-    const share = num(raw.callOpenInterestShareAbove);
-    return {
-      atSpotStrike: num(raw.atSpotStrike),
-      above: spotSide(raw.above),
-      below: spotSide(raw.below),
-      callOpenInterestShareAbove: share !== null && share >= 0 && share <= 1 ? share : null,
-    };
-  };
+  const exposures = liveV2Exposures(v2);
   const shaped = {
-    ...(options.label ?? {}),
     symbol: str(body.symbol),
     // Never omitted and never inferred from the absence of an error: a reader
     // relaying a gamma flip has to be able to say how old it is.
@@ -832,26 +688,9 @@ function shapeDealerPositioning(
     provider: str(body.provider),
     spotPrice,
 
-    ...(v2 === null ? v1Book : {
-      // methodology 1's levels, labeled, with their statuses and the coverage they are read from (gamma and the flip's)
-      levels: {
-        methodology: 1 as const,
-        basis: LEVELS_V1_BASIS,
-        ...levels,
-        status: levelStatus,
-        coverage: {
-          unit: coverage.unit,
-          strikes: coverage.strikes,
-          strikesWithGamma: coverage.strikesWithGamma,
-          gamma: coverage.gamma,
-          gammaFlip: coverage.gammaFlip,
-          gammaFlipMethod: coverage.gammaFlipMethod,
-          gammaFlipResolution: coverage.gammaFlipResolution,
-          gammaFlipSearchStatus: coverage.gammaFlipSearchStatus,
-        },
-      },
-      ...liveV2Exposures(v2),
-    } as unknown as typeof v1Book),
+    // The gamma-derived levels, with their statuses and the coverage they are read from (gamma and the flip's)
+    levels: { basis: LEVELS_BASIS, ...levels, status: levelStatus, coverage },
+    ...exposures,
     limitations,
 
     // What the numbers were computed OVER. Exposure across four expirations is
@@ -887,18 +726,12 @@ function shapeDealerPositioning(
     // The book split at spot (strictly above, strictly below; a strike exactly
     // at spot in neither). Measurements for a squeeze argument, not a signal:
     // the GEX signs assume dealers are long the calls.
-    spotSides: (() => {
-      if (v2 !== null) {
-        const sides = v2.spotSides;
-        return (sides === null ? null : {
-          atSpotStrike: sides.atSpotStrike,
-          above: liveV2SpotSide(sides.above),
-          below: liveV2SpotSide(sides.below),
-          callOpenInterestShareAbove: sides.callOpenInterestShareAbove,
-        }) as unknown as ReturnType<typeof legacySpotSides>;
-      }
-      return legacySpotSides();
-    })(),
+    spotSides: v2.spotSides === null ? null : {
+      atSpotStrike: v2.spotSides.atSpotStrike,
+      above: liveV2SpotSide(v2.spotSides.above),
+      below: liveV2SpotSide(v2.spotSides.below),
+      callOpenInterestShareAbove: v2.spotSides.callOpenInterestShareAbove,
+    },
 
     strikes: {
       returned: nearSpot.length,
@@ -923,16 +756,15 @@ function shapeDealerPositioning(
     ...(warningsOf(body.warnings).length > 0 ? { warnings: warningsOf(body.warnings) } : {}),
     ...('rateLimit' in options ? { rateLimit: options.rateLimit ?? null } : {}),
     guide: {} as Guide,
-    ...(options.methodology2 ? { methodologyNote: options.methodology2.note } : {}),
+    // The book's note rides inside the fit with the rows and the guide
+    bookNote: `${BOOK_NOTE} ${LIVE_V2_NOTE}`,
   };
   const rowsReturned = nearSpot.length > 0 || atLevels.length > 0;
   const guideFacts = {
     rowsReturned, requestedWindowPct, provider: shaped.provider, rateLimitGiven: 'rateLimit' in options, rateLimit: options.rateLimit ?? null,
     regime: dealerRegime, cov: coverage, levels, levelStatus,
-    v2: v2 === null ? null : {
-      exposures: (shaped as Record<string, any>).exposures as Record<string, unknown> | null,
-      expired: v2.strikeRowsExpired, unscoped: v2.strikeRowsUnscoped,
-    },
+    exposures: exposures.exposures as Record<string, unknown> | null,
+    expired: v2.strikeRowsExpired, unscoped: v2.strikeRowsUnscoped,
   };
   shaped.guide = dealerGuide(shaped, guideFacts, false);
 
@@ -948,7 +780,7 @@ function shapeDealerPositioning(
       rowBudget = MAX_RESPONSE_BYTES - RESPONSE_MARGIN_BYTES - bytes(shaped);
     }
     const farthest = spotPrice === null ? nearSpot.length - 1 : nearSpot.reduce((far, row, index) =>
-      (Math.abs((row.strike as number) - spotPrice) >= Math.abs((nearSpot[far].strike as number) - spotPrice) ? index : far), 0);
+      (Math.abs(row.strike - spotPrice) >= Math.abs(nearSpot[far].strike - spotPrice) ? index : far), 0);
     nearSpot = nearSpot.filter((_, index) => index !== farthest);
     atLevels = shapeLevels(nearSpot);
   }
@@ -958,11 +790,11 @@ function shapeDealerPositioning(
   return shaped;
 }
 
-/** The same-day rule under methodology 2: its book leaves a leg at the session's close; the levels keep the gamma */
-const SAME_DAY_V2 = 'On same-day legs, vanna, charmFlow and vomma change sharply with small spot moves and time to expiry: '
+/** The same-day rule: the book leaves a leg at the session's close; the levels keep its gamma */
+const SAME_DAY = 'On same-day legs, vanna, charmFlow and vomma change sharply with small spot moves and time to expiry: '
   + 'one charmFlow reading is not a steady rate into the close. A same-day expiration\'s legs leave vanna, charmFlow and '
-  + 'vomma one minute before its session\'s close and the whole methodology-2 book at the close (4:00 PM New York, '
-  + '1:00 PM on an NYSE early close: exposureScope); the default window lists the date until 4:15 PM and methodology 1\'s '
+  + 'vomma one minute before its session\'s close and the whole book at the close (4:00 PM New York, '
+  + '1:00 PM on an NYSE early close: exposureScope); the default window lists the date until 4:15 PM and the '
   + 'levels keep its gamma until then. charmFlow is not split by expiration; over several expirations this answer does '
   + 'not show its same-day share; as general possibilities, not a reading of this answer: charm near the money can be the '
   + 'largest term in the book, a same-day leg\'s vanna changes sign near its strike, and on an expiration afternoon '
@@ -975,93 +807,73 @@ const warningsOf = (v: unknown): string[] => (Array.isArray(v) ? v.filter((w): w
 
 /**
  * The dealer guide emits each applicable reading rule under a stable key. It explains neutral regimes,
- * percent windows without a spot, the magnet and concentration alongside the fields they describe.
+ * percent windows without a spot, the magnet and concentration alongside the fields they describe. The levels'
+ * statuses and coverage sit inside `levels`.
  */
 function dealerGuide(
   shaped: Record<string, any>,
   f: {
     rowsReturned: boolean; requestedWindowPct: number | null; provider: string | null; rateLimitGiven: boolean; rateLimit: LiveRateLimit | null; regime: string | null;
-    /** Methodology 1's coverage, levels and their statuses, wherever the answer carries them */
+    /** The levels' coverage, the levels and their statuses */
     cov: Record<string, any>; levels: Record<string, any>; levelStatus: Record<string, any>;
-    /** Methodology 2's facts, or null for a methodology-1 answer */
-    v2: { exposures: Record<string, unknown> | null; expired: number; unscoped: number } | null;
+    /** The book's `exposures` (null when there is none) and its scope's census */
+    exposures: Record<string, unknown> | null; expired: number; unscoped: number;
   },
   limited: boolean,
 ): Guide {
   const g: Guide = {};
   const cov = f.cov;
-  const v2 = f.v2;
-  // Under methodology 2 the levels' statuses and coverage sit inside `levels`
-  const statusPath = v2 === null ? 'levelStatus' : 'levels.status';
-  const covPath = v2 === null ? 'coverage' : 'levels.coverage';
   const entries: Array<Record<string, any>> = shaped.byExpiration;
   const provider = f.provider;
   // Governs every exposure value, null ones included.
-  g.exposure = v2 === null
-    ? 'netCharm is dealer dollar charm per calendar day on the remaining-maturity sign, the opposite of '
-      + 'compute_black_scholes\' time-passing charm: one day of time passing moves the dealers\' dollar delta by minus it. '
-      + 'GEX counts call gamma positive and put gamma negative (dealers assumed long calls and short puts); a squeeze '
-      + 'reading of out-of-the-money calls assumes customers bought them and dealers are short, and open interest does not '
-      + 'say who holds a contract: spotSides and the open-interest fields are what a squeeze argument reads, not a squeeze signal.'
-    : '`exposures`, each row\'s numbers, byExpiration\'s `exposures` and spotSides\' gex are one methodology-2 book '
-      + '(methodologyNote): GEX counts call gamma positive and put gamma negative (dealers assumed long calls and short '
-      + 'puts); a squeeze reading of out-of-the-money calls assumes customers bought them and dealers are short, and open '
-      + 'interest does not say who holds a contract: spotSides and the open-interest fields are what a squeeze argument '
-      + 'reads, not a squeeze signal. charmFlow is the book\'s hedge flow per calendar day (+ is buying), not '
-      + 'compute_black_scholes\' time-passing charm.';
-  if (v2 !== null) {
-    g.exposureScope = 'exposureScope.expirationsIncluded are the window\'s expirations the methodology-2 book holds: an '
-      + 'expiration\'s legs leave it at its session\'s close (4:00 PM New York, 1:00 PM on an NYSE early close), while the '
-      + 'default window lists the date until 4:15 PM and the levels keep its legs\' gamma until then. exposureScope.asOf is the '
-      + 'instant the book was scoped at, when the chain rows were built: asOf, taken after the answer\'s other reads, can '
-      + 'follow it across a close, so a book can hold an expiration beside an asOf past that expiration\'s close'
-      + (v2.expired > 0 ? '; strikeRowsExpired counts the strike rows read and left out of the book for that reason' : '')
-      + (v2.unscoped > 0 ? '; strikeRowsUnscoped counts the strike rows kept in it with an expiration date that could not be read' : '')
-      + '.';
-  }
-  g.walls = (v2 === null ? '' : 'The levels are methodology 1\'s (levels.basis). ')
+  g.exposure = '`exposures`, each row\'s numbers, byExpiration\'s `exposures` and spotSides\' gex are one book '
+    + '(bookNote): GEX counts call gamma positive and put gamma negative (dealers assumed long calls and short '
+    + 'puts); a squeeze reading of out-of-the-money calls assumes customers bought them and dealers are short, and open '
+    + 'interest does not say who holds a contract: spotSides and the open-interest fields are what a squeeze argument '
+    + 'reads, not a squeeze signal. charmFlow is the book\'s hedge flow per calendar day (+ is buying), not '
+    + 'compute_black_scholes\' time-passing charm.';
+  g.exposureScope = 'exposureScope.expirationsIncluded are the window\'s expirations the book holds: an '
+    + 'expiration\'s legs leave it at its session\'s close (4:00 PM New York, 1:00 PM on an NYSE early close), while the '
+    + 'default window lists the date until 4:15 PM and the levels keep its legs\' gamma until then. exposureScope.asOf is the '
+    + 'instant the book was scoped at, when the chain rows were built: asOf, taken after the answer\'s other reads, can '
+    + 'follow it across a close, so a book can hold an expiration beside an asOf past that expiration\'s close'
+    + (f.expired > 0 ? '; strikeRowsExpired counts the strike rows read and left out of the book for that reason' : '')
+    + (f.unscoped > 0 ? '; strikeRowsUnscoped counts the strike rows kept in it with an expiration date that could not be read' : '')
+    + '.';
+  g.walls = 'The levels are their own computation (levels.basis). '
     + 'The call wall is the strike with the largest positive call gamma and the put wall the strike with the most '
     + 'negative put gamma; ties go to the lower strike, and nothing orders them, so the put wall can sit above the call '
-    + `wall. A null wall beside a complete ${statusPath} means no strike has such gamma on that side; beside any other `
+    + 'wall. A null wall beside a complete levels.status means no strike has such gamma on that side; beside any other '
     + 'status it is withheld.';
   const flipNullComplete = f.levels.gammaFlip === null && f.levelStatus.gammaFlip === 'complete';
-  // Coverage.gammaFlip's legs, repriced and held alike, are flipMethod's (every answer); not repeated here.
-  // Under methodology 2 the walls' status is methodology 1's net gamma total's, which the answer does not send
-  const netGexStatus = v2 === null ? 'the netGex field status' : 'methodology 1\'s net gamma status (its dealerRegime entry)';
-  g.levelStatus = `${statusPath} is each level\'s required coverage, not whether a level was found: the flip\'s is `
-    + `${covPath}.gammaFlip, and the walls\', the magnet\'s and the `
-    + `concentration\'s is ${netGexStatus}, which can also read "unavailable" (a missing or invalid reported `
+  // Levels.coverage.gammaFlip's legs, repriced and held alike, are flipMethod's (every answer); not repeated here.
+  // The walls' status is the levels' own gamma total's, which the answer does not send.
+  g.levelStatus = 'levels.status is each level\'s required coverage, not whether a level was found: the flip\'s is '
+    + 'levels.coverage.gammaFlip, and the walls\', the magnet\'s and the '
+    + 'concentration\'s is the levels\' net gamma status (its dealerRegime entry), which can also read "unavailable" (a missing or invalid reported '
     + 'total despite coverage). A reported null level keeps its coverage status; a missing or invalid reported level '
     + 'reads "unavailable" when its required coverage is complete.'
     // An evaluation found "a search result, not withheld" lifted without the next sentence's caveat: one sentence.
     // Both the repriced grid and the observed-leg adaptive search can miss crossings between samples or outside the range.
     + (flipNullComplete ? ' Here gammaFlip\'s null over complete coverage (every counted leg entered the search) '
       + 'is a search result, not withheld, and not proof of no flip: sampling within 20% of spot can miss two crossings in '
-      + `one interval or a crossing outside the range. See ${covPath}.gammaFlipSearchStatus.` : '');
+      + 'one interval or a crossing outside the range. See levels.coverage.gammaFlipSearchStatus.' : '');
   if (f.levels.gammaFlip !== null) {
     // Put the nearest-detected rule beside the coverage rule without enlarging this branch's guide.
     // Adding it to the old prose displaced a strike on a complete mixed-method window.
-    g.levelStatus = `${statusPath} reports required coverage, not whether a level was found: gammaFlip uses `
-      + `${covPath}.gammaFlip; walls, magnet and concentration use ${v2 === null ? 'netGex\'s field status' : 'methodology 1\'s net gamma status'} ("unavailable" for missing/invalid `
+    g.levelStatus = 'levels.status reports required coverage, not whether a level was found: gammaFlip uses '
+      + 'levels.coverage.gammaFlip; walls, magnet and concentration use the levels\' net gamma status ("unavailable" for missing/invalid '
       + 'totals). Missing/invalid levels read "unavailable" under complete coverage; reported null levels keep coverage '
       + 'status. gammaFlip is nearest to spot among crossings found by sampling; nearer or farther crossings may be missed.';
   }
-  g.dealerRegime = v2 === null
-    ? 'dealerRegime positive means dealers hedge against moves and dampen them, negative that they hedge with '
-      + 'moves and amplify them. It is the sign of net gamma over the selected expirations interpolated at spot between the '
-      + 'two bracketing strikes (the nearest strike\'s gamma when spot is outside them), not the sign of netGex nor which '
-      + 'side of gammaFlip spot is on, and can disagree with both; only with fewer than two gamma-bearing strikes is it '
-      + 'netGex\'s sign, as it is when the route sent none. It is published only when netGex coverage is complete.'
-      + (f.regime === 'neutral' ? ' "neutral" is a net gamma of exactly zero at that point (or a measured zero netGex): neither dampening nor amplifying.' : '')
-      + (f.regime === null ? ' Null here: the regime is not established (netGex coverage is not complete - levelStatus.dealerRegime names its status - or there is no netGex), which is not "neutral".' : '')
-    : 'dealerRegime (methodology 1) positive means dealers hedge against moves and dampen them, negative that they hedge '
-      + 'with moves and amplify them. It is the sign of methodology 1\'s net gamma over the selected expirations interpolated '
-      + 'at spot between the two bracketing strikes (the nearest strike\'s gamma when spot is outside them), not the sign of '
-      + 'exposures.gex nor which side of gammaFlip spot is on, and can disagree with both; only with fewer than two '
-      + 'gamma-bearing strikes is it the sign of methodology 1\'s net gamma total, as it is when the route sent none. It is '
-      + 'published only when that total\'s coverage (levels.coverage.gamma) is complete.'
-      + (f.regime === 'neutral' ? ' "neutral" is a net gamma of exactly zero at that point (or a measured zero total): neither dampening nor amplifying.' : '')
-      + (f.regime === null ? ' Null here: the regime is not established (that coverage is not complete - levels.status.dealerRegime names its status - or there is no total), which is not "neutral".' : '');
+  g.dealerRegime = 'dealerRegime positive means dealers hedge against moves and dampen them, negative that they hedge '
+    + 'with moves and amplify them. It is the sign of the levels\' net gamma over the selected expirations interpolated '
+    + 'at spot between the two bracketing strikes (the nearest strike\'s gamma when spot is outside them), not the sign of '
+    + 'exposures.gex nor which side of gammaFlip spot is on, and can disagree with both; only with fewer than two '
+    + 'gamma-bearing strikes is it the sign of the levels\' net gamma total, as it is when the route sent none. It is '
+    + 'published only when that total\'s coverage (levels.coverage.gamma) is complete.'
+    + (f.regime === 'neutral' ? ' "neutral" is a net gamma of exactly zero at that point (or a measured zero total): neither dampening nor amplifying.' : '')
+    + (f.regime === null ? ' Null here: the regime is not established (that coverage is not complete - levels.status.dealerRegime names its status - or there is no total), which is not "neutral".' : '');
   g.magnet = 'gammaMagnet is the strike with the largest absolute net gamma in the window (ties to the lower strike).';
   // "its inverse": an evaluation found 0.041 over 236 strikes read as evenly spread
   g.concentration = 'gammaConcentration is the Herfindahl index of the strikes\' shares of absolute net gamma; its '
@@ -1069,7 +881,7 @@ function dealerGuide(
     + 'when gamma is spread evenly, and 1 when it all sits at one strike; null when there is no gamma.';
   const method = cov.gammaFlipMethod;
   // "not a coverage status": an evaluation found "mixed" read as the coverage
-  const named = (m: string) => `The flip method (${covPath}.gammaFlipMethod, not a coverage status) is "${m}": `;
+  const named = (m: string) => `The flip method (levels.coverage.gammaFlipMethod, not a coverage status) is "${m}": `;
   const methodLine = method === 'repriced'
     ? named(method) + 'every leg recomputed from IV across the sweep.'
     : method === 'frozen-gamma'
@@ -1077,28 +889,22 @@ function dealerGuide(
       : method === 'mixed'
         ? named(method) + 'some legs were repriced from their IV and the rest held their published gamma.'
         : method === null
-          ? `The route reported no method (${covPath}.gammaFlipMethod null): whether any gamma was held is unknown.`
-          : `${covPath}.gammaFlipMethod "${method}" is not one this tool names.`;
+          ? 'The route reported no method (levels.coverage.gammaFlipMethod null): whether any gamma was held is unknown.'
+          : `levels.coverage.gammaFlipMethod "${method}" is not one this tool names.`;
   g.flipMethod = 'The gamma flip is found by repricing the book across spot levels, and the method qualifies the level. '
     + methodLine
     + (method === 'frozen-gamma' || method === 'mixed' ? ' A held gamma is an approximation that can materially move the level or create one where there was none, even over complete coverage.' : '')
     + (method !== null ? ' A usable IV is finite, above 0 and at most 5 (500%), so a broker IV of 0 or above 5 counts as absent.' : '')
-    + ` ${covPath}.gammaFlip counts every leg that entered the sweep, repriced or held: complete means every counted leg entered it, and it can read complete under "mixed" or "frozen-gamma"; the method, not the count, says whether legs were repriced or held.`;
+    + ' levels.coverage.gammaFlip counts every leg that entered the sweep, repriced or held: complete means every counted leg entered it, and it can read complete under "mixed" or "frozen-gamma"; the method, not the count, says whether legs were repriced or held.';
   if (cov.gammaFlipSearchStatus === null) {
-    g.flipSearch = `${covPath}.gammaFlipSearchStatus is null: no leg entered the search (every one excluded, as when the `
+    g.flipSearch = 'levels.coverage.gammaFlipSearchStatus is null: no leg entered the search (every one excluded, as when the '
       + 'broker published no open interest) or the route reported no recognized status.';
   }
   if (f.rowsReturned) {
-    g.rows = (v2 === null
-      ? 'A row\'s callGex and putGex (the sides the walls are chosen from) are published only when its gamma '
-        + 'coverage is complete or empty: coverage counts both sides together, so under partial coverage a side could be an '
-        + 'unmeasured zero and both are null while the partial net stays. callOpenInterest and putOpenInterest are contracts '
-        + 'summed over the window\'s expirations, null (not zero) when some leg at that strike has no published size. A row '
-        + 'carries its coverage counts only when one of its statuses is not complete. '
-      : 'A row\'s gex, putMinusCallDeltaBalance and vegaExposure are the methodology-2 book\'s at that strike, over its '
-        + 'legs in the book; the row carries `coverage` only for a number that is not complete (partial: the legs included; '
-        + 'unavailable: null). callOpenInterest and putOpenInterest are contracts summed over those legs, null (not zero) '
-        + 'when some leg at that strike has no published size. ')
+    g.rows = 'A row\'s gex, putMinusCallDeltaBalance and vegaExposure are the book\'s at that strike, over its '
+      + 'legs in the book; the row carries `coverage` only for a number that is not complete (partial: the legs included; '
+      + 'unavailable: null). callOpenInterest and putOpenInterest are contracts summed over those legs, null (not zero) '
+      + 'when some leg at that strike has no published size. '
       + (shaped.window.expirations.length === 1
         ? 'With one expiration each row carries callDelta and putDelta, the broker\'s per-contract deltas (null when unpublished or outside 0 to 1 for a call, -1 to 0 for a put).'
         : 'Over several expirations callDelta and putDelta are null by design (a strike has one delta per expiration): not missing data.');
@@ -1106,22 +912,16 @@ function dealerGuide(
   g.spotSides = shaped.spotSides === null
     ? 'spotSides is null: the route sent no split at spot.'
     : 'spotSides splits the book at spot: above holds strikes strictly above spot, below strictly below, and a strike exactly '
-      + (v2 === null
-        ? 'at spot (atSpotStrike) is in neither. Each side\'s netGex retains partial sums with its status; callGex and putGex '
-          + 'are published only under complete or empty gamma coverage. callOpenInterest and putOpenInterest have their own '
-        : 'at spot (atSpotStrike) is in neither. Each side\'s gex is the methodology-2 book\'s over its strikes, partial sums '
-          + 'kept with coverage.gex where not complete. callOpenInterest and putOpenInterest have their own ')
+      + 'at spot (atSpotStrike) is in neither. Each side\'s gex is the book\'s over its strikes, partial sums '
+      + 'kept with coverage.gex where not complete. callOpenInterest and putOpenInterest have their own '
       + 'coverage (a partial open interest is the sum of '
       + 'the sizes published, labelled partial); callOpenInterestShareAbove is the call open interest above spot over the '
-      + (v2 === null ? 'window\'s' : 'book\'s') + ' call open interest (the at-spot strike in the whole), null unless every call leg\'s size is known.';
+      + 'book\'s call open interest (the at-spot strike in the whole), null unless every call leg\'s size is known.';
   if (shaped.levels.callWall !== null || shaped.levels.putWall !== null || shaped.levels.gammaMagnet !== null) {
-    g.rowsAtLevels = v2 === null
-      ? 'The walls and the magnet are chosen over every strike in the window (strikes.total of them), so they '
-        + 'can sit outside the returned rows; such a level\'s own row is returned in strikes.atLevels, naming the level.'
-      // under methodology 2 strikes.total counts the book's strikes, not the ones methodology 1 chose its levels from
-      : 'The walls and the magnet (methodology 1) are chosen over every strike of the window\'s legs, so they can sit '
-        + 'outside the returned rows; methodology 1 keys a strike to the cent, so such a level\'s rows are the '
-        + 'methodology-2 book\'s strikes at it to the cent, where the book holds any, returned in strikes.atLevels naming the level.';
+    // strikes.total counts the book's strikes, not the ones the levels were chosen from
+    g.rowsAtLevels = 'The walls and the magnet are chosen over every strike of the window\'s legs, so they can sit '
+      + 'outside the returned rows; the levels key a strike to the cent, so such a level\'s rows are the '
+      + 'book\'s strikes at it to the cent, where the book holds any, returned in strikes.atLevels naming the level.';
   }
   if (limited) {
     g.rowsLimited = 'Rows that would have carried the answer past its size limit were dropped farthest from spot first '
@@ -1136,20 +936,12 @@ function dealerGuide(
       + 'the first strikes in strike order up to the cap, and strikes.windowPct and strikes.inWindow are null.';
   }
   if (entries.length > 0) {
-    g.byExpiration = v2 === null
-      ? 'Each byExpiration entry is computed alone on the same rows: netGex, netDex, callGex, putGex and '
-        + 'grossGex (its strikes\' call and put gamma exposure sizes summed); daysToExpiration counts calendar days from '
-        // "(a same-day share is 0DTE concentration)" was read as same-day dominance of netCharm.
-        + 'today in New York (0 on the day); shareOfGrossGex is its share of the window\'s gross gamma (gamma only, not a '
-        + 'share of netCharm), published only when every expiration\'s gamma coverage is complete. The sides and grossGex '
-        + 'are null under partial gamma coverage; an expiration the broker answered with no options has unknown coverage '
-        + 'and null values, and then no expiration gets a share.'
-      : 'Each byExpiration entry\'s `exposures` is the methodology-2 book\'s over that expiration\'s legs in it: gex, '
-        + 'putMinusCallDeltaBalance and longOiGex (the same gamma with every contract held long); shareOfLongOiGex is its '
-        + 'share of the book\'s longOiGex (gamma only, not a share of charmFlow), published only when every expiration '
-        + 'still in the book has complete gamma coverage and none was answered with no contracts; `coverage` names a number '
-        + 'that is not complete. An expiration past its session\'s close or answered with no contracts has null `exposures` '
-        + 'and says which in exposuresUnavailable. daysToExpiration counts calendar days from today in New York (0 on the day).';
+    g.byExpiration = 'Each byExpiration entry\'s `exposures` is the book\'s over that expiration\'s legs in it: gex, '
+      + 'putMinusCallDeltaBalance and longOiGex (the same gamma with every contract held long); shareOfLongOiGex is its '
+      + 'share of the book\'s longOiGex (gamma only, not a share of charmFlow), published only when every expiration '
+      + 'still in the book has complete gamma coverage and none was answered with no contracts; `coverage` names a number '
+      + 'that is not complete. An expiration past its session\'s close or answered with no contracts has null `exposures` '
+      + 'and says which in exposuresUnavailable. daysToExpiration counts calendar days from today in New York (0 on the day).';
     const anyNull = entries.some((e) => e.expectedMove === null);
     const anyMove = entries.some((e) => e.expectedMove !== null);
     g.expectedMove = 'expectedMove is the at-the-money straddle: the call and put midpoints at the strike nearest spot that '
@@ -1186,41 +978,33 @@ function dealerGuide(
       + 'series included; that date\'s expectedMove is the primary root\'s (the most open interest over the date), named in root.';
   }
   g.strikeCounts = 'window.strikesUsed counts the strike rows the broker returned, one per strike per expiration (per root '
-    + (v2 === null
-      ? 'on a multi-root date); coverage.strikes counts those with at least one leg not known to have zero open interest '
-        + '(the rows in the totals); strikes.total counts the distinct strikes among them (what rows are chosen from). A null '
-      : 'on a multi-root date); levels.coverage.strikes counts those with at least one leg not known to have zero open '
-        + 'interest (the rows in methodology 1\'s totals); strikes.total counts the distinct strikes with such a leg in the '
-        + 'methodology-2 book (what rows are chosen from). A null ')
+    + 'on a multi-root date); levels.coverage.strikes counts those with at least one leg not known to have zero open '
+    + 'interest (the rows the levels are computed from); strikes.total counts the distinct strikes with such a leg in the '
+    + 'book (what rows are chosen from). A null '
     + 'count was not reported.';
   if (shaped.window.expirationSelection !== 'requested') {
     g.windowRoll = 'In the default window, from 4:15 PM New York on an expiration day (when no expiring series trades: some '
       + 'ETF options, SPY\'s included, until 4:15; stock options at 4:00 in regular hours, 4:15 for a Cboe curb-session '
       + 'class; PM-settled index options at 4:00) that day\'s expiration is left out, so after the close the window is the '
       + 'next session\'s book; early closes are not known (it stays until 4:15), it is kept if the broker lists nothing else, '
-      + (v2 === null
-        ? 'and naming it with expiration shows the book as it closed.'
-        : 'and naming it with expiration shows methodology 1\'s levels as it closed, while the methodology-2 book holds none '
-          + 'of its legs once its session has closed (exposureScope).');
+      + 'and naming it with expiration shows the levels as it closed, while the book holds none '
+      + 'of its legs once its session has closed (exposureScope).';
   }
   g.windowMoves = 'The window moves with the broker\'s list and the clock (a listing expires, reaches 4:15 PM, or a nearer one '
     + 'is added), so two answers across such a change cover different books; the live figure can differ in sign from the '
-    + '0-60 day figure on file (a different window on a different session).';
+    + 'stored end-of-day book (a different scope on a different session).';
   g.clock = 'Time to expiry is measured from the wall clock when the chain rows are built, moments before asOf; outside '
     + 'trading hours the quotes are the broker\'s last, so the repriced flip and the time-sensitive totals drift a little '
     + 'between calls with no new quotes. The broker\'s Greeks and IVs can be a snapshot older than asOf (the fetch time) '
     + 'and nothing here dates them; a post-close refresh can move levels and totals at an unchanged spot, and the answer '
     + 'does not say whether a change is a refresh or the market. Between refreshes only spot and the clock move the totals '
-    + (v2 === null
-      ? '(r, q, open interest and the summed legs unchanged): per-strike gamma scales with spot squared exactly, netGex to '
-        + 'its rounding.'
-      // the book's legs change with the clock: an expiration leaves it at its session's close
-      : '(r, q and open interest unchanged), and the clock also takes an expiration\'s legs out of the book at its session\'s '
-        + 'close, so gex can fall at an unchanged spot; between such changes per-strike gamma scales with spot squared '
-        + 'exactly, gex to its rounding.');
+    // the book's legs change with the clock: an expiration leaves it at its session's close
+    + '(r, q and open interest unchanged), and the clock also takes an expiration\'s legs out of the book at its session\'s '
+    + 'close, so gex can fall at an unchanged spot; between such changes per-strike gamma scales with spot squared '
+    + 'exactly, gex to its rounding.';
   if (provider === 'tradier' || provider === null) {
     g.tradierGreeks = (provider === null ? 'If the broker is Tradier, it refreshes its Greeks about hourly' : 'Tradier refreshes its Greeks about hourly')
-      + `; the engine computes vanna, ${v2 === null ? 'charm' : 'charmFlow'} and vomma from IV and time to expiry, so those totals can change with spot `
+      + '; the engine computes vanna, charmFlow and vomma from IV and time to expiry, so those totals can change with spot '
       + 'and the clock between refreshes.';
   }
   g.cache = 'The short cache is per proxy instance and per account and broker, so a quick repeat can also be computed '
@@ -1231,51 +1015,20 @@ function dealerGuide(
       + 'they may be delayed about 15 minutes with nothing in the data saying so, so read moomoo option prices on such an '
       + 'account as possibly delayed.';
   }
-  // The close is named as the engine's for the date, with only the regular day's time:
-  // the proxy's early-close clock and this server deploy apart, so no line states a date rule the deployed
-  // proxy may not share.
   const sameDay = entries.some((e) => e.daysToExpiration === 0 || e.daysToExpiration === null)
     || (entries.length === 0 && shaped.window.expirations.length > 0);
-  if (sameDay) {
-    // An evaluation found the 4:15 window and the charm possibilities read as a same-day reading: the possibilities
-    // follow "not a reading of this answer". An evaluation found the legs' exit, leading, displacing the swing: the swing
-    // rule leads. An evaluation found the lead repeated beside "steady dealer buying into the close": the baseline had
-    // drawn its conclusion from an example no longer in the tool description, so the guide states the conclusion.
-    g.sameDay = v2 !== null ? SAME_DAY_V2 : 'On same-day legs, vanna, charm and vomma change sharply with small spot moves and time to expiry: '
-      + 'one netCharm reading is not a steady rate into the close. A same-day '
-      + 'expiration\'s legs leave vanna, charm and vomma one minute before the '
-      + 'engine\'s close for that date (4:00 PM New York on a regular day) and stay in gamma, delta and vega; the expiration '
-      + 'itself stays in the default window until 4:15 PM New York, so from then until 4:15 those three totals neither '
-      + 'include nor move with its legs. netCharm is not split by expiration; over several expirations this answer '
-      + 'does not show its same-day share; as general possibilities, not a reading of this answer: charm near the money can be the '
-      + 'largest term in the book, a same-day leg\'s vanna changes sign near its strike, and on an expiration afternoon '
-      + 'netCharm can be mostly the same-day legs and the clock. The flip sweep reprices each leg at its '
-      + 'time to expiry floored at one minute, so same-day legs\' repriced gamma narrows onto their strikes until one '
-      + 'minute before that close and holds that shape after it (4:15 PM is the default-window cutoff, not a '
-      + 'repricing boundary; named expirations and those with no later listing are kept): the flip moves with the clock.';
-  }
+  if (sameDay) g.sameDay = SAME_DAY;
   if (shaped.window.expirationSelection === 'requested' && entries.some((e) => e.daysToExpiration === 0 || e.daysToExpiration === null)) {
-    g.sameDayNamed = v2 === null
-      ? 'Named after the close, an expiration\'s expired legs are inside the totals and levels; window.expirations '
-        + 'beside asOf is the only sign of it.'
-      : 'Named after its session\'s close, an expiration\'s legs are out of the methodology-2 book (exposureScope) but '
-        + 'inside methodology 1\'s levels.';
+    g.sameDayNamed = 'Named after its session\'s close, an expiration\'s legs are out of the book (exposureScope) but '
+      + 'inside the levels.';
   }
-  if (v2 !== null) {
-    // methodology 2's numbers: their own shortfall (exposures.coverage lists only what is not complete)
-    if (v2.exposures !== null && v2.exposures.coverage !== undefined) {
-      g.legEligibility = 'A leg counts toward vanna, charmFlow and vomma only while its broker IV is above 1% and at most '
-        + '500% and more than a minute remains before its session\'s close, and toward gex, putMinusCallDeltaBalance and '
-        + 'vegaExposure only while the broker publishes that Greek; a leg of unknown size counts toward none. So a partial '
-        + 'number\'s included count moves, and two partial numbers minutes apart can differ by which legs were summed, which '
-        + 'the answer does not name.';
-    }
-  } else if (['gamma', 'delta', 'vega', 'vanna', 'charm', 'vomma'].some((k) => cov[k].status === 'partial' || cov[k].status === 'unmeasured')) {
-    g.legEligibility = 'A leg counts toward vanna, charm and vomma only while its broker IV is above 1% and at most 500% and '
-      + 'more than a minute remains before the engine\'s close for its expiration day (4:00 PM New York on a regular '
-      + 'day), and toward gamma, delta and vega only '
-      + 'while the broker publishes that Greek; so a partial total\'s included count moves, and two partial totals minutes '
-      + 'apart can differ by which legs were summed, which the answer does not name.';
+  // The book's numbers' own shortfall (exposures.coverage lists only what is not complete)
+  if (f.exposures !== null && f.exposures.coverage !== undefined) {
+    g.legEligibility = 'A leg counts toward vanna, charmFlow and vomma only while its broker IV is above 1% and at most '
+      + '500% and more than a minute remains before its session\'s close, and toward gex, putMinusCallDeltaBalance and '
+      + 'vegaExposure only while the broker publishes that Greek; a leg of unknown size counts toward none. So a partial '
+      + 'number\'s included count moves, and two partial numbers minutes apart can differ by which legs were summed, which '
+      + 'the answer does not name.';
   }
   const resolved = shaped.resolved !== null && typeof shaped.resolved === 'object' ? shaped.resolved : null;
   g.inputs = resolved === null
@@ -1311,4 +1064,3 @@ function dealerGuide(
   }
   return g;
 }
-

@@ -1,6 +1,15 @@
 import { displayNameModelMap, modelDisplayName, modelDisplayNames } from '../modelLabels.js';
 import { jsonUtf8ByteLength } from '../helpers.js';
 import { COMPUTE_GREEK_TIME_SCOPE, EXPOSURE_SWEEP_CHARM_CONVENTION, statedTimeConvention } from './timeConvention.js';
+import {
+  ASSUMED_DEALER_BOOK,
+  BOOK_SWEEP_REPORTED_METRICS,
+  EARLIER_DEALER_HEDGING,
+  bookSweepCharmStatement,
+  exposureSweepViolation,
+  summaryOnlySweepPresenceOk,
+  sweepCalculationOf,
+} from './exposureBookSweep.js';
 
 type RawComputeRunRecord = {
   [key: string]: unknown;
@@ -27,6 +36,8 @@ const MAX_DEFAULT_ERRORS = 5;
 const MAX_DEFAULT_NOTICES = 5;
 const MAX_DEFAULT_CALIBRATION_OUTCOMES = 20;
 const MAX_BUDGET_CALIBRATION_OUTCOMES = 10;
+/** The compact sweep entries the single-run floor keeps before its fit trims further */
+const MAX_BUDGET_FLOOR_SWEEP_ENTRIES = 20;
 const MAX_ERROR_MESSAGE_CHARS = 1_000;
 const MAX_ERROR_MODEL_CHARS = 128;
 const MAX_ERROR_CODE_CHARS = 128;
@@ -1425,47 +1436,57 @@ function hasCurrentExecutionConfigShape(value: unknown): boolean {
     && isNonNegativeSafeInteger(ownField(config, 'randomSeed'));
 }
 
-function hasCurrentExposureSweepShape(value: unknown, underlyings: unknown): boolean {
+/** One earlier dealer-hedging sweep entry of a projection that kept its strike detail (every metric finite) */
+function isCurrentEarlierExposureSweepEntry(candidateValue: unknown, authoritativeUnderlyings: ReadonlySet<unknown>): boolean {
+  const candidate = getObject(candidateValue);
+  const keyLevels = getOwnObjectField(candidate, 'keyLevels');
+  const aggregateByStrike = ownField(candidate, 'aggregateByStrike');
+  const strikeCount = ownField(candidate, 'strikeCount');
+  const underlying = ownField(candidate, 'underlying');
+  return !(!candidate
+    || !hasCanonicalUnderlying(underlying)
+    || !authoritativeUnderlyings.has(underlying)
+    || !isNonNegativeSafeInteger(strikeCount)
+    || !isFiniteNumber(ownField(candidate, 'spot'))
+    || !isFiniteNumber(ownField(candidate, 'timestamp'))
+    || !keyLevels
+    || !['positive-gamma', 'negative-gamma', 'unknown']
+      .includes(ownField(keyLevels, 'regime') as string)
+    || !['callWall', 'putWall', 'gammaFlip', 'gammaTilt'].every(key => (
+      hasRequiredNullableShape(
+        keyLevels,
+        key,
+        level => level === null || isFiniteNumber(level),
+      )
+    ))
+    || !isDenseArray(aggregateByStrike)
+    || !aggregateByStrike.every((strikeValue) => {
+      const strike = getObject(strikeValue);
+      return strike != null
+        && CURRENT_EXPOSURE_STRIKE_FIELDS.every(field => (
+          hasOwn(strike, field) && isFiniteNumber(ownField(strike, field))
+        ));
+    })
+    || strikeCount < aggregateByStrike.length
+    || typeof ownField(candidate, 'aggregateByStrikeTruncated') !== 'boolean'
+    || ownField(candidate, 'aggregateByStrikeTruncated')
+      !== (strikeCount > aggregateByStrike.length));
+}
+
+/**
+ * A run's exposure sweep as its projection stage carries it: earlier dealer-hedging
+ * entries or assumed-dealer-book entries, never mixed (./exposureBookSweep.ts); a summary-only projection carries the
+ * sweep only for book entries, each without its strikes.
+ */
+function hasCurrentExposureSweepShape(value: unknown, underlyings: unknown, stage: 'projection' | 'summaryOnly'): boolean {
   if (!isDenseArray(value) || !isDenseArray(underlyings)) return false;
-  const authoritativeUnderlyings = new Set(underlyings);
-  return value.every((candidateValue) => {
-    const candidate = getObject(candidateValue);
-    const keyLevels = getOwnObjectField(candidate, 'keyLevels');
-    const aggregateByStrike = ownField(candidate, 'aggregateByStrike');
-    const strikeCount = ownField(candidate, 'strikeCount');
-    const underlying = ownField(candidate, 'underlying');
-    if (!candidate
-      || !hasCanonicalUnderlying(underlying)
-      || !authoritativeUnderlyings.has(underlying)
-      || !isNonNegativeSafeInteger(strikeCount)
-      || !isFiniteNumber(ownField(candidate, 'spot'))
-      || !isFiniteNumber(ownField(candidate, 'timestamp'))
-      || !keyLevels
-      || !['positive-gamma', 'negative-gamma', 'unknown']
-        .includes(ownField(keyLevels, 'regime') as string)
-      || !['callWall', 'putWall', 'gammaFlip', 'gammaTilt'].every(key => (
-        hasRequiredNullableShape(
-          keyLevels,
-          key,
-          level => level === null || isFiniteNumber(level),
-        )
-      ))
-      || !isDenseArray(aggregateByStrike)
-      || !aggregateByStrike.every((strikeValue) => {
-        const strike = getObject(strikeValue);
-        return strike != null
-          && CURRENT_EXPOSURE_STRIKE_FIELDS.every(field => (
-            hasOwn(strike, field) && isFiniteNumber(ownField(strike, field))
-          ));
-      })
-      || strikeCount < aggregateByStrike.length
-      || typeof ownField(candidate, 'aggregateByStrikeTruncated') !== 'boolean'
-      || ownField(candidate, 'aggregateByStrikeTruncated')
-        !== (strikeCount > aggregateByStrike.length)) {
-      return false;
-    }
-    return true;
-  });
+  const authoritativeUnderlyings = new Set<string>(underlyings.filter((u): u is string => typeof u === 'string'));
+  return exposureSweepViolation(
+    value,
+    authoritativeUnderlyings,
+    stage,
+    entry => isCurrentEarlierExposureSweepEntry(entry, authoritativeUnderlyings),
+  ) === null;
 }
 
 function hasCurrentIncompleteAggregateEvidence(
@@ -1911,13 +1932,16 @@ export function isCurrentComputeRunRecord(value: unknown): value is RawComputeRu
     )
     || !hasCurrentProjectionShape(projectionObject, positions)
     || (ownField(projectionObject, 'compactionLevel') === 'summary-only'
-      ? hasOwn(data, 'exposureSweep')
+      ? (!summaryOnlySweepPresenceOk(data)
+        || (hasOwn(data, 'exposureSweep')
+          && !hasCurrentExposureSweepShape(exposureSweep, underlyings, 'summaryOnly')))
       : (!hasOwn(data, 'exposureSweep')
-        || !hasCurrentExposureSweepShape(exposureSweep, underlyings)))
+        || !hasCurrentExposureSweepShape(exposureSweep, underlyings, 'projection')))
     || (ownField(projectionObject, 'exposureTruncated') === false
       && isDenseArray(exposureSweep)
       && exposureSweep.some(entryValue => (
         ownField(getObject(entryValue), 'aggregateByStrikeTruncated') === true
+        || ownField(getObject(entryValue), 'strikesTruncated') === true
       )))
     || ownField(summary, 'totalPositions') !== ownField(projectionObject, 'originalPositionCount')
     || !hasCurrentTerminalRunSemantics(status, scope, data, summary)) {
@@ -2830,7 +2854,9 @@ function sanitizeComputeRunsWireObject(
 
 /**
  * States each raw run's time convention in place (the full response): an untagged run reads legacy. The
- * statement covers the model Greeks; the exposure sweep's strike charm (data.exposureSweep) states its own.
+ * statement covers the model Greeks; the exposure sweep states its own calculation and charm (Greek exposure methodology v2
+ * ): an earlier dealer-hedging sweep the run's exposureSweepCharmConvention, an assumed-dealer-book sweep each
+ * entry's charmConvention (its charm basis may differ by underlying). A run with no sweep entry states neither.
  */
 export function stateComputeRunTimeConventions(response: unknown): void {
   const rows = response && typeof response === 'object' && Array.isArray((response as { data?: unknown }).data)
@@ -2842,9 +2868,22 @@ export function stateComputeRunTimeConventions(response: unknown): void {
     if (summary && typeof summary === 'object' && !Array.isArray(summary)) {
       (summary as Record<string, unknown>).greekTimeConvention = statedTimeConvention(summary as Record<string, unknown>);
       (summary as Record<string, unknown>).greekTimeScope = COMPUTE_GREEK_TIME_SCOPE;
-      (summary as Record<string, unknown>).exposureSweepCharmConvention = EXPOSURE_SWEEP_CHARM_CONVENTION;
-      // the sweep is the web's dealer-hedging computation: methodology 1, whatever the platform default
-      (summary as Record<string, unknown>).exposureSweepMethodology = 1;
+      const sweep = data && typeof data === 'object' && Array.isArray((data as { exposureSweep?: unknown }).exposureSweep)
+        ? (data as { exposureSweep: unknown[] }).exposureSweep
+        : [];
+      const calculation = sweepCalculationOf(sweep);
+      if (calculation === EARLIER_DEALER_HEDGING) {
+        (summary as Record<string, unknown>).exposureCalculation = EARLIER_DEALER_HEDGING;
+        (summary as Record<string, unknown>).exposureSweepCharmConvention = EXPOSURE_SWEEP_CHARM_CONVENTION;
+      } else if (calculation === ASSUMED_DEALER_BOOK) {
+        (summary as Record<string, unknown>).exposureCalculation = ASSUMED_DEALER_BOOK;
+        for (const entry of sweep) {
+          if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+            const record = entry as Record<string, unknown>;
+            record.charmConvention = bookSweepCharmStatement(record.charmBasis === 'fixedReference' ? 'fixedReference' : 'cash');
+          }
+        }
+      }
     }
   }
 }
@@ -3162,19 +3201,52 @@ function shapePositionHighlight(
   };
 }
 
+/**
+ * The compact view of a run's sweep, each entry labeled by its own calculation: an
+ * earlier dealer-hedging entry with its spot; an assumed-dealer-book entry with its reference, roll, charm basis and
+ * statement, multipliers and the book's totals (each value with its coverage status, null where unavailable).
+ */
 function shapeExposureSweep(value: unknown): Array<Record<string, unknown>> | undefined {
   const sweep = getArray<Record<string, unknown>>(value)
     .filter((entry) => entry != null && typeof entry === 'object' && !Array.isArray(entry))
-    .map((entry) => ({
-      underlying: normalizeUnderlying(entry.underlying),
-      // the web's dealer-hedging sweep: methodology 1, whatever the platform default
-      methodology: 1,
-      spot: round(entry.spot, 4),
-      strikeCount: typeof entry.strikeCount === 'number' ? entry.strikeCount : undefined,
-      levels: shapeKeyLevels(entry.keyLevels),
-      timestamp: asTimestamp(entry.timestamp),
-      at: toIso(entry.timestamp),
-    }));
+    .map((entry) => {
+      const common = {
+        underlying: normalizeUnderlying(entry.underlying),
+        strikeCount: typeof entry.strikeCount === 'number' ? entry.strikeCount : undefined,
+        // a full row's sweep reaches the single-run floor already sanitized, its keyLevels renamed levels (review)
+        levels: shapeKeyLevels(entry.keyLevels ?? entry.levels),
+        timestamp: asTimestamp(entry.timestamp),
+        at: toIso(entry.timestamp),
+      };
+      if (entry.exposureCalculation !== ASSUMED_DEALER_BOOK) {
+        return { exposureCalculation: EARLIER_DEALER_HEDGING, ...common, spot: round(entry.spot, 4) };
+      }
+      const reference = getObject(entry.reference);
+      const roll = getObject(entry.roll);
+      const totals = getObject(entry.totals);
+      const charmBasis = entry.charmBasis === 'fixedReference' ? 'fixedReference' : 'cash';
+      return {
+        exposureCalculation: ASSUMED_DEALER_BOOK,
+        ...common,
+        // when the book's legs were scoped to their expirations, an instant of its own beside its timestamp
+        scopeAsOf: asTimestamp(entry.scopeAsOf),
+        scopeAt: toIso(entry.scopeAsOf),
+        reference: reference ? { kind: reference.kind, price: round(reference.price, 4) } : undefined,
+        roll: roll ? { status: roll.status, carry: roll.carry === null ? null : round(roll.carry, 6) } : undefined,
+        charmBasis,
+        charmConvention: bookSweepCharmStatement(charmBasis),
+        multipliers: Array.isArray(entry.multipliers) ? entry.multipliers : undefined,
+        totals: totals
+          ? Object.fromEntries(BOOK_SWEEP_REPORTED_METRICS.map((metric) => {
+            const reported = getObject(totals[metric]);
+            // an unavailable total has no value to read, though DEX stores the chain's balance whatever its coverage
+            return [metric, reported
+              ? { value: reported.value === null || reported.status === 'unavailable' ? null : round(reported.value, 2), status: reported.status, included: reported.included, total: reported.total }
+              : undefined];
+          }))
+          : undefined,
+      };
+    });
 
   return sweep.length > 0 ? sweep : undefined;
 }
@@ -3560,6 +3632,22 @@ function compactSingleRunForBudget(value: unknown): Record<string, unknown> {
         || (typeof fieldValue === 'number' && Number.isFinite(fieldValue))
       )),
   );
+  // The sweep survives the floor as its compact entries, without strike rows: each labeled by its
+  // calculation, a book entry with its reference, totals and coverage, and the run's statement as its source made it.
+  // A summary-mode record's sweep is already compact; a full row's is shaped here.
+  if (runSummary.exposureCalculation === EARLIER_DEALER_HEDGING || runSummary.exposureCalculation === ASSUMED_DEALER_BOOK) {
+    compactSummary.exposureCalculation = runSummary.exposureCalculation;
+  }
+  if (runSummary.exposureSweepCharmConvention === EXPOSURE_SWEEP_CHARM_CONVENTION) {
+    compactSummary.exposureSweepCharmConvention = EXPOSURE_SWEEP_CHARM_CONVENTION;
+  }
+  const compactSweep = nested == null
+    ? getArray<unknown>(run.exposureSweep)
+    : shapeExposureSweep(nested.exposureSweep) ?? [];
+  const exposureSweep = compactSweep.length > 0 ? compactSweep.slice(0, MAX_BUDGET_FLOOR_SWEEP_ENTRIES) : undefined;
+  const exposureSweepNotShown = compactSweep.length > MAX_BUDGET_FLOOR_SWEEP_ENTRIES
+    ? compactSweep.length - MAX_BUDGET_FLOOR_SWEEP_ENTRIES
+    : undefined;
   const boundedField = (fieldValue: unknown, maxChars: number) => boundString(fieldValue, maxChars).value;
   const completedAt = run.completedAt !== undefined ? run.completedAt : runSummary.completedAt;
   const shapedProjection = shapeProjectionForBudget(run);
@@ -3639,6 +3727,8 @@ function compactSingleRunForBudget(value: unknown): Record<string, unknown> {
     ...noticeFields,
     ...calibrationOutcomeFields,
     projection,
+    exposureSweep,
+    exposureSweepNotShown,
   }).filter(([, fieldValue]) => fieldValue !== undefined));
 }
 
@@ -3745,6 +3835,13 @@ function fitSingleRunBudgetFloor(response: Record<string, unknown>): void {
   trimBudgetFloorArray(run, 'aggregateExclusions', 'aggregateExclusionsNotShown', 0);
   trimBudgetFloorArray(run, 'modelExclusions', 'modelExclusionsNotShown', 0);
   trimBudgetFloorArray(run, 'notices', 'noticesNotShown', 0);
+  if (jsonUtf8ByteLength(response) <= COMPUTE_RUNS_SAFE_SIZE_BUDGET) return;
+
+  // Last, the sweep's compact entries: fewer and fewer, each cut counted, none at the end
+  for (const limit of [10, 5, 2, 1, 0]) {
+    trimBudgetFloorArray(run, 'exposureSweep', 'exposureSweepNotShown', limit);
+    if (jsonUtf8ByteLength(response) <= COMPUTE_RUNS_SAFE_SIZE_BUDGET) return;
+  }
 }
 
 function resetToSingleRunBudgetFloor(

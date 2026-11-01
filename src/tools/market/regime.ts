@@ -14,15 +14,10 @@ import {
 } from './marketIntelShaping.js';
 import { shapeCotMarket, shapeCotSymbol } from './cotShaping.js';
 import {
-  DEFAULT_UNREADABLE,
-  METHODOLOGY_2_NOTE,
+  BOOK_NOTE,
   mcpExposuresV2,
-  methodologyInput,
-  methodologyLabel,
   hoistCommonFields,
   readStoredBlock,
-  resolveMethodology,
-  type ResolvedMethodology,
   type StoredBlock,
 } from '../exposureMethodology.js';
 
@@ -85,10 +80,10 @@ const INTRADAY_SCAN_ORDER = 'newest date first; within a date, by scan time asce
 const REGIME_DESCRIPTION = 'Get regime data at one of six scopes. '
   + 'Pick the scope that fits the question: market, symbol, intraday, volatility, sectors or cot. '
   + 'scope="market": the MARKET COMPOSITE stress regime, an aggregate of SPY, QQQ, IWM and DIA (not per-symbol): stress score, a Calm-to-Crisis label, confidence, drivers and feature z-scores, the latest by default or one `date`; without `date`, the composite\'s own newest intraday scan is preferred when its market date is the same as or later than the daily row\'s (`scanSource` says which), and a symbol\'s scans of the current session are scope="intraday". '
-  + 'scope="symbol": one symbol\'s daily regime plus its Greek exposures (net gamma, delta, vega, vanna, charm and vomma; call wall, put wall, gamma flip, gamma magnet, top gamma strikes); requires `symbol`; `days` returns the newest stored sessions, 1 to 30, default 1 = the latest. '
-  + 'For a symbol\'s CURRENT exposures use this scope, not get_options_analytics_history (a daily history over all expirations). '
-  + 'The dedicated positioning tools are get_dealer_positioning (end of day, 0-60 day window) and get_live_dealer_positioning (live); this scan\'s levels are its own computation and can differ from theirs. '
-  + 'The market, symbol and intraday scopes\' exposures follow `methodology`: 1 is the figures named above; 2 is the assumed dealer book\'s GEX, delta balance, vega exposure, vanna, charm flow and vomma, the walls, flip, magnet and top strikes staying methodology 1\'s, labeled. '
+  + 'scope="symbol": one symbol\'s daily regime plus the assumed dealer book\'s exposures and the gamma-derived levels (call wall, put wall, gamma flip, gamma magnet, top gamma strikes); requires `symbol`; `days` returns the newest stored sessions, 1 to 30, default 1 = the latest. '
+  + 'For a symbol\'s CURRENT exposures use this scope, not get_options_analytics_history (a daily history). '
+  + 'The dedicated positioning tools are get_dealer_positioning (end of day, its levels over 0-60 days) and get_live_dealer_positioning (live); this scan\'s levels are its own computation and can differ from theirs. '
+  + 'On the market, symbol and intraday scopes `exposures` is the assumed dealer book and `levels` the gamma-derived levels, each with its own window. '
   + 'scope="intraday": a symbol\'s intraday regime scans, 5 a day (open, morning, midday, afternoon, pre-close), each with stress score, label and compact exposures; requires `symbol`; `days` is a calendar window back from the current UTC date (default 5, max 90) or `date` one session; `interval` filters by scan interval across the window; `migration` adds each level\'s move since the previous scan. '
   + 'scope="volatility": the VIX term structure at the latest close (VIX1D, VIX9D, VIX, VIX3M, VIX6M and VVIX), its shape (contango, backwardation or mixed) and ratios. '
   + 'scope="sectors": each sector\'s or industry\'s (`kind`) P/E and average daily price change on the NYSE, NASDAQ and AMEX for one day; `group` adds that group\'s daily history over `days`. '
@@ -122,61 +117,35 @@ function hoistModelCoverage(entry: any): void {
   }
 }
 
-// One `exposures` object carries two books: the levels are over the 0-60
-// day window, the totals and topStrikes over the whole input (KBE 09-17:
-// abs gamma 70 from the window beside topStrikes[0] at 59 from the book).
-const EXPOSURES_WINDOW_CLAUSE = 'callWall, putWall, gammaFlip and gammaMagnet are over the 0-60 day window, and so is regime except with fewer than two gamma-bearing strikes there, when it is the sign of netGamma; ';
-const EXPOSURES_NOTE = EXPOSURES_WINDOW_CLAUSE + 'netGamma, the other net totals and topStrikes are over the whole exposure input';
-// The include_symbols rows hoist the totals and the levels only, so their
-// note names no topStrikes.
-const SYMBOLS_EXPOSURES_NOTE = EXPOSURES_WINDOW_CLAUSE + 'netGamma and the other net totals are over the whole exposure input';
-
-// The clauses both methodologies' exposure notes share: one text, so a correction reaches both.
+// The clauses of the exposures note.
 const MAGNET_CLAUSE = 'gammaMagnet is the strike with the largest absolute net gamma; ';
 const WALLS_CLAUSE = 'callWall is the strike with the largest positive call gamma and putWall the strike with the most negative put gamma; ties go to the lower strike, a side with no such strike leaves that one null, and nothing orders them, so putWall can sit above callWall. ';
 const NULL_FLIP_CLAUSE = 'A null gammaFlip means the producer\'s coarse-grid sweep within 20% of spot found no zero crossing, or its profile was zero at every sampled price, or no open interest sat within its window, or the stored spot was not a positive number: it is not a level of zero. ';
 const regimeClause = (notTheSignOf: string): string => `regime is the sign of the 0-60 day net gamma interpolated at spot between the two strikes that bracket it (the nearest strike's gamma outside the strike range), not the sign of ${notTheSignOf} and not which side of gammaFlip spot sits on; it can disagree with both. `;
-const DAILY_ROWS_CLAUSE = 'every stored row for the daily scan.';
 const dailyInputsClause = (what: string): string => ` The daily scan takes its own rate and dividend inputs (a tenor-weighted FRED rate and an estimated yield, against the snapshot's median rate and yield that get_dealer_positioning uses), so its ${what} differ from get_dealer_positioning's for the same session.`;
 const INTRADAY_NORMALIZER_CLAUSE = 'for an intraday scan only the rows its normalizer keeps from the broker chain (no same-day expiration, no leg with a zero bid, no Greeks or no mid implied volatility, no strike without a usable delta)';
 const FETCH_GAP_CLAUSE = ', and an expiration whose chain fetch failed is absent altogether.';
 const intradayOwnClause = (what: string): string => ` An intraday scan is its own broker-chain computation, so its ${what} can differ from the daily scan's and get_dealer_positioning's.`;
 
-// the exposures note EXTENDED on every shape that carries exposures, its old clauses first.
+// The exposures note: the levels keep their own definitions and windows - the walls, flip,
+// magnet and regime over 0-60 days, topStrikes over the levels' whole input - and `exposures` covers the book block's
+// scope. The two share the chain, spot and rates, not their rows: the book has its own expiry scope (the
+// worker's daily book drops the legs expiring on or before the session, which the levels keep; its intraday book drops
+// an expiration already past its close when the scan read it).
 function exposuresNote(kind: 'symbol' | 'intraday' | 'breakdown' | 'composite'): string {
   const daily = kind !== 'intraday';
-  return (kind === 'symbol' || kind === 'intraday' ? EXPOSURES_NOTE : SYMBOLS_EXPOSURES_NOTE) + '. '
-    + MAGNET_CLAUSE
-    + (kind === 'symbol' ? 'topStrikes are the strikes with the largest absolute net gamma, the first 10, strike and netGamma only. '
-      : kind === 'intraday' ? 'topStrikes are the strikes with the largest absolute net gamma, the first 5 on an intraday scan, strike and netGamma only. '
-        : kind === 'breakdown' ? 'the breakdown\'s rows carry no topStrikes. ' : 'the composite\'s exposures carry no topStrikes. ')
-    + WALLS_CLAUSE
-    + NULL_FLIP_CLAUSE
-    + regimeClause('netGamma')
-    + (daily
-      ? 'The totals are the whole exposure input with no 60-day cutoff: ' + DAILY_ROWS_CLAUSE + dailyInputsClause('gammaFlip and per-strike values')
-      : 'The totals are the whole exposure input with no 60-day cutoff: ' + INTRADAY_NORMALIZER_CLAUSE + FETCH_GAP_CLAUSE + intradayOwnClause('levels'));
-}
-
-// The note of a methodology-2 answer: the levels keep methodology 1's definitions and their own windows -
-// the walls, flip, magnet and regime over 0-60 days, topStrikes over methodology 1's whole input - and `exposures`
-// covers the v2 block's scope. The two blocks share the chain, spot and rates, not their rows: each methodology has
-// its own expiry scope (the worker's daily v2 drops the legs expiring on or before the session, which v1
-// keeps; its intraday v2 drops an expiration already past its close when the scan read it).
-function exposuresNoteV2(kind: 'symbol' | 'intraday' | 'breakdown' | 'composite'): string {
-  const daily = kind !== 'intraday';
-  return '`levels` are methodology 1\'s gamma-derived levels, labeled so (none is derived from the methodology-2 book): '
-    + 'callWall, putWall, gammaFlip and gammaMagnet are over the 0-60 day window, and so is regime except with fewer than two gamma-bearing strikes there, when it is the sign of methodology 1\'s whole-input net gamma (not sent here); '
-    + (kind === 'symbol' ? 'topStrikes are methodology 1\'s strikes with the largest absolute net gamma over its whole input, the first 10, strike and netGamma only. '
-      : kind === 'intraday' ? 'topStrikes are methodology 1\'s strikes with the largest absolute net gamma over its whole input, the first 5 on an intraday scan, strike and netGamma only. '
+  return '`levels` are the gamma-derived levels (none is derived from the book): '
+    + 'callWall, putWall, gammaFlip and gammaMagnet are over the 0-60 day window, and so is regime except with fewer than two gamma-bearing strikes there, when it is the sign of the levels\' whole-input net gamma (not sent); '
+    + (kind === 'symbol' ? 'topStrikes are the levels\' strikes with the largest absolute net gamma over their whole input, the first 10, strike and netGamma only. '
+      : kind === 'intraday' ? 'topStrikes are the levels\' strikes with the largest absolute net gamma over their whole input, the first 5 on an intraday scan, strike and netGamma only. '
         : kind === 'breakdown' ? 'the breakdown\'s rows carry no topStrikes. ' : 'the composite\'s levels carry no topStrikes. ')
     + MAGNET_CLAUSE
     + WALLS_CLAUSE
     + NULL_FLIP_CLAUSE
     + regimeClause('a total')
-    + '`exposures` (methodology 2) cover the block\'s `scope`, with no 60-day cutoff, from the same chain, spot, rate and dividend inputs as the levels but under methodology 2\'s own expiry scope: '
+    + '`exposures` cover the block\'s `scope`, with no 60-day cutoff, from the same chain, spot, rate and dividend inputs as the levels but under the book\'s own expiry scope: '
     + (daily
-      ? 'for the daily scan every stored row whose expiration is after the session, while methodology 1\'s levels and topStrikes keep the contracts expiring that session (a block stored before the expiry rule was recorded keeps them too, as its `scope` says).' + dailyInputsClause('values')
+      ? 'for the daily scan every stored row whose expiration is after the session, while the levels and topStrikes keep the contracts expiring that session (a block stored before the expiry rule was recorded keeps them too, as its `scope` says).' + dailyInputsClause('values')
       : INTRADAY_NORMALIZER_CLAUSE + ', less an expiration already past its close when the scan read it' + FETCH_GAP_CLAUSE + intradayOwnClause('values'));
 }
 
@@ -220,30 +189,13 @@ function hoistPriorLabel(entry: any): void {
   entry.priorLabelSource = PRIOR_LABEL_SOURCES[meta.prevLabelSource] ?? null;
 }
 
-// Greek exposure methodology v2:
-// a regime row stores two exposure blocks over the same chain, spot and rates - `_meta.gex` (methodology 1, the
-// worker's legacy engine: totals and levels) and `_meta.gexV2` (methodology 2's public block, totals only). One
-// methodology per answer: 1 sends today's `exposures`; 2 sends the v2 block's numbers in `exposures` and methodology
-// 1's gamma-derived levels in `levels`, labeled so; 'withheld' (no methodology named and the default never read)
-// sends neither and the classification stands; 'none' (nothing to label) is today's answer.
-type ExposureMode = 'v1' | 'v2' | 'withheld' | 'none';
+// A regime row stores two blocks over the same chain, spot and rates: `_meta.gex`, the
+// worker's levels engine, whose gamma-derived levels are sent in `levels` (its totals are not), and `_meta.gexV2`, the
+// book's public block, whose numbers are `exposures`. An answer none of whose entries stores either sends neither.
 type RowKind = 'daily' | 'intraday';
 
-function v1Exposures(gex: any, topStrikeLimit: number | null): Record<string, unknown> {
+function levelsOf(gex: any, topStrikeLimit: number | null): Record<string, unknown> {
   return {
-    spotPrice: gex.spotPrice,
-    netGamma: gex.netGamma, netDelta: gex.netDelta, netVega: gex.netVega,
-    netVanna: gex.netVanna, netCharm: gex.netCharm, netVomma: gex.netVomma,
-    callWall: gex.callWall, putWall: gex.putWall, gammaFlip: gex.gammaFlip,
-    gammaMagnet: gex.absGamma,
-    regime: gex.regime,
-    ...(topStrikeLimit !== null ? { topStrikes: compactTopStrikes(gex.topStrikes, topStrikeLimit) } : {}),
-  };
-}
-
-function v1Levels(gex: any, topStrikeLimit: number | null): Record<string, unknown> {
-  return {
-    methodology: 1,
     spotPrice: gex.spotPrice,
     callWall: gex.callWall, putWall: gex.putWall, gammaFlip: gex.gammaFlip,
     gammaMagnet: gex.absGamma,
@@ -279,23 +231,19 @@ function regimeScopeOf(kind: RowKind, block: StoredBlock): string | undefined {
   return parts.length > 0 ? parts.join('; ') : undefined;
 }
 
-// An entry's reason when its methodology-2 exposures are null (the words, once, in the guide's legend)
-const V2_UNAVAILABLE = { notComputed: 'not computed', v1Only: 'methodology 1 only', noneStored: 'none stored', unreadable: 'unreadable' } as const;
-const V2_UNAVAILABLE_LEGEND = 'An entry\'s exposuresUnavailable says why its methodology-2 `exposures` are null: '
-  + `"${V2_UNAVAILABLE.notComputed}" - no methodology-2 block was computed for the row; `
-  + `"${V2_UNAVAILABLE.v1Only}" - the row stores methodology-1 exposures only (methodology-2 blocks are stored from 2026-10-12, on daily rows and on the market tier's intraday scans): name methodology 1 for them; `
-  + `"${V2_UNAVAILABLE.noneStored}" - the row stores no exposures in either methodology; `
+// An entry's reason when its `exposures` are null (the words, once, in the guide's legend)
+const V2_UNAVAILABLE = { notComputed: 'not computed', beforeBook: 'stored before the book', noneStored: 'none stored', unreadable: 'unreadable' } as const;
+const V2_UNAVAILABLE_LEGEND = 'An entry\'s exposuresUnavailable says why its `exposures` are null: '
+  + `"${V2_UNAVAILABLE.notComputed}" - no book was computed for the row; `
+  + `"${V2_UNAVAILABLE.beforeBook}" - the row was stored before the book was (the book is stored from 2026-10-12, on daily rows and on the market tier's intraday scans); its \`levels\` stand; `
+  + `"${V2_UNAVAILABLE.noneStored}" - the row stores no exposures; `
   + `"${V2_UNAVAILABLE.unreadable}" - its stored block could not be read.`;
 
-/** One entry's exposures under the answer's methodology (the vector is stripped by the caller) */
-function attachExposures(entry: any, mode: ExposureMode, kind: RowKind, topStrikeLimit: number | null): void {
-  if (mode === 'withheld') return;
+/** One entry's book exposures and levels (the vector is stripped by the caller); nothing when the answer carries none */
+function attachExposures(entry: any, carries: boolean, kind: RowKind, topStrikeLimit: number | null): void {
+  if (!carries) return;
   const meta = entry?.vector?._meta;
   const gex = meta?.gex;
-  if (mode !== 'v2') {
-    if (gex) entry.exposures = v1Exposures(gex, topStrikeLimit);
-    return;
-  }
   if (meta && typeof meta === 'object' && Object.prototype.hasOwnProperty.call(meta, 'gexV2')) {
     // null: the worker withholds a symbol it cannot reference, or its computation failed - no cause is asserted
     const block = meta.gexV2 === null ? null : readStoredBlock(meta.gexV2);
@@ -309,9 +257,9 @@ function attachExposures(entry: any, mode: ExposureMode, kind: RowKind, topStrik
     }
   } else {
     entry.exposures = null;
-    entry.exposuresUnavailable = gex && typeof gex === 'object' ? V2_UNAVAILABLE.v1Only : V2_UNAVAILABLE.noneStored;
+    entry.exposuresUnavailable = gex && typeof gex === 'object' ? V2_UNAVAILABLE.beforeBook : V2_UNAVAILABLE.noneStored;
   }
-  if (gex && typeof gex === 'object') entry.levels = v1Levels(gex, topStrikeLimit);
+  if (gex && typeof gex === 'object') entry.levels = levelsOf(gex, topStrikeLimit);
 }
 
 /** The exposure fields every scan or history entry shares, sent once as `exposuresCommon` (the shared hoist) */
@@ -320,39 +268,29 @@ function hoistCommonExposureFields(entries: any[]): Record<string, unknown> {
   return common ? { exposuresCommon: common } : {};
 }
 
-/** Whether an entry stores any exposure block, so an answer naming no methodology needs the default for it */
+/** Whether an entry stores any exposure block: an answer none of whose entries does carries no exposures */
 function storesExposures(entry: any): boolean {
   const meta = entry?.vector?._meta;
   return !!meta && typeof meta === 'object' && (!!meta.gex || Object.prototype.hasOwnProperty.call(meta, 'gexV2'));
 }
 
-function modeOf(resolved: ResolvedMethodology | 'withheld' | null): ExposureMode {
-  if (resolved === null) return 'none';
-  if (resolved === 'withheld') return 'withheld';
-  return resolved.methodology === 2 ? 'v2' : 'v1';
+/** The answer-level book note, sent once when the answer carries exposures */
+function bookFields(carries: boolean): Record<string, unknown> {
+  return carries ? { bookNote: BOOK_NOTE } : {};
 }
 
-/** The answer-level fields of the mode: the label, and for methodology 2 its note; for 'withheld' why nothing was sent */
-function methodologyFields(resolved: ResolvedMethodology | 'withheld' | null): Record<string, unknown> {
-  if (resolved === null) return {};
-  if (resolved === 'withheld') return { exposuresWithheld: DEFAULT_UNREADABLE };
-  return { ...methodologyLabel(resolved), ...(resolved.methodology === 2 ? { methodologyNote: METHODOLOGY_2_NOTE } : {}) };
-}
-
-function hoistExposures(entry: any, mode: ExposureMode, kind: RowKind, topStrikeLimit = 10): any {
+function hoistExposures(entry: any, carries: boolean, kind: RowKind, topStrikeLimit = 10): any {
   hoistModelCoverage(entry);
-  attachExposures(entry, mode, kind, topStrikeLimit);
+  attachExposures(entry, carries, kind, topStrikeLimit);
   delete entry.vector;
   return entry;
 }
 
 const MIGRATION_LEVELS = ['gammaFlip', 'callWall', 'putWall', 'gammaMagnet'] as const;
-const MIGRATION_NOTE = 'Each scan\'s `migration` is its levels\' change since the previous scan that carried exposures on the same date (`basis` "previous-scan"), or, for the first such scan of a date, since the previous date\'s last scan with exposures (`basis` "previous-session-last-scan"; the oldest date in the payload has none and reads null). `change` is this scan minus that one; `changePctOfSpot` is the change over this scan\'s spot in percent for a level, and `changePct` the change over the earlier value for `netGamma`; `perHour` divides by the hours between the two scans\' scan start times (`scanTime` is the run\'s start, not the fetch, so the rate is approximate, and across a session gap it spans the night); `direction` is up, down or flat. A level that is null on either side (no gamma flip found, a side with no wall) gives a null entry, never zero, and a scan whose exposure compute failed has `migration` null and is not a basis for the next.';
-
-// Methodology 2's migration: the four levels come from `levels` (methodology 1, as under 1); the assumed
-// book's `gex` stands where netGamma does, and a scan with levels but no methodology-2 block is still the next one's
-// basis for the levels, its gex entry null.
-const MIGRATION_NOTE_V2 = 'Each scan\'s `migration` is its levels\' change since the previous scan that carried levels on the same date (`basis` "previous-scan"), or, for the first such scan of a date, since the previous date\'s last scan with levels (`basis` "previous-session-last-scan"; the oldest date in the payload has none and reads null). The four levels (gammaFlip, callWall, putWall, gammaMagnet) are methodology 1\'s, from `levels`; `gex` is the methodology-2 assumed book\'s, from `exposures`. `change` is this scan minus that one; `changePctOfSpot` is the change over this scan\'s spot in percent for a level, and `changePct` the change over the earlier value for `gex`; `perHour` divides by the hours between the two scans\' scan start times (`scanTime` is the run\'s start, not the fetch, so the rate is approximate, and across a session gap it spans the night); `direction` is up, down or flat. A value that is null on either side (no gamma flip found, a side with no wall, a scan with no methodology-2 exposures) gives a null entry, never zero, and a scan with no levels has `migration` null and is not a basis for the next.';
+// The migration: the four levels come from `levels`; the assumed book's `gex` stands where the levels'
+// net gamma once did, and a scan with levels but no book block is still the next one's basis for the levels, its gex
+// entry null.
+const MIGRATION_NOTE = 'Each scan\'s `migration` is its levels\' change since the previous scan that carried levels on the same date (`basis` "previous-scan"), or, for the first such scan of a date, since the previous date\'s last scan with levels (`basis` "previous-session-last-scan"; the oldest date in the payload has none and reads null). The four levels (gammaFlip, callWall, putWall, gammaMagnet) are from `levels`; `gex` is the assumed book\'s, from `exposures`. `change` is this scan minus that one; `changePctOfSpot` is the change over this scan\'s spot in percent for a level, and `changePct` the change over the earlier value for `gex`; `perHour` divides by the hours between the two scans\' scan start times (`scanTime` is the run\'s start, not the fetch, so the rate is approximate, and across a session gap it spans the night); `direction` is up, down or flat. A value that is null on either side (no gamma flip found, a side with no wall, a scan with no book exposures) gives a null entry, never zero, and a scan with no levels has `migration` null and is not a basis for the next.';
 
 const finite = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const round4 = (v: number): number => Number(v.toFixed(4));
@@ -382,10 +320,10 @@ function levelMigration(from: unknown, to: unknown, spot: number | null, hours: 
  * exposures on its date, the first of a date against the previous date's
  * last. Mutates the scans, adding `migration`.
  */
-function attachMigration(scans: any[], mode: 'v1' | 'v2' = 'v1'): void {
-  // under 1 the levels and netGamma sit in `exposures`; under 2 the levels in `levels` and the book's gex in `exposures`
-  const levelsOf = (scan: any) => (mode === 'v2' ? scan?.levels : scan?.exposures);
-  const gammaKey = mode === 'v2' ? 'gex' : 'netGamma';
+function attachMigration(scans: any[]): void {
+  // the levels sit in `levels` and the book's gex in `exposures`
+  const scanLevels = (scan: any) => scan?.levels;
+  const gammaKey = 'gex';
   const dates = [...new Set(scans.map((scan) => String(scan?.date ?? '')))];
   const byDate = new Map<string, any[]>(dates.map((d) => [d, scans.filter((scan) => String(scan?.date ?? '') === d)]));
   // Dates ascending, so a date's basis is the one before it in time.
@@ -396,7 +334,7 @@ function attachMigration(scans: any[], mode: 'v1' | 'v2' = 'v1'): void {
     let previous: any = lastOfPreviousDate;
     let basis: 'previous-session-last-scan' | 'previous-scan' = 'previous-session-last-scan';
     for (const scan of list) {
-      const levels = levelsOf(scan);
+      const levels = scanLevels(scan);
       if (!levels || finite(levels.spotPrice) === null) {
         scan.migration = null;
         continue;
@@ -410,7 +348,7 @@ function attachMigration(scans: any[], mode: 'v1' | 'v2' = 'v1'): void {
         const spot = finite(levels.spotPrice);
         const migration: Record<string, unknown> = { basis };
         for (const key of MIGRATION_LEVELS) {
-          migration[key] = levelMigration(levelsOf(previous)?.[key], levels[key], spot, hours, 'spot');
+          migration[key] = levelMigration(scanLevels(previous)?.[key], levels[key], spot, hours, 'spot');
         }
         migration[gammaKey] = levelMigration(previous.exposures?.[gammaKey], scan.exposures?.[gammaKey], spot, hours, 'from');
         scan.migration = migration;
@@ -467,21 +405,15 @@ export function register(server: McpServer, client: ProxyClient): void {
         group: z.string().min(1).max(120).optional().describe('For scope=sectors only: one sector or industry by name, any case (e.g. '
           + 'Technology, Semiconductors), returned with its daily history over `days` on each exchange the group is listed on.'),
         sector: z.enum(['equity-index', 'rates', 'fx', 'crypto', 'volatility', 'energy', 'metals', 'grains', 'livestock']).optional().describe('For scope=cot without a symbol only: keep one sector.'),
-        migration: z.boolean().optional().describe('For scope=intraday only: add each scan\'s `migration`, the change in its gamma flip, call wall, put wall, gamma magnet and net gamma since the previous scan with exposures (direction, change, percent of spot, per hour). '
+        migration: z.boolean().optional().describe('For scope=intraday only: add each scan\'s `migration`, the change in its gamma flip, call wall, put wall, gamma magnet and the assumed book\'s GEX since the previous scan with levels (direction, change, percent of spot, per hour). '
           + 'Default false.'),
-        methodology: methodologyInput('For scope=symbol, intraday and market (its exposures). '),
       },
       outputSchema: marketDataOutputSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
-    toolHandler(async ({ scope, symbol, date, days, interval, include_symbols, full, migration, kind, exchange, group, sector, methodology }) => {
-      // The answer's methodology: read only when it carries exposures, after the read (the regime routes send
-      // both stored blocks either way); a call naming one never needs the default, and an unreadable default
-      // withholds the exposures, never the classification.
-      const methodologyFor = async (entries: any[]): Promise<ResolvedMethodology | 'withheld' | null> => {
-        if (methodology !== 1 && methodology !== 2 && !entries.some(storesExposures)) return null;
-        return (await resolveMethodology(client, methodology)) ?? 'withheld';
-      };
+    toolHandler(async ({ scope, symbol, date, days, interval, include_symbols, full, migration, kind, exchange, group, sector }) => {
+      // An answer carries exposures when one of its entries stores a block (the regime routes send both stored blocks)
+      const carriesExposures = (entries: any[]): boolean => entries.some(storesExposures);
       const withLegend = (guide: Record<string, string>, entries: any[]): Record<string, string> => (
         entries.some((entry) => entry && typeof entry === 'object' && typeof entry.exposuresUnavailable === 'string')
           ? { ...guide, exposuresUnavailable: V2_UNAVAILABLE_LEGEND } : guide);
@@ -532,11 +464,10 @@ export function register(server: McpServer, client: ProxyClient): void {
           ? [res.market, ...(include_symbols && res.symbols && typeof res.symbols === 'object'
             ? Object.values(res.symbols).flatMap((rows) => (Array.isArray(rows) ? rows : [])) : [])]
           : [];
-        const resolved = await methodologyFor(marketEntries);
-        const mode = modeOf(resolved);
-        // Hoist Greek exposure data from vector._meta.gex to top level for discoverability
+        const carries = carriesExposures(marketEntries);
+        // Hoist the stored exposure blocks from vector._meta to the top level for discoverability
         if (res && typeof res === 'object') {
-          if (res.market) attachExposures(res.market, mode, 'daily', null);
+          if (res.market) attachExposures(res.market, carries, 'daily', null);
           if (include_symbols && res.symbols && typeof res.symbols === 'object') {
             const TOP_N_PER_TIER = 8;
             const tierMeta: Record<string, { total: number; returned: number }> = {};
@@ -544,7 +475,7 @@ export function register(server: McpServer, client: ProxyClient): void {
               if (!Array.isArray(scopeRows)) continue;
               for (const row of scopeRows) {
                 hoistModelCoverage(row);
-                attachExposures(row, mode, 'daily', null);
+                attachExposures(row, carries, 'daily', null);
                 // Humanize per-symbol drivers + vector feature-key records so
                 // include_symbols=true raw payload doesn't leak backend identifiers.
                 humanizeRegimeEntry(row);
@@ -604,17 +535,15 @@ export function register(server: McpServer, client: ProxyClient): void {
         // 100+ KB blob ChatGPT cannot consume.
         // The note sits beside `market`, where the other scopes carry it.
         const partial = regimePartialFields(res);
-        // the note of the answer's methodology; none when its exposures were withheld
-        const marketNote = (kind: 'breakdown' | 'composite') => (mode === 'withheld' ? {}
-          : { _exposures_note: mode === 'v2' ? exposuresNoteV2(kind) : exposuresNote(kind) });
+        const marketNote = (kind: 'breakdown' | 'composite') => ({ _exposures_note: exposuresNote(kind) });
         const sentEntries = res && typeof res === 'object'
           ? [res.market, ...(res.symbols && typeof res.symbols === 'object' ? Object.values(res.symbols).flatMap((rows) => (Array.isArray(rows) ? rows : [])) : [])]
           : [];
-        if (include_symbols) return res && typeof res === 'object' ? { ...methodologyFields(resolved), ...(mode === 'v2' ? hoistCommonExposureFields(sentEntries) : {}), ...res, _stress_score_note: stressScoreNote('daily'), ...marketNote('breakdown'), ...partial, guide: withLegend(regimeGuide('market', { includeSymbols: true, symbolsSent: !!(res.symbols && typeof res.symbols === 'object'), symbolsUnreadable: Array.isArray(res.unavailable) && res.unavailable.includes('symbols') }), sentEntries) } : res;
+        if (include_symbols) return res && typeof res === 'object' ? { ...bookFields(carries), ...(carries ? hoistCommonExposureFields(sentEntries) : {}), ...res, _stress_score_note: stressScoreNote('daily'), ...marketNote('breakdown'), ...partial, guide: withLegend(regimeGuide('market', { includeSymbols: true, symbolsSent: !!(res.symbols && typeof res.symbols === 'object'), symbolsUnreadable: Array.isArray(res.unavailable) && res.unavailable.includes('symbols') }), sentEntries) } : res;
         if (res && typeof res === 'object' && 'market' in res) {
           // The composite's exposures, when hoisted, get their note too.
           const hoisted = res.market && typeof res.market === 'object' && (res.market as any).exposures !== undefined;
-          return { ...methodologyFields(resolved), ...(shapeMarketRegimeResponse({ market: res.market, _stress_score_note: stressScoreNote('daily') }) as Record<string, unknown>), ...(hoisted ? marketNote('composite') : {}), ...partial, guide: withLegend(regimeGuide('market', {}), sentEntries) };
+          return { ...bookFields(carries), ...(shapeMarketRegimeResponse({ market: res.market, _stress_score_note: stressScoreNote('daily') }) as Record<string, unknown>), ...(hoisted ? marketNote('composite') : {}), ...partial, guide: withLegend(regimeGuide('market', {}), sentEntries) };
         }
         return res;
       }
@@ -626,8 +555,7 @@ export function register(server: McpServer, client: ProxyClient): void {
         if (date) params.date = date;
         if (interval) params.interval = interval;
         const res = await client.get(`/regime/intraday/${encodeURIComponent(symbol)}`, params) as any;
-        const resolved = await methodologyFor(Array.isArray(res?.scans) ? res.scans : []);
-        const mode = modeOf(resolved);
+        const carries = carriesExposures(Array.isArray(res?.scans) ? res.scans : []);
         // Rename per-scan `scope` (symbol classification tier) to a prose key so it
         // doesn't collide with the top-level `scope` input parameter at the MCP boundary.
         // Also humanize per-scan driver feature names (snake_case → "Title Case") so
@@ -642,21 +570,20 @@ export function register(server: McpServer, client: ProxyClient): void {
               // Humanize drivers + vector feature-key records for the raw intraday payload.
               humanizeRegimeEntry(scan);
               hoistPriorLabel(scan);
-              hoistExposures(scan, mode, 'intraday', 5);
+              hoistExposures(scan, carries, 'intraday', 5);
             }
           }
-          if (mode === 'v2') Object.assign(res, hoistCommonExposureFields(res.scans));
+          if (carries) Object.assign(res, hoistCommonExposureFields(res.scans));
           res._scans_meta = { ...(res._scans_meta ?? {}), order: INTRADAY_SCAN_ORDER };
-          // withheld exposures leave no levels to migrate (exposuresWithheld says why)
-          if (migration && mode !== 'withheld') {
-            attachMigration(res.scans, mode === 'v2' ? 'v2' : 'v1');
-            res._migration_note = mode === 'v2' ? MIGRATION_NOTE_V2 : MIGRATION_NOTE;
+          if (migration) {
+            attachMigration(res.scans);
+            res._migration_note = MIGRATION_NOTE;
           }
         }
         if (res && typeof res === 'object') {
-          Object.assign(res, methodologyFields(resolved));
+          Object.assign(res, bookFields(carries));
           res._stress_score_note = stressScoreNote('intraday');
-          if (mode !== 'withheld') res._exposures_note = mode === 'v2' ? exposuresNoteV2('intraday') : exposuresNote('intraday');
+          res._exposures_note = exposuresNote('intraday');
           // Every intraday answer explains its scan clock; an empty window also explains the absence of scans.
           const empty = !Array.isArray(res.scans) || res.scans.length === 0;
           res._scans_meta = {
@@ -704,13 +631,11 @@ export function register(server: McpServer, client: ProxyClient): void {
         res.symbolTier = res.scope;
         delete res.scope;
       }
-      const resolved = await methodologyFor(res.history);
-      const mode = modeOf(resolved);
-      // the note of the answer's methodology; none when its exposures were withheld
-      const symbolNote = mode === 'withheld' ? {} : { _exposures_note: mode === 'v2' ? exposuresNoteV2('symbol') : exposuresNote('symbol') };
+      const carries = carriesExposures(res.history);
+      const symbolNote = { _exposures_note: exposuresNote('symbol') };
       // The one-day path below rebuilds its object, so it attaches its own
       // note and carries no history to order.
-      Object.assign(res, methodologyFields(resolved));
+      Object.assign(res, bookFields(carries));
       res._stress_score_note = stressScoreNote('daily');
       Object.assign(res, symbolNote);
       res._history_meta = { ...(res._history_meta ?? {}), order: 'oldest first' };
@@ -724,10 +649,10 @@ export function register(server: McpServer, client: ProxyClient): void {
 
       // full=true and the default hoist alike (full only keeps the one-day wrapper)
       for (const entry of res.history) {
-        hoistExposures(entry, mode, 'daily');
+        hoistExposures(entry, carries, 'daily');
       }
       // the one-day answer flattens its entry, so only a history of several keeps its shared fields once
-      if (mode === 'v2' && (symbolDays > 1 || full)) Object.assign(res, hoistCommonExposureFields(res.history));
+      if (carries && (symbolDays > 1 || full)) Object.assign(res, hoistCommonExposureFields(res.history));
       res.guide = withLegend(regimeGuide('symbol', {}), res.history);
 
       if (full) return { _skipSizeGuard: true, data: res };
@@ -737,7 +662,7 @@ export function register(server: McpServer, client: ProxyClient): void {
         return {
           symbol: res.symbol,
           symbolTier: res.symbolTier,
-          ...methodologyFields(resolved),
+          ...bookFields(carries),
           ...latest,
           _stress_score_note: stressScoreNote('daily'),
           ...symbolNote,

@@ -38,21 +38,33 @@ function normalizeGexLevelKeys(target: unknown): void {
   }
 }
 
-// Greek exposure methodology v2: a saved GEX record's methodology is the one the GEX page
-// saved it under (apps/web/src/services/db.ts GEXSnapshotRecord: absent = 1, the page's dealer-hedging record;
-// 2 carries savedBook, the assumed dealer share its totals stand at). Stated on every record; the default never applies.
-function stateSavedMethodology(data: unknown): void {
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+// A saved GEX record's calculation is the one the GEX page saved it under (Greek exposure methodology v2; apps/web/src/services/db.ts GEXSnapshotRecord): its internal field absent
+// or 1 is the page's earlier dealer-hedging record, 2 the assumed dealer book with savedBook, the share its totals stand
+// at. Read from the record's own field, never its date, and stated as exposureCalculation; the internal field is not sent.
+export const EARLIER_GEX_RECORD = 'earlierDealerHedging';
+export const BOOK_GEX_RECORD = 'assumedDealerBook';
+function stateSavedCalculation(data: unknown): string | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
   const obj = data as Record<string, unknown>;
-  if (obj.methodology === undefined) obj.methodology = 1;
+  const saved = obj.methodology;
+  delete obj.methodology;
+  const calculation = saved === undefined || saved === 1 ? EARLIER_GEX_RECORD : saved === 2 ? BOOK_GEX_RECORD : null;
+  if (calculation !== null) obj.exposureCalculation = calculation;
+  return calculation;
 }
 
-export const GEX_SNAPSHOT_METHODOLOGY = 'Each record\'s data.methodology is the exposure methodology the GEX page saved it under '
-  + '(1 for a record saved before the page recorded one: its legacy dealer-hedging totals). A methodology-2 record\'s totalGammaExposure '
-  + 'is the assumed dealer book\'s GEX - dealers long the calls and short the puts - at the share of open interest in '
-  + 'data.savedBook.p (the page\'s setting), so it scales with that share; its totalDeltaExposure is the put-minus-call delta balance, '
-  + 'the same at every share. Its walls, magnet and regime are the page\'s, their gamma coverage in data.gammaCoverage where saved. '
-  + 'A saved record keeps its methodology: the platform\'s default does not change it.';
+const GEX_BOOK_RECORD_NOTE = 'A record whose data.exposureCalculation is assumedDealerBook holds in totalGammaExposure the assumed dealer book\'s GEX '
+  + '- dealers long the calls and short the puts - at the share of open interest in data.savedBook.p (the page\'s setting), so it '
+  + 'scales with that share; its totalDeltaExposure is the put-minus-call delta balance, the same at every share. Its walls, magnet '
+  + 'and regime are the page\'s, their gamma coverage in data.gammaCoverage where saved.';
+const GEX_EARLIER_RECORD_NOTE = 'A record whose data.exposureCalculation is earlierDealerHedging was saved before the page moved to the '
+  + 'assumed dealer book (October 2026): its totals are in the earlier dealer-hedging convention and are not comparable with later records.';
+
+/** The note for the records sent: each calculation's sentence only where a record holds it */
+export function gexRecordsNote(calculations: ReadonlyArray<string | null>): string {
+  return [calculations.includes(BOOK_GEX_RECORD) ? GEX_BOOK_RECORD_NOTE : null, calculations.includes(EARLIER_GEX_RECORD) ? GEX_EARLIER_RECORD_NOTE : null,
+    'Each record keeps the calculation it was saved under.'].filter((part): part is string => part !== null).join(' ');
+}
 
 function readNumericKey(target: unknown, keys: string[]): number | null {
   if (!target || typeof target !== 'object' || Array.isArray(target)) return null;
@@ -190,16 +202,17 @@ export function register(server: McpServer, client: ProxyClient): void {
         // record root, defensively) before either default shaping OR full-mode
         // raw return, so absGamma reads gammaMagnet on every path.
         if (res && Array.isArray(res.data)) {
+          const calculations: Array<string | null> = [];
           for (const record of res.data) {
             stripSyncRecordMetadata(record);
             enrichGexComboDetails(record);
             normalizeGexLevelKeys(record);
             if (record && typeof record === 'object' && record.data && typeof record.data === 'object') {
               normalizeGexLevelKeys(record.data);
-              stateSavedMethodology(record.data);
+              calculations.push(stateSavedCalculation(record.data));
             }
           }
-          res.methodologyNote = GEX_SNAPSHOT_METHODOLOGY;
+          res.gexRecordsNote = gexRecordsNote(calculations);
         }
         if (full && res != null) {
           replaceDuplicatedDetailsInSnapshotRows(res);

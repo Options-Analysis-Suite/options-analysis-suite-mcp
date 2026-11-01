@@ -2023,16 +2023,159 @@ describe('get_compute_runs time convention', () => {
 });
 
 
-describe('a compute run\'s exposure sweep is methodology 1', () => {
-  test('the default view labels each sweep entry, the full view the summary; the default never read', async () => {
+// Greek exposure methodology v2: each sweep says its own calculation, in words; no method number, the default never read
+describe('U12: a compute run\'s exposure sweep states its own calculation', () => {
+  const cov = (included: number, total: number) => ({ status: included === total ? 'complete' : included === 0 ? 'unavailable' : 'partial', included, total });
+  const strikeCoverage = { gamma: cov(2, 2), delta: cov(2, 2), vega: cov(2, 2), vanna: cov(2, 2), charm: cov(2, 2), vomma: cov(2, 2) };
+  const reported = (value: number | null, included = 2, total = 2) => ({ ...cov(included, total), value });
+  const bookEntry = (over: Record<string, unknown> = {}) => ({
+    exposureCalculation: 'assumedDealerBook',
+    underlying: 'SPY',
+    reference: { kind: 'spot', price: 650 },
+    roll: { status: 'notApplicable', carry: null },
+    charmBasis: 'cash',
+    multipliers: [100],
+    scopeAsOf: 1774771450000,
+    timestamp: 1774771450000,
+    keyLevels: { regime: 'positive-gamma', callWall: 660, putWall: 640, gammaFlip: 648.25, gammaTilt: 1.5 },
+    totals: { gex: reported(123456789.123), vegaExposure: reported(2e7), vanna: reported(null, 0, 2), charmFlow: reported(-3e6), vomma: reported(4e4), putMinusCallDeltaBalance: reported(5e7) },
+    strikeCount: 1,
+    strikes: [{ strike: 650, callGamma: 2, putGamma: -1, gamma: 1, callDelta: -3, putDelta: 2, delta: -1, callVega: 4, putVega: 3, vega: 7, callVanna: null, putVanna: null, vanna: null, callCharm: -1, putCharm: 2, charm: 1, callVomma: 0.01, putVomma: 0.02, vomma: 0.03, coverage: { ...strikeCoverage, vanna: cov(0, 2) } }],
+    strikesTruncated: false,
+    ...over,
+  });
+
+  test('an earlier sweep: each entry and the run say earlierDealerHedging, with the dealer charm statement', async () => {
     const { handler, calls } = createHarness({ data: [makeRun(0)], count: 1 });
     const summary = JSON.parse((await handler({ limit: 1 })).content[0].text);
     const sweep = summary.data[0].exposureSweep;
     expect(Array.isArray(sweep) && sweep.length > 0).toBe(true);
-    expect(sweep.every((entry: any) => entry.methodology === 1)).toBe(true);
+    expect(sweep.every((entry: any) => entry.exposureCalculation === 'earlierDealerHedging' && entry.spot === 650 && !('methodology' in entry))).toBe(true);
     const full = JSON.parse((await handler({ limit: 1, full: true })).content[0].text);
-    expect(full.data[0].data.summary.exposureSweepMethodology).toBe(1);
-    // the platform default is never read: the sweep is methodology 1 whatever it is
+    expect(full.data[0].data.summary.exposureCalculation).toBe('earlierDealerHedging');
+    expect(full.data[0].data.summary.exposureSweepCharmConvention).toMatch(/^remaining-maturity sign, per calendar day/);
+    expect(full.data[0].data.summary).not.toHaveProperty('exposureSweepMethodology');
     expect(calls.map((c) => c.path)).not.toContain('/exposure/methodology');
+  });
+
+  test('a book sweep: each entry says assumedDealerBook with its reference, roll, charm basis and statement and the totals with their coverage', async () => {
+    const run = makeRun(0);
+    run.data.exposureSweep = [bookEntry()] as never;
+    const { handler } = createHarness({ data: [run], count: 1 });
+    const summary = JSON.parse((await handler({ limit: 1 })).content[0].text);
+    const [entry] = summary.data[0].exposureSweep;
+    expect(entry).toMatchObject({
+      exposureCalculation: 'assumedDealerBook', underlying: 'SPY', reference: { kind: 'spot', price: 650 }, roll: { status: 'notApplicable', carry: null },
+      charmBasis: 'cash', multipliers: [100], strikeCount: 1,
+      totals: { gex: { value: 123456789.12, status: 'complete', included: 2, total: 2 }, vanna: { value: null, status: 'unavailable', included: 0, total: 2 } },
+    });
+    expect(entry.charmConvention).toContain('holding a cash level fixed');
+    expect(entry).not.toHaveProperty('spot');
+    expect(entry).not.toHaveProperty('methodology');
+    const full = JSON.parse((await handler({ limit: 1, full: true })).content[0].text);
+    expect(full.data[0].data.summary.exposureCalculation).toBe('assumedDealerBook');
+    expect(full.data[0].data.summary).not.toHaveProperty('exposureSweepCharmConvention');
+    expect(full.data[0].data.exposureSweep[0].charmConvention).toContain('the calendar-day hedge flow of the assumed dealer book');
+    expect(JSON.stringify(summary.data[0].exposureSweep)).not.toMatch(/methodolog|\bv[12]\b/i);
+    expect(JSON.stringify(summary)).not.toMatch(/methodolog/i);
+  });
+
+  test('a summary-only book projection keeps its sweep without strikes; a mixed sweep is refused', async () => {
+    const summaryOnly = makeRun(0);
+    setSummaryOnlyProjectionFixture(summaryOnly);
+    const { strikes: _strikes, ...withoutStrikes } = bookEntry();
+    summaryOnly.data.exposureSweep = [{ ...withoutStrikes, strikesTruncated: true }] as never;
+    summaryOnly.data.projection.exposureTruncated = true;
+    const mixed = makeRun(1);
+    mixed.data.exposureSweep = [mixed.data.exposureSweep[0], bookEntry()] as never;
+    const { handler } = createHarness({ data: [summaryOnly, mixed], count: 2 });
+    const summary = JSON.parse((await handler({ limit: 2 })).content[0].text);
+    const keys = summary.data.map((row: any) => row.runKey ?? row.id);
+    expect(summary.data).toHaveLength(1);
+    expect(summary.data[0].exposureSweep[0]).toMatchObject({ exposureCalculation: 'assumedDealerBook', strikeCount: 1 });
+    expect(keys).toHaveLength(1);
+  });
+
+  test('a summary-only projection carrying an empty or an earlier sweep is refused', async () => {
+    const empty = makeRun(0);
+    setSummaryOnlyProjectionFixture(empty);
+    empty.data.exposureSweep = [];
+    empty.data.projection.exposureTruncated = true;
+    const earlier = makeRun(1);
+    setSummaryOnlyProjectionFixture(earlier);
+    earlier.data.exposureSweep = [makeRun(1).data.exposureSweep[0]];
+    earlier.data.projection.exposureTruncated = true;
+    const valid = makeRun(2);
+    setSummaryOnlyProjectionFixture(valid);
+    const { handler } = createHarness({ data: [empty, earlier, valid], count: 3 });
+    const summary = JSON.parse((await handler({ limit: 3 })).content[0].text);
+    expect(summary.data).toHaveLength(1);
+    expect(summary.data[0].exposureSweep).toBeUndefined();
+  });
+
+  test('a run with no sweep entry states neither calculation nor charm', async () => {
+    const run = makeRun(0);
+    run.data.exposureSweep = [];
+    const { handler } = createHarness({ data: [run], count: 1 });
+    const full = JSON.parse((await handler({ limit: 1, full: true })).content[0].text);
+    expect(full.data[0].data.summary).not.toHaveProperty('exposureCalculation');
+    expect(full.data[0].data.summary).not.toHaveProperty('exposureSweepCharmConvention');
+  });
+
+  // review r1: the scope instant and the timestamp are recorded apart (a calculation can finish across a close)
+  test('a compact book entry carries when its legs were scoped, apart from its timestamp', async () => {
+    const run = makeRun(0);
+    run.data.exposureSweep = [bookEntry({ scopeAsOf: 1774771400000, timestamp: 1774771450000 })] as never;
+    const { handler } = createHarness({ data: [run], count: 1 });
+    const [entry] = JSON.parse((await handler({ limit: 1 })).content[0].text).data[0].exposureSweep;
+    expect(entry).toMatchObject({ scopeAsOf: 1774771400000, scopeAt: '2026-03-29T08:03:20.000Z', timestamp: 1774771450000, at: '2026-03-29T08:04:10.000Z' });
+  });
+
+  // review r1 (the DEX exemption): the book stores DEX whatever its delta coverage; the compact view never reads it
+  test('an unavailable DEX has no value in the compact entry, its coverage kept', async () => {
+    const run = makeRun(0);
+    const entry = bookEntry();
+    run.data.exposureSweep = [{ ...entry, totals: { ...entry.totals, putMinusCallDeltaBalance: reported(0, 0, 2) } }] as never;
+    const { handler } = createHarness({ data: [run], count: 1 });
+    const [shaped] = JSON.parse((await handler({ limit: 1 })).content[0].text).data[0].exposureSweep;
+    expect(shaped.totals.putMinusCallDeltaBalance).toEqual({ value: null, status: 'unavailable', included: 0, total: 2 });
+  });
+
+  // review r1: a run past the size budget falls to the single-run floor, which kept no sweep at all
+  test('past the size budget, full mode keeps each sweep entry\'s compact summary and the run\'s statement', async () => {
+    const bookStrike = (strike: number) => ({ strike, callGamma: 2, putGamma: -1, gamma: 1, callDelta: -3, putDelta: 2, delta: -1, callVega: 4, putVega: 3, vega: 7, callVanna: 0.2, putVanna: 0.1, vanna: 0.3, callCharm: -1, putCharm: 2, charm: 1, callVomma: 0.01, putVomma: 0.02, vomma: 0.03, coverage: strikeCoverage });
+    const book = makeRun(0);
+    book.data.exposureSweep = [bookEntry({ strikeCount: 200, strikes: Array.from({ length: 200 }, (_, i) => bookStrike(500 + i)) })] as never;
+    const earlier = makeRun(0);
+    Object.assign(earlier.data.exposureSweep[0], { strikeCount: 200, aggregateByStrike: Array.from({ length: 200 }, (_, i) => ({ ...makeCurrentExposureStrike(), strike: 500 + i })) });
+
+    for (const [run, calculation] of [[book, 'assumedDealerBook'], [earlier, 'earlierDealerHedging']] as const) {
+      const { handler } = createHarness({ data: [run], count: 1 });
+      // the levels summary mode shows, every field
+      const summaryLevels = JSON.parse((await handler({ limit: 1 })).content[0].text).data[0].exposureSweep[0].levels;
+      expect(Object.keys(summaryLevels).sort()).toEqual(['callWall', 'gammaFlip', 'gammaTilt', 'putWall', 'regime']);
+      const full = JSON.parse((await handler({ limit: 1, full: true })).content[0].text);
+      expect(full.truncationMeta.singleRunCompacted).toBe(true);
+      const [entry] = full.data[0].exposureSweep;
+      expect(entry).toMatchObject({ exposureCalculation: calculation, underlying: 'SPY', strikeCount: 200 });
+      expect(entry.levels).toEqual(summaryLevels);
+      expect(entry.levels).toEqual(calculation === 'assumedDealerBook'
+        ? { regime: 'positive-gamma', callWall: 660, putWall: 640, gammaFlip: 648.25, gammaTilt: 1.5 }
+        : { regime: 'negative-gamma', callWall: 650, putWall: null, gammaFlip: 645.5, gammaTilt: null });
+      expect(entry).not.toHaveProperty('strikes');
+      expect(entry).not.toHaveProperty('aggregateByStrike');
+      expect(full.data[0].summary.exposureCalculation).toBe(calculation);
+      if (calculation === 'assumedDealerBook') {
+        expect(entry).toMatchObject({
+          reference: { kind: 'spot', price: 650 }, charmBasis: 'cash', scopeAsOf: 1774771450000,
+          totals: { gex: { value: 123456789.12, status: 'complete', included: 2, total: 2 }, vanna: { value: null, status: 'unavailable', included: 0, total: 2 } },
+        });
+        expect(entry.charmConvention).toContain('holding a cash level fixed');
+        expect(full.data[0].summary).not.toHaveProperty('exposureSweepCharmConvention');
+      } else {
+        expect(entry.spot).toBe(650);
+        expect(full.data[0].summary.exposureSweepCharmConvention).toMatch(/^remaining-maturity sign, per calendar day/);
+      }
+    }
   });
 });

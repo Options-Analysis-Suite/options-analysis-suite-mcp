@@ -23,17 +23,18 @@ describe('sortOptionsAnalyticsPoints', () => {
 });
 
 describe('summarizeOptionsAnalyticsHistory', () => {
-  test('builds a compact recent/trend summary for large histories', () => {
+  test('builds a compact recent/trend summary for large histories, its exposures the book\'s six numbers', () => {
+    // the rows as bookHistory leaves them: the net columns gone, the book's numbers in their place
     const payload = {
       symbol: 'SPY',
       interval: 'daily',
       count: 5,
       data: [
-        { date: '2026-01-02', spot_price: 101, atm_iv: 0.17, hv_20d: 0.12, put_call_ratio: 1.0, expected_move_pct: 0.035, iv_rank: 0.4, iv_percentile: 0.5, net_gex: 150, net_dex: 200, net_vex: 10, net_vanna: 75, net_charm: -60, net_vomma: 90, dividend_yield: 0.011, risk_free_rate: 0.043, max_pain: 99, term_structure_slope: 0.007, iv_skew_25d: 0.035, vwiv: 0.21 },
-        { date: '2026-01-05', spot_price: 105, atm_iv: 0.23, atm_iv_30d: 0.24, hv_20d: 0.15, put_call_ratio: 1.3, expected_move_pct: 0.05, iv_rank: 0.7, iv_percentile: 0.8, net_gex: 300, net_dex: -500, net_vex: 20, net_vanna: -180, net_charm: 110, net_vomma: 130, dividend_yield: 0.013, risk_free_rate: 0.045, max_pain: 100, term_structure_slope: 0.01, iv_skew_25d: 0.05, vwiv: 0.26 },
-        { date: '2026-01-01', spot_price: 100, atm_iv: 0.16, hv_20d: 0.11, put_call_ratio: 0.9, expected_move_pct: 0.03, iv_rank: 0.3, iv_percentile: 0.4, net_gex: -100, net_dex: 100, net_vex: -5, net_vanna: 50, net_charm: -40, net_vomma: 70, dividend_yield: 0.01, risk_free_rate: 0.042, max_pain: 98, term_structure_slope: 0.005, iv_skew_25d: 0.03, vwiv: 0.2 },
-        { date: '2026-01-04', spot_price: 104, atm_iv: 0.22, hv_20d: 0.14, put_call_ratio: 1.2, expected_move_pct: 0.045, iv_rank: 0.6, iv_percentile: 0.7, net_gex: -250, net_dex: -400, net_vex: 25, net_vanna: 160, net_charm: -95, net_vomma: 140, dividend_yield: 0.0125, risk_free_rate: 0.044, max_pain: 100, term_structure_slope: 0.009, iv_skew_25d: 0.045, vwiv: 0.24 },
-        { date: '2026-01-03', spot_price: 102, atm_iv: 0.19, atm_iv_30d: 0.18, hv_20d: 0.13, put_call_ratio: 1.1, expected_move_pct: 0.04, iv_rank: 0.5, iv_percentile: 0.6, net_gex: 200, net_dex: -300, net_vex: -15, net_vanna: -120, net_charm: 85, net_vomma: -100, dividend_yield: 0.0115, risk_free_rate: 0.0435, max_pain: 99, term_structure_slope: 0.008, iv_skew_25d: 0.04, vwiv: 0.22 },
+        { date: '2026-01-02', spot_price: 101, atm_iv: 0.17, hv_20d: 0.12, put_call_ratio: 1.0, expected_move_pct: 0.035, iv_rank: 0.4, iv_percentile: 0.5, gex: 150, putMinusCallDeltaBalance: 200, vegaExposure: 10, vanna: 75, charmFlow: -60, vomma: 90, dividend_yield: 0.011, risk_free_rate: 0.043, max_pain: 99, term_structure_slope: 0.007, iv_skew_25d: 0.035, vwiv: 0.21 },
+        { date: '2026-01-05', spot_price: 105, atm_iv: 0.23, atm_iv_30d: 0.24, hv_20d: 0.15, put_call_ratio: 1.3, expected_move_pct: 0.05, iv_rank: 0.7, iv_percentile: 0.8, gex: 300, putMinusCallDeltaBalance: -500, vegaExposure: 20, vanna: -180, charmFlow: 110, vomma: 130, dividend_yield: 0.013, risk_free_rate: 0.045, max_pain: 100, term_structure_slope: 0.01, iv_skew_25d: 0.05, vwiv: 0.26 },
+        { date: '2026-01-01', spot_price: 100, atm_iv: 0.16, hv_20d: 0.11, put_call_ratio: 0.9, expected_move_pct: 0.03, iv_rank: 0.3, iv_percentile: 0.4, gex: -100, putMinusCallDeltaBalance: 100, vegaExposure: -5, vanna: 50, charmFlow: -40, vomma: 70, dividend_yield: 0.01, risk_free_rate: 0.042, max_pain: 98, term_structure_slope: 0.005, iv_skew_25d: 0.03, vwiv: 0.2 },
+        { date: '2026-01-04', spot_price: 104, atm_iv: 0.22, hv_20d: 0.14, put_call_ratio: 1.2, expected_move_pct: 0.045, iv_rank: 0.6, iv_percentile: 0.7, gex: -250, putMinusCallDeltaBalance: -400, vegaExposure: 25, vanna: 160, charmFlow: -95, vomma: 140, dividend_yield: 0.0125, risk_free_rate: 0.044, max_pain: 100, term_structure_slope: 0.009, iv_skew_25d: 0.045, vwiv: 0.24 },
+        { date: '2026-01-03', spot_price: 102, atm_iv: 0.19, atm_iv_30d: 0.18, hv_20d: 0.13, put_call_ratio: 1.1, expected_move_pct: 0.04, iv_rank: 0.5, iv_percentile: 0.6, gex: 200, putMinusCallDeltaBalance: -300, vegaExposure: -15, vanna: -120, charmFlow: 85, vomma: -100, dividend_yield: 0.0115, risk_free_rate: 0.0435, max_pain: 99, term_structure_slope: 0.008, iv_skew_25d: 0.04, vwiv: 0.22 },
       ],
     };
 
@@ -59,12 +60,12 @@ describe('summarizeOptionsAnalyticsHistory', () => {
       iv_skew_25d: 0.05,
       vwiv: 0.26,
       risk_free_rate: 0.045,
-      net_gex: 300,
-      net_dex: -500,
-      net_vex: 20,
-      net_vanna: -180,
-      net_charm: 110,
-      net_vomma: 130,
+      gex: 300,
+      putMinusCallDeltaBalance: -500,
+      vegaExposure: 20,
+      vanna: -180,
+      charmFlow: 110,
+      vomma: 130,
     });
     expect(summary.summary).toEqual({
       avgAtmIv: 0.194,
@@ -80,13 +81,19 @@ describe('summarizeOptionsAnalyticsHistory', () => {
       spotChangePct: 5,
       latestIvRank: 0.7,
       latestIvPercentile: 0.8,
-      maxAbsNetGex: 300,
-      maxAbsNetDex: 500,
-      maxAbsNetVex: 25,
-      maxAbsNetVanna: 180,
-      maxAbsNetCharm: 110,
-      maxAbsNetVomma: 140,
+      maxAbsGex: 300,
+      maxAbsPutMinusCallDeltaBalance: 500,
+      maxAbsVegaExposure: 25,
+      maxAbsVanna: 180,
+      maxAbsCharmFlow: 110,
+      maxAbsVomma: 140,
+      exposurePoints: { total: 5, partial: 0, qualified: 0, unavailable: 0 },
     });
+    // no net column or net extreme reaches any point or the summary
+    for (const point of [summary.latest, summary.earliest, ...summary.data, ...summary.trendSample]) {
+      expect(Object.keys(point).filter((key) => key.startsWith('net_'))).toEqual([]);
+    }
+    expect(Object.keys(summary.summary).filter((key) => key.startsWith('maxAbsNet'))).toEqual([]);
     expect(summary.data.map((point: any) => point.date)).toEqual([
       '2026-01-05',
       '2026-01-04',

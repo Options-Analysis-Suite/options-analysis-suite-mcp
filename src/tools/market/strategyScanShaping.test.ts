@@ -601,18 +601,26 @@ describe('unknown values and the final fit', () => {
   });
 });
 
-describe('the scan\'s levels are methodology 1\'s', () => {
-  it('labels its levels and states it once in the description; the default never applies', async () => {
-    expect((summarizeStrategyScan(scan()).levels as any).methodology).toBe(1);
+describe('the scan\'s levels carry no method label and its text names no calculation', () => {
+  it('sends its levels unlabeled and states what they are once, at the end of the description', async () => {
+    const shaped = summarizeStrategyScan(scan());
+    expect(shaped.levels).not.toHaveProperty('methodology');
+    expect(JSON.stringify(shaped)).not.toMatch(/[Mm]ethodolog|\bv2\b|V2/);
     const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
     const { register } = await import('./strategyScan.js');
     const { STRATEGY_LEVELS_METHODOLOGY } = await import('./strategyScanShaping.js');
     let description = '';
+    const params: Record<string, string> = {};
     const calls: string[] = [];
-    register({ registerTool: (_n: string, config: { description: string }) => { description = config.description; } } as unknown as InstanceType<typeof McpServer>,
+    register({ registerTool: (_n: string, config: { description: string; inputSchema: Record<string, { description?: string }> }) => {
+      description = config.description;
+      for (const [name, schema] of Object.entries(config.inputSchema)) params[name] = String(schema.description ?? '');
+    } } as unknown as InstanceType<typeof McpServer>,
       { get: async (path: string) => { calls.push(path); return {}; } } as any);
     expect(description.endsWith(STRATEGY_LEVELS_METHODOLOGY)).toBe(true);
-    expect(STRATEGY_LEVELS_METHODOLOGY).toMatch(/methodology 2 keeps their definitions and computes none, so the platform's default exposure methodology does not change them/);
+    expect(STRATEGY_LEVELS_METHODOLOGY).toBe('`levels` are the gamma-derived levels (gammaFlip, callWall, putWall, gammaMagnet, dealerRegime), none derived from the assumed dealer book.');
+    expect(description).not.toMatch(/[Mm]ethodolog|\bv2\b|V2/);
+    for (const [name, text] of Object.entries(params)) expect(text, name).not.toMatch(/[Mm]ethodolog|\bv2\b|V2/);
     expect(calls).toHaveLength(0);
   });
 });

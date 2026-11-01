@@ -11,14 +11,16 @@ import { register, SCREENER_IDS } from './screeners.js';
  */
 type ToolHandler = (args: Record<string, unknown>) => Promise<{ isError?: boolean; content: Array<{ type: 'text'; text: string }> }>;
 
+/** The proxy's book envelope (proxy/routes/scanner.ts v2Answer): what a screen asked for the book must carry */
+const BOOK_ENVELOPE = { methodology: 2, exposure: { view: 'assumedDealerBook', p: 1, expiryScope: 'eod-session-1', expirations: 'all' } };
+
 function createHarness(stubResponse: unknown = { data: [], metric: 'stub', currentDate: '2026-04-18' }) {
   const proxyCalls: Array<{ path: string; params?: Record<string, string> }> = [];
   const fakeClient: ProxyClient = {
     get: async (path: string, params?: Record<string, string>) => {
-      // the platform default, methodology 1 as today; not a screener read
-      if (path === '/exposure/methodology') return { defaultMethodology: 1, stale: false };
       proxyCalls.push({ path, params });
-      return stubResponse;
+      // a screen with exposure figures asks for the book; its answer carries the envelope
+      return params?.exposure === 'v2' && stubResponse && typeof stubResponse === 'object' ? { ...BOOK_ENVELOPE, ...stubResponse } : stubResponse;
     },
     post: async () => ({}),
   } as unknown as ProxyClient;
@@ -62,8 +64,8 @@ describe('run_screener — main tab routing with view', () => {
     expect(call.params?.index).toBe('all');
   });
 
-  test('passes view=contract through for main tabs', async () => {
-    const call = await run({ screener: 'gex', view: 'contract' });
+  test('passes view=contract through for the main tabs with a contract view (the gex screen\'s is refused, below)', async () => {
+    const call = await run({ screener: 'most-active', view: 'contract' });
     expect(call.params?.type).toBe('contract');
   });
 
@@ -387,6 +389,15 @@ describe('run_screener - a partial screener answer', () => {
     expect(parsed.partialNote).toMatch(/regime labels could not be read/);
   });
 
+  // A shown book column whose read failed is marked by the proxy's transport name, exposureV2
+  test('an unread book column is named `exposures` with what is missing, and no method is named', async () => {
+    const { out, text } = await callScreener(() => ({ ...BOOK_ENVELOPE, type: 'ticker', data: [{ symbol: 'SPY', volume: 10 }], partial: true, unavailable: ['tickerTypes', 'exposureV2'] }), { screener: 'most-active' });
+    expect(out).toMatchObject({ partial: true, unavailable: ['tickerTypes', 'exposures'] });
+    expect(out.partialNote).toContain('The book\'s exposure figures could not be read, so the exposure columns are missing, not zero.');
+    expect(out.partialNote).toMatch(/asset type of each row could not be read/);
+    expect(text).not.toMatch(/exposureV2|[Mm]ethodolog|\bv2\b|V2/);
+  });
+
   test('a whole answer carries no partial note (the control)', async () => {
     const harness = createHarness({ metric: 'highest-vrp', data: [{ symbol: 'SPY', type: 'ETF' }] });
     const parsed = JSON.parse((await harness.handler({ screener: 'vrp', side: 'high' }) as any).content[0].text);
@@ -395,23 +406,20 @@ describe('run_screener - a partial screener answer', () => {
 });
 
 // ---------------------------------------------------------------------------------------------------------------
-// Greek exposure methodology v2: the screens with
-// exposure figures take a methodology, labeled; methodology 2 is U8's `exposure=v2`, its envelope checked.
+// Greek exposure methodology v2: the screens with exposure
+// figures answer the assumed dealer book, U8's book route (its transport query `exposure`), its envelope checked;
+// nothing names a calculation. Through the registered tool (the server's own call path).
 
-async function callScreener(answer: (path: string, params?: Record<string, string>) => unknown, args: Record<string, unknown>, defaultAnswer: unknown = { defaultMethodology: 1, stale: false }) {
+async function callScreener(answer: (path: string, params?: Record<string, string>) => unknown, args: Record<string, unknown>) {
   const calls: Array<{ path: string; params?: Record<string, string> }> = [];
-  const server = new McpServer({ name: 'screener-u10-test', version: '1' });
+  const server = new McpServer({ name: 'screener-u12-test', version: '1' });
   register(server, {
     get: async (path: string, params?: Record<string, string>) => {
       calls.push({ path, params });
-      if (path === '/exposure/methodology') {
-        if (defaultAnswer instanceof Error) throw defaultAnswer;
-        return defaultAnswer;
-      }
       return structuredClone(answer(path, params));
     },
   } as unknown as ProxyClient);
-  const client = new Client({ name: 'screener-u10-reader', version: '1' });
+  const client = new Client({ name: 'screener-u12-reader', version: '1' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   try {
@@ -419,99 +427,86 @@ async function callScreener(answer: (path: string, params?: Record<string, strin
     const text = (result.content as Array<{ type: string; text: string }>)[0].text;
     let out: Record<string, any> = {};
     try { out = JSON.parse(text); } catch { /* an error's text */ }
-    return { isError: result.isError === true, text, out, calls, routeCalls: calls.filter((c) => c.path !== '/exposure/methodology') };
+    const listed = (await client.listTools()).tools.find((t) => t.name === 'run_screener')!;
+    return { isError: result.isError === true, text, out, calls, listed };
   } finally {
     await client.close();
     await server.close();
   }
 }
 
-const V2_ENVELOPE = { methodology: 2, exposure: { view: 'assumedDealerBook', p: 1, expiryScope: 'eod-session-1', expirations: 'all' } };
 const gexTickerRows = [{ symbol: 'SPY', netGex: -13845258254.49, exposureStatus: { netGex: 'complete' }, spotPrice: 671.2 }];
 const contractRows = [{ symbol: 'SPY261120C00700000', volume: 12000, openInterest: 50000, netGex: 123456, gamma: 0.01 }];
+/** No answer names a calculation: no label key, and no method word in any text */
+const NO_LABEL_KEYS = ['methodology', 'methodologySource', 'methodologyStale', 'methodologyNote', 'exposuresWithheld'];
+const METHOD_WORDS = /[Mm]ethodolog|\bv2\b|V2/;
+const EXPOSURE_SCREENS: Array<[Record<string, unknown>, string]> = [
+  [{ screener: 'gex' }, '/scanner/gex'],
+  [{ screener: 'most-active' }, '/scanner/most-active'],
+  [{ screener: 'highest-oi' }, '/scanner/high-oi'],
+  [{ screener: 'highest-iv' }, '/scanner/high-iv'],
+  [{ screener: 'unusual' }, '/scanner/unusual'],
+  [{ screener: 'dod-change', metric: 'gex' }, '/scanner/changes/gex'],
+  [{ screener: 'delta-exposure' }, '/scanner/delta-exposure-leaders'],
+  [{ screener: 'vega-exposure' }, '/scanner/vega-exposure-leaders'],
+  [{ screener: 'max-pain', mode: 'pinning' }, '/scanner/max-pain-pinning'],
+];
 
-describe('run_screener by methodology', () => {
-  test('methodology 1 by default: the legacy route, its rows as they came, labeled', async () => {
-    const { out, routeCalls } = await callScreener(() => ({ type: 'ticker', data: [{ symbol: 'SPY', netGex: 1.5e9 }] }), { screener: 'gex' });
-    expect(routeCalls[0].params).not.toHaveProperty('exposure');
-    expect(out).toMatchObject({ methodology: 1, methodologySource: 'default', data: [{ symbol: 'SPY', netGex: 1.5e9 }] });
-    expect(out).not.toHaveProperty('methodologyNote');
-  });
-
-  test.each([
-    [{ screener: 'gex' }, '/scanner/gex'],
-    [{ screener: 'most-active' }, '/scanner/most-active'],
-    [{ screener: 'highest-oi' }, '/scanner/high-oi'],
-    [{ screener: 'highest-iv' }, '/scanner/high-iv'],
-    [{ screener: 'unusual' }, '/scanner/unusual'],
-    [{ screener: 'dod-change', metric: 'gex' }, '/scanner/changes/gex'],
-    [{ screener: 'delta-exposure' }, '/scanner/delta-exposure-leaders'],
-    [{ screener: 'vega-exposure' }, '/scanner/vega-exposure-leaders'],
-    [{ screener: 'max-pain', mode: 'pinning' }, '/scanner/max-pain-pinning'],
-  ])('methodology 2 asks %o for exposure=v2 at %s, checks its envelope and keeps the definition off the wire', async (args, path) => {
-    const { out, text, routeCalls } = await callScreener(() => ({ ...V2_ENVELOPE, data: gexTickerRows, excluded: { unpublished: 3, partial: 1, unavailable: 0, qualified: 0 } }), { ...args, methodology: 2 });
-    expect(routeCalls[0]).toMatchObject({ path, params: { exposure: 'v2' } });
-    expect(out).toMatchObject({ methodology: 2, methodologySource: 'requested', excluded: { unpublished: 3, partial: 1 } });
-    expect(out).not.toHaveProperty('exposure');
+describe('run_screener on the assumed dealer book', () => {
+  test.each(EXPOSURE_SCREENS)('%o asks %s for the book, checks its envelope and keeps the definition and its calculation off the wire', async (args, path) => {
+    const { out, text, calls } = await callScreener(() => ({ ...BOOK_ENVELOPE, data: gexTickerRows, excluded: { unpublished: 3, partial: 1, unavailable: 0, qualified: 0 } }), args);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ path, params: { exposure: 'v2' } });
+    expect(out).toMatchObject({ excluded: { unpublished: 3, partial: 1 } });
+    for (const key of [...NO_LABEL_KEYS, 'exposure']) expect(out, key).not.toHaveProperty(key);
     expect(text).not.toMatch(/eod-session-1|assumedDealerBook/);
-    expect(out.methodologyNote).toMatch(/^Methodology 2: every exposure figure is the assumed dealer book/);
-    // The complete-book rule is the exposure rankings', and transient names no one cause
-    expect(out.methodologyNote).toMatch(/A ranking BY an exposure figure .* takes only complete books whose expiry scope is proven/);
-    expect(out.methodologyNote).toMatch(/the volume, open-interest, IV and unusual tabs keep their own rankings and show each row's GEX as it stands/);
-    expect(out.methodologyNote).toMatch(/transient: part of the answer may still change \(it was not cached\), so a later call can differ\./);
-    expect(out.methodologyNote).not.toMatch(/a newer session is still being published/);
-    expect(out.methodologyNote).toMatch(/over every expiration after the session where the expiry rule is proven \(a figure whose exposureStatus says qualified may count contracts expiring that session\)/);
-    expect(out.methodologyNote).toMatch(/qualified: its expiry scope is not proven/);
+    expect(text).not.toMatch(METHOD_WORDS);
+    expect(out.bookNote).toMatch(/^Every exposure figure is the assumed dealer book - dealers long the calls and short the puts, every contract of open interest \(share 1\)/);
+    // review r1: the complete-book rule is the exposure rankings', and transient names no one cause
+    expect(out.bookNote).toMatch(/A ranking BY an exposure figure .* takes only complete books whose expiry scope is proven/);
+    expect(out.bookNote).toMatch(/the volume, open-interest, IV and unusual tabs keep their own rankings and show each row's GEX as it stands/);
+    expect(out.bookNote).toMatch(/transient: part of the answer may still change \(it was not cached\), so a later call can differ\./);
+    expect(out.bookNote).toMatch(/over every expiration after the session where the expiry rule is proven \(a figure whose exposureStatus says qualified may count contracts expiring that session\)/);
+    expect(out.bookNote).toMatch(/qualified: its expiry scope is not proven/);
+    expect(out.bookNote).toMatch(/The row names follow the book: netGex its GEX \(USD of delta per 1% move\), netDex the put-minus-call delta balance/);
     expect(out.data[0]).toEqual({ symbol: 'SPY', netGex: -13845258254.49, exposureStatus: { netGex: 'complete' }, spotPrice: 671.2 });
   });
 
-  test('a methodology-2 answer that does not say so is refused, never relabeled', async () => {
+  test('an answer that does not carry the book is refused, never relabeled', async () => {
     for (const body of [
       { data: gexTickerRows },
-      { methodology: 1, exposure: V2_ENVELOPE.exposure, data: gexTickerRows },
-      { methodology: 2, exposure: { ...V2_ENVELOPE.exposure, view: 'longOi' }, data: gexTickerRows },
-      { methodology: 2, exposure: { ...V2_ENVELOPE.exposure, p: 0.85 }, data: gexTickerRows },
+      { methodology: 1, exposure: BOOK_ENVELOPE.exposure, data: gexTickerRows },
+      { methodology: 2, exposure: { ...BOOK_ENVELOPE.exposure, view: 'longOi' }, data: gexTickerRows },
+      { methodology: 2, exposure: { ...BOOK_ENVELOPE.exposure, p: 0.85 }, data: gexTickerRows },
     ]) {
-      const { isError, text } = await callScreener(() => body, { screener: 'gex', methodology: 2 });
+      const { isError, text } = await callScreener(() => body, { screener: 'gex' });
       expect(isError).toBe(true);
-      expect(text).toMatch(/UPSTREAM_INVALID|did not say it was one/);
+      expect(text).toMatch(/UPSTREAM_INVALID/);
+      expect(text).toMatch(/The answer did not carry the assumed dealer book, so it was not used\./);
+      expect(text).not.toMatch(METHOD_WORDS);
     }
   });
 
   test('the vega leaders\' charm basis reads as prose', async () => {
     const rows = [{ symbol: 'SPX', netVex: -1, charmBasis: 'fixedReference' }, { symbol: 'AAPL', netVex: 2, charmBasis: 'cash' }];
-    const { out } = await callScreener(() => ({ ...V2_ENVELOPE, data: rows }), { screener: 'vega-exposure', methodology: 2 });
+    const { out } = await callScreener(() => ({ ...BOOK_ENVELOPE, data: rows }), { screener: 'vega-exposure' });
     expect(out.data.map((r: any) => r.charmBasis)).toEqual(['fixed reference', 'cash']);
   });
 
-  test('under 2 the gex contract view is refused before any read; the other tabs\' contract rows lose their GEX', async () => {
-    const refused = await callScreener(() => ({ data: contractRows }), { screener: 'gex', view: 'contract', methodology: 2 });
+  test('the gex contract view is refused before any read; the other tabs\' contract rows lose their GEX, always', async () => {
+    const refused = await callScreener(() => ({ data: contractRows }), { screener: 'gex', view: 'contract' });
     expect(refused.isError).toBe(true);
-    expect(refused.text).toMatch(/Contract-level GEX is not published under methodology 2/);
-    expect(refused.routeCalls).toHaveLength(0);
+    expect(refused.text).toMatch(/Contract-level GEX is not published, so the gex screen's contract view has no ranking: use view=ticker\./);
+    expect(refused.text).not.toMatch(METHOD_WORDS);
+    expect(refused.calls).toHaveLength(0);
     for (const screener of ['most-active', 'highest-oi', 'highest-iv', 'unusual']) {
-      const { out, routeCalls } = await callScreener(() => ({ type: 'contract', data: contractRows }), { screener, view: 'contract', methodology: 2 });
-      expect(routeCalls[0].params).not.toHaveProperty('exposure');
-      expect(out).toMatchObject({ methodology: 2, methodologySource: 'requested', methodologyNote: 'Contract-level GEX is not published under methodology 2, so the contract rows carry no netGex.' });
+      const { out, text, calls } = await callScreener(() => ({ type: 'contract', data: contractRows }), { screener, view: 'contract' });
+      expect(calls[0].params).not.toHaveProperty('exposure');
+      expect(out.bookNote).toBe('Contract-level GEX is not published, so the contract rows carry no netGex.');
       expect(out.data[0]).toEqual({ symbol: 'SPY261120C00700000', volume: 12000, openInterest: 50000, gamma: 0.01 });
+      for (const key of NO_LABEL_KEYS) expect(out, key).not.toHaveProperty(key);
+      expect(text).not.toMatch(METHOD_WORDS);
     }
-    // under 1 the contract rows keep the legacy figure, labeled
-    const v1 = await callScreener(() => ({ type: 'contract', data: contractRows }), { screener: 'most-active', view: 'contract' });
-    expect(v1.out).toMatchObject({ methodology: 1, data: [{ netGex: 123456 }] });
-  });
-
-  test('an unreadable default: a ranking by exposure refuses retryably, a shown column is withheld, never guessed', async () => {
-    for (const args of [{ screener: 'gex' }, { screener: 'dod-change', metric: 'gex' }, { screener: 'vega-exposure' }, { screener: 'max-pain', mode: 'pinning' }, { screener: 'gex', view: 'contract' }]) {
-      const { isError, text, routeCalls } = await callScreener(() => ({ data: gexTickerRows }), args, new Error('HTTP 503'));
-      expect(isError).toBe(true);
-      expect(text).toMatch(/default exposure methodology could not be read/);
-      expect(text).toMatch(/This may be retried/);
-      expect(routeCalls).toHaveLength(0);
-    }
-    const shown = await callScreener(() => ({ type: 'ticker', data: [{ symbol: 'SPY', volume: 5, netGex: 9, gammaConcentration: 0.2 }] }), { screener: 'most-active' }, new Error('HTTP 503'));
-    expect(shown.out.exposuresWithheld).toMatch(/could not be read/);
-    expect(shown.out.data[0]).toEqual({ symbol: 'SPY', volume: 5 });
-    expect(shown.out).not.toHaveProperty('methodology');
   });
 
   test.each([
@@ -522,12 +517,23 @@ describe('run_screener by methodology', () => {
     [{ screener: 'max-pain', mode: 'divergence' }],
     [{ screener: 'unusual-directional', side: 'put' }],
     [{ screener: 'earnings-calendar' }],
-  ])('%o carries no exposure figure: no default read, no exposure=v2, no label, named or not', async (args) => {
-    for (const named of [{}, { methodology: 2 }]) {
-      const { out, calls } = await callScreener(() => ({ data: [{ symbol: 'SPY' }] }), { ...args, ...named });
-      expect(calls.map((c) => c.path)).not.toContain('/exposure/methodology');
-      expect(calls[0].params).not.toHaveProperty('exposure');
-      expect(out).not.toHaveProperty('methodology');
+  ])('%o carries no exposure figure: no book asked, no note, no label', async (args) => {
+    const { out, calls } = await callScreener(() => ({ data: [{ symbol: 'SPY' }] }), args);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].params).not.toHaveProperty('exposure');
+    for (const key of [...NO_LABEL_KEYS, 'bookNote']) expect(out, key).not.toHaveProperty(key);
+  });
+
+  test('no screen reads a platform default, and the tool\'s description and parameters name no calculation', async () => {
+    const screens: Array<Record<string, unknown>> = [...EXPOSURE_SCREENS.map(([args]) => args), { screener: 'gex', view: 'contract' }, { screener: 'most-active', view: 'contract' }, { screener: 'vrp', side: 'low' }];
+    for (const args of screens) {
+      const { calls } = await callScreener((_path, params) => (params?.exposure === 'v2' ? { ...BOOK_ENVELOPE, data: gexTickerRows } : { data: contractRows }), args);
+      expect(calls.map((c) => c.path), JSON.stringify(args)).not.toContain('/exposure/methodology');
     }
+    const { listed } = await callScreener(() => ({ data: [] }), { screener: 'vrp', side: 'high' });
+    const properties = (listed.inputSchema.properties ?? {}) as Record<string, { description?: string }>;
+    expect(Object.keys(properties)).not.toContain('methodology');
+    expect(String(listed.description)).not.toMatch(METHOD_WORDS);
+    for (const [name, property] of Object.entries(properties)) expect(String(property.description ?? ''), name).not.toMatch(METHOD_WORDS);
   });
 });

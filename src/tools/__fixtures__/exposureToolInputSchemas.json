@@ -1,0 +1,389 @@
+{
+  "get_dealer_positioning": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "properties": {
+      "date": {
+        "description": "Session date in YYYY-MM-DD. Defaults to the most recent session on file, whatever its date; read `date` in the result. Accepted from 1990-01-01 to one day past the current UTC date, the proxy's window, which moves forward with the date: a later weekday date is rejected as INVALID_REQUEST until the window reaches it, marked retryable with the UTC day it can be asked for from, and a later weekend date keeps the rejection as final, since it is never a session. The equity import is scheduled for 01:00 US Eastern the next day, retried in half-hour steps to about 06:00 and later when it has days to catch up, and usually lands about 02:30 (02:31 to 02:34 for every session from 2026-09-08 to 09-17); the newest on file can be older when an import is late. A not-found for a weekday date inside the window is marked retryable until 09:30 US Eastern on the following calendar day, this tool's cutoff, not a producer deadline (the producer has none); a market holiday, a futures contract or a name with no near-term options stays not-found, and the date alone cannot tell those apart. After the cutoff the answer says retrying will not succeed: that is the proxy's flag for a row absent on the normal schedule, not a promise that the file can never arrive, since a session whose import or exposure computation failed can appear after a later successful import or repair, and nothing here says whether one is coming.",
+        "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+        "type": "string"
+      },
+      "strikeLimit": {
+        "description": "Contributing strikes to return, in stored order. Default 10, which is all the snapshot keeps.",
+        "maximum": 10,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "symbol": {
+        "description": "Ticker symbol (e.g., AAPL, SPY)",
+        "type": "string"
+      }
+    },
+    "required": [
+      "symbol"
+    ],
+    "type": "object"
+  },
+  "get_live_dealer_positioning": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "properties": {
+      "expiration": {
+        "description": "One expiration in YYYY-MM-DD to compute over instead of the default window (the nearest four that may still trade), for example the same-day expiration, before or after its close; it can be named while the broker still lists it, and the list is cached 15 minutes, so for that long after the listing ends. It must be one the broker lists: otherwise the refusal names the listed ones and never substitutes the nearest. A value not written YYYY-MM-DD is refused by this tool's input check before any request, and a well-formed date that is not a calendar date (2026-02-30) by the proxy as INVALID_EXPIRATION, before anything is charged.",
+        "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+        "type": "string"
+      },
+      "provider": {
+        "description": "Which stored broker credential to use. Defaults to the first one stored, in the order Tradier, tastytrade, Public, Schwab, moomoo.",
+        "enum": [
+          "tradier",
+          "tastytrade",
+          "public",
+          "schwab",
+          "moomoo"
+        ],
+        "type": "string"
+      },
+      "q": {
+        "description": "Dividend yield to price with, as a decimal fraction (0.012 is 1.2%), from 0 to 1, used as given instead of the resolved one and never checked against the market; `resolved.q.source` is then \"supplied\" with no date, and r is resolved as usual. An index's resolved yield is its basket-derived estimate (`resolved.q.source` \"index_constituents\"); a volatility index such as VIX has none, and an index whose estimate is unavailable has none either, so a call on one needs this: without it the call is refused (RESOLUTION_FAILED, naming what is missing) before the session opens and before anything is charged. A value outside that range is refused by this tool's input check before any request.",
+        "maximum": 1,
+        "minimum": 0,
+        "type": "number"
+      },
+      "r": {
+        "description": "Risk-free rate to price with, as a decimal fraction (0.0425 is 4.25%), from -0.1 to 1, used as given instead of the resolved one and never checked against the market; `resolved.r.source` is then \"supplied\" with no date, and q is resolved as usual. A value outside that range is refused by this tool's input check before any request.",
+        "maximum": 1,
+        "minimum": -0.1,
+        "type": "number"
+      },
+      "strikeRange": {
+        "description": "TOTAL per-strike rows nearest spot, the cap when `strikeWindowPct` or `strikeWindowDelta` is given. Default 10 (150 with either), max 150. Totals use all supported legs in the selected expirations regardless of this display limit; metric statuses identify partial coverage.",
+        "maximum": 150,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "strikeWindowDelta": {
+        "description": "Return every strike inside a delta band instead of a fixed count, nearest spot first up to `strikeRange`: 0.1 keeps the strikes from the 10-delta put to the 10-delta call, a call delta from 0.1 to 0.9 or a put delta from -0.9 to -0.1, ends included. The deltas are the broker's per-contract deltas; either leg qualifies a strike on its own, and a missing one is never derived from the other, so a strike with no usable delta on either leg is outside. Over several expirations a strike qualifies when at least one of them prices it inside the band, so the farthest expiration, whose deltas sit nearest 0.5, usually sets how far out the band reaches. Strictly between 0 and 0.5. It takes the place of `strikeWindowPct`, and passing both is refused before any request.",
+        "exclusiveMaximum": 0.5,
+        "exclusiveMinimum": 0,
+        "type": "number"
+      },
+      "strikeWindowPct": {
+        "description": "Return every strike within this percent of spot instead of a fixed count, nearest first up to `strikeRange` (for example 10 for strikes within 10% of spot); above 0, at most 50. With no spot price from the broker no percent window is applied: the rows are then the first strikes in strike order up to the cap, and the answer says so.",
+        "exclusiveMinimum": 0,
+        "maximum": 50,
+        "type": "number"
+      },
+      "symbol": {
+        "description": "Ticker symbol (e.g., AAPL, SPY, MU)",
+        "type": "string"
+      }
+    },
+    "required": [
+      "symbol"
+    ],
+    "type": "object"
+  },
+  "get_options_analytics_history": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "properties": {
+      "days": {
+        "default": 30,
+        "description": "Days of history (default 30). Ignored if from/to are provided.",
+        "maximum": 5000,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "from": {
+        "description": "Start date (YYYY-MM-DD). Overrides days parameter.",
+        "type": "string"
+      },
+      "full": {
+        "description": "Return the raw row shape instead of the compact summary. Windows of 90 rows or fewer are already raw, so it changes nothing there; use it with narrow explicit ranges. Still subject to the MCP response budget.",
+        "type": "boolean"
+      },
+      "interval": {
+        "default": "daily",
+        "description": "Sampling interval (default daily)",
+        "enum": [
+          "daily",
+          "weekly",
+          "biweekly",
+          "monthly"
+        ],
+        "type": "string"
+      },
+      "symbol": {
+        "description": "Ticker symbol (e.g., AAPL, SPY)",
+        "type": "string"
+      },
+      "to": {
+        "description": "End date (YYYY-MM-DD). Overrides days parameter.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "symbol"
+    ],
+    "type": "object"
+  },
+  "get_options_snapshot": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "properties": {
+      "curveLimit": {
+        "description": "Rows kept per curve, centred on spot. Default 12.",
+        "maximum": 40,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "curves": {
+        "description": "Which per-strike curves to summarize. Single-symbol only; ignored for a multi-symbol request.",
+        "items": {
+          "enum": [
+            "maxPain",
+            "gex",
+            "dex",
+            "skew"
+          ],
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "order": {
+        "description": "With rankBy: largest first (desc, default) or smallest first (asc).",
+        "enum": [
+          "asc",
+          "desc"
+        ],
+        "type": "string"
+      },
+      "rankBy": {
+        "description": "Multi-symbol only: sort the comparison by this metric (ivRank, ivPercentile, atmIv, ivMinusHv20d, ivMinusHv60d, hv20d, hv60d, expectedMove30dFraction, netGex, netDex, ivSkew25d, putCallRatio, totalOi, totalVolume). A symbol without the metric sorts last and is counted in rankMeta. Absent keeps the order asked for.",
+        "enum": [
+          "ivRank",
+          "ivPercentile",
+          "atmIv",
+          "ivMinusHv20d",
+          "ivMinusHv60d",
+          "hv20d",
+          "hv60d",
+          "expectedMove30dFraction",
+          "netGex",
+          "netDex",
+          "ivSkew25d",
+          "putCallRatio",
+          "totalOi",
+          "totalVolume"
+        ],
+        "type": "string"
+      },
+      "symbols": {
+        "description": "One ticker for the full snapshot, or a comma-separated list (up to 50) for a headline-metrics comparison.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "symbols"
+    ],
+    "type": "object"
+  },
+  "get_regime": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "properties": {
+      "date": {
+        "description": "Specific date (YYYY-MM-DD). For scope=market: default is latest; with a date, that day's daily row only. For scope=intraday: overrides `days`. Not used by scope=symbol. Not supported on volatility, sectors and cot, which answer the newest data on file and say so in `dateNote`.",
+        "type": "string"
+      },
+      "days": {
+        "description": "For scope=sectors with `group`: calendar days of the group's daily history, back from the current UTC date (default 30, max 90). For scope=symbol: the newest N stored sessions, not calendar days (default 1 = the latest, max 30). For scope=intraday: calendar days back from the current UTC date, the cutoff day included, so 1 returns the previous UTC day and the current one; at midnight UTC (7 PM EST, 8 PM EDT) the cutoff advances one calendar date, and weekends and holidays are not skipped, so a window can cover days with no session and return no rows (default 5, max 90); use `date` for one session.",
+        "maximum": 90,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "exchange": {
+        "description": "For scope=sectors only: keep one exchange.",
+        "enum": [
+          "NYSE",
+          "NASDAQ",
+          "AMEX"
+        ],
+        "type": "string"
+      },
+      "full": {
+        "description": "For scope=symbol only. Default false. With `days` 1, true keeps the `history` wrapper around the one entry instead of flattening it to the top level; with `days` above 1 it returns the same entries as the default (the same exposures, model coverage and top strikes), so it changes nothing there.",
+        "type": "boolean"
+      },
+      "group": {
+        "description": "For scope=sectors only: one sector or industry by name, any case (e.g. Technology, Semiconductors), returned with its daily history over `days` on each exchange the group is listed on.",
+        "maxLength": 120,
+        "minLength": 1,
+        "type": "string"
+      },
+      "include_symbols": {
+        "description": "For scope=market only: also return per-symbol daily rows, each tier sorted by absolute stress score and capped at the top 8, for a question needing individual symbols' regimes; the composite's own label, score, confidence and drivers come without it. Default false.",
+        "type": "boolean"
+      },
+      "interval": {
+        "description": "For scope=intraday only: filter to open | morning | midday | afternoon | pre-close.",
+        "type": "string"
+      },
+      "kind": {
+        "description": "For scope=sectors only: sector (default) or industry groups.",
+        "enum": [
+          "sector",
+          "industry"
+        ],
+        "type": "string"
+      },
+      "migration": {
+        "description": "For scope=intraday only: add each scan's `migration`, the change in its gamma flip, call wall, put wall, gamma magnet and net gamma since the previous scan with exposures (direction, change, percent of spot, per hour). Default false.",
+        "type": "boolean"
+      },
+      "scope": {
+        "description": "Which regime view to fetch: market, symbol, intraday, volatility, sectors or cot. A parameter that belongs to another scope is ignored; each one names its scope.",
+        "enum": [
+          "market",
+          "symbol",
+          "intraday",
+          "volatility",
+          "sectors",
+          "cot"
+        ],
+        "type": "string"
+      },
+      "sector": {
+        "description": "For scope=cot without a symbol only: keep one sector.",
+        "enum": [
+          "equity-index",
+          "rates",
+          "fx",
+          "crypto",
+          "volatility",
+          "energy",
+          "metals",
+          "grains",
+          "livestock"
+        ],
+        "type": "string"
+      },
+      "symbol": {
+        "description": "Required for scope=symbol or scope=intraday. For scope=cot: a futures ticker or root (e.g. /ESZ6, ES, MES); omit for every market.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "scope"
+    ],
+    "type": "object"
+  },
+  "run_screener": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "properties": {
+      "days": {
+        "description": "For market-trends: history length in days (1..730). For earnings-calendar: forward window size in days (1..90, default 14). Earnings-calendar enforces the 90-day cap at runtime.",
+        "maximum": 730,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "direction": {
+        "description": "Optional direction filter for dod-change on gex/iv/put-call metrics.",
+        "enum": [
+          "all",
+          "up",
+          "down"
+        ],
+        "type": "string"
+      },
+      "index": {
+        "description": "Index bucket for main-tab screeners. Default all.",
+        "enum": [
+          "all",
+          "sp500",
+          "sp400",
+          "sp600",
+          "etf"
+        ],
+        "type": "string"
+      },
+      "limit": {
+        "default": 15,
+        "description": "Max rows (default 15, cap 100).",
+        "maximum": 100,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "metric": {
+        "description": "Required for dod-change: which day-over-day metric to rank by.",
+        "enum": [
+          "gex",
+          "iv",
+          "put-call",
+          "skew",
+          "regime"
+        ],
+        "type": "string"
+      },
+      "mode": {
+        "description": "Required for max-pain.",
+        "enum": [
+          "pinning",
+          "divergence"
+        ],
+        "type": "string"
+      },
+      "screener": {
+        "description": "Which screener to run.",
+        "enum": [
+          "most-active",
+          "highest-oi",
+          "highest-iv",
+          "unusual",
+          "gex",
+          "model-divergence",
+          "regime-stress",
+          "term-backwardation",
+          "put-skew",
+          "delta-exposure",
+          "vega-exposure",
+          "pre-earnings-iv",
+          "dod-change",
+          "vrp",
+          "max-pain",
+          "unusual-directional",
+          "market-trends",
+          "earnings-calendar"
+        ],
+        "type": "string"
+      },
+      "side": {
+        "description": "Required for vrp (high|low) and unusual-directional (call|put).",
+        "enum": [
+          "high",
+          "low",
+          "call",
+          "put"
+        ],
+        "type": "string"
+      },
+      "symbol": {
+        "description": "Only for earnings-calendar: filter to a single ticker.",
+        "type": "string"
+      },
+      "threshold": {
+        "description": "Only for unusual: min volume-to-open-interest ratio. Default 1.0.",
+        "minimum": 0,
+        "type": "number"
+      },
+      "view": {
+        "description": "Only for most-active/highest-oi/highest-iv/unusual/gex. Default ticker.",
+        "enum": [
+          "ticker",
+          "contract"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "screener"
+    ],
+    "type": "object"
+  }
+}
